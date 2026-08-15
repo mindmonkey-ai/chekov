@@ -1,6 +1,8 @@
-//! `models.toml` registry (§4.3 of the bootstrap prompt): defaults + per-model
-//! tables, where flag arrays CONCATENATE (defaults first, then `extra_flags`)
-//! rather than replace. `deny_unknown_fields` everywhere (§C.7).
+//! `models.toml` registry (§4.3 of the bootstrap prompt).
+//!
+//! Defaults + per-model tables, where flag arrays CONCATENATE (defaults
+//! first, then `extra_flags`) rather than replace. `deny_unknown_fields`
+//! everywhere (§C.7).
 //!
 //! TOML ordering note: `active` is a top-level key and therefore serialized
 //! before the `[defaults]` table — top-level keys after a table header would
@@ -82,38 +84,72 @@ impl Registry {
     /// Load from `path`; a missing file is an empty registry, a malformed one
     /// is `RegistryCorrupt` (§C.2 — never silently reset).
     pub fn load(path: &Path) -> Result<Self, ChekovError> {
-        let _ = path;
-        todo!("cycle 2 red")
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| ChekovError::io(format!("reading {}", path.display()), e))?;
+        toml::from_str(&text).map_err(|e| ChekovError::RegistryCorrupt {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })
     }
 
     /// Atomic save: write `<path>.tmp`, then rename over `path`.
     pub fn save(&self, path: &Path) -> Result<(), ChekovError> {
-        let _ = path;
-        todo!("cycle 2 red")
+        let text = toml::to_string_pretty(self).map_err(|e| ChekovError::RegistryCorrupt {
+            path: path.to_path_buf(),
+            reason: format!("serialization failed: {e}"),
+        })?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text)
+            .map_err(|e| ChekovError::io(format!("writing {}", tmp.display()), e))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| ChekovError::io(format!("renaming {} into place", tmp.display()), e))
     }
 
     /// Resolve a model's effective config: defaults ⊕ model entry, flags
     /// concatenated (defaults first, then `extra_flags`).
     pub fn effective(&self, name: &str) -> Result<Effective, ChekovError> {
-        let _ = name;
-        todo!("cycle 2 red")
+        let entry = self
+            .models
+            .get(name)
+            .ok_or_else(|| ChekovError::UnknownModel { name: name.into() })?;
+        let mut flags = self.defaults.flags.clone();
+        flags.extend(entry.extra_flags.iter().cloned());
+        Ok(Effective {
+            name: name.to_owned(),
+            ctx_size: entry.ctx_size.unwrap_or(self.defaults.ctx_size),
+            flags,
+            entry: entry.clone(),
+        })
     }
 
     /// The active model's name, or a loud error naming `chekov use`.
     pub fn active_name(&self) -> Result<&str, ChekovError> {
-        todo!("cycle 2 red")
+        self.active.as_deref().ok_or(ChekovError::NoActiveModel)
     }
 
     /// Set the active model; the name must be registered.
     pub fn set_active(&mut self, name: &str) -> Result<(), ChekovError> {
-        let _ = name;
-        todo!("cycle 2 red")
+        if !self.models.contains_key(name) {
+            return Err(ChekovError::UnknownModel { name: name.into() });
+        }
+        self.active = Some(name.to_owned());
+        Ok(())
     }
 
     /// Remove a model; refuses to remove the active one.
     pub fn remove(&mut self, name: &str) -> Result<ModelEntry, ChekovError> {
-        let _ = name;
-        todo!("cycle 2 red")
+        if self.active.as_deref() == Some(name) {
+            return Err(ChekovError::RemovalRefused {
+                name: name.into(),
+                reason: "it is the active model".into(),
+            });
+        }
+        self.models
+            .remove(name)
+            .ok_or_else(|| ChekovError::UnknownModel { name: name.into() })
     }
 }
 
@@ -185,8 +221,14 @@ mod tests {
         reg.models.insert("m".into(), sample_entry());
         let eff = reg.effective("m").expect("registered");
         let flags = eff.flags.join(" ");
-        assert!(flags.starts_with("--jinja --flash-attn on"), "defaults not first: {flags}");
-        assert!(flags.ends_with("--reasoning-format none"), "extras not appended: {flags}");
+        assert!(
+            flags.starts_with("--jinja --flash-attn on"),
+            "defaults not first: {flags}"
+        );
+        assert!(
+            flags.ends_with("--reasoning-format none"),
+            "extras not appended: {flags}"
+        );
     }
 
     #[test]
@@ -213,7 +255,10 @@ mod tests {
         let mut reg = Registry::default();
         reg.models.insert("m".into(), sample_entry());
         reg.active = Some("m".into());
-        let msg = reg.remove("m").expect_err("active is protected").to_string();
+        let msg = reg
+            .remove("m")
+            .expect_err("active is protected")
+            .to_string();
         assert!(msg.contains("chekov use"), "no remediation in: {msg}");
     }
 }

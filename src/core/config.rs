@@ -84,8 +84,21 @@ pub struct Config {
 impl Config {
     /// Load `<root>/config.toml` (defaults when absent, loud when invalid).
     pub fn load(root: &Path) -> Result<Self, ChekovError> {
-        let _ = root;
-        todo!("cycle 2 red")
+        let path = root.join("config.toml");
+        let file = if path.exists() {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| ChekovError::io(format!("reading {}", path.display()), e))?;
+            toml::from_str(&text).map_err(|e| ChekovError::ConfigInvalid {
+                path: path.clone(),
+                reason: e.to_string(),
+            })?
+        } else {
+            FileConfig::default()
+        };
+        Ok(Self {
+            root: root.to_path_buf(),
+            file,
+        })
     }
 
     #[must_use]
@@ -121,15 +134,17 @@ impl Config {
     /// `http://host:port` — the base every probe and integration derives from.
     #[must_use]
     pub fn base_url(&self) -> String {
-        todo!("cycle 2 red")
+        format!("http://{}:{}", self.file.server.host, self.file.server.port)
     }
 }
 
 /// Root directory: `$CHEKOV_HOME` when set, else `~/personal_dev/chekov`.
 #[must_use]
 pub fn resolve_root(env_home: Option<&str>, user_home: &Path) -> PathBuf {
-    let _ = (env_home, user_home);
-    todo!("cycle 2 red")
+    env_home.map_or_else(
+        || user_home.join("personal_dev").join("chekov"),
+        PathBuf::from,
+    )
 }
 
 #[cfg(test)]
