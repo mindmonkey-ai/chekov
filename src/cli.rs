@@ -21,19 +21,33 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
+    /// Start llama-server for a model (foreground unless --daemon)
     Run(commands::run::RunCmd),
+    /// Stop the running server (SIGTERM, then SIGKILL after 20s)
     Stop(commands::stop::StopCmd),
+    /// Stop (if running) then start --daemon; swaps models in one motion
     Restart(commands::restart::RestartCmd),
+    /// Show server state, model, revision, uptime, wired limit
     Status(commands::status::StatusCmd),
+    /// Download and register a model: org/repo[:QUANT][@rev]
     Pull(commands::pull::PullCmd),
+    /// List registered models
     List(commands::list::ListCmd),
+    /// Set the active model
     Use(commands::use_::UseCmd),
+    /// Remove a model and its files (refuses active/running)
     Rm(commands::rm::RmCmd),
+    /// Print the resolved server invocation and license provenance
     Show(commands::show::ShowCmd),
+    /// Run the five health checks against the live server
     Doctor(commands::doctor::DoctorCmd),
+    /// Build llama.cpp (Metal) and verify the environment
     Setup(commands::setup::SetupCmd),
+    /// Update the engine and/or re-resolve the active model
     Update(commands::update::UpdateCmd),
+    /// Print ANTHROPIC_* exports for the local server (stdout only)
     Env(commands::env::EnvCmd),
+    /// Wire up Hermes or Claude Code against the local server
     Integrate(commands::integrate::IntegrateCmd),
     /// Emit shell completions (used by `make install`).
     #[command(hide = true)]
