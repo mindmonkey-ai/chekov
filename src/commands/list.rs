@@ -14,28 +14,74 @@ pub struct ListCmd {}
 /// Rows for the list table. Pure over the registry + a disk-size probe.
 #[must_use]
 pub fn list_rows(reg: &Registry, root: &Path) -> Vec<Vec<String>> {
-    let _ = (reg, root);
-    todo!("cycle 5a red")
+    reg.models
+        .iter()
+        .map(|(name, entry)| {
+            let marker = if reg.active.as_deref() == Some(name) {
+                "*"
+            } else {
+                ""
+            };
+            vec![
+                marker.to_owned(),
+                name.clone(),
+                entry.quant.clone(),
+                human_bytes(dir_size(&root.join(&entry.path))),
+                entry.revision.chars().take(12).collect(),
+            ]
+        })
+        .collect()
 }
 
 /// Recursive on-disk size of a model directory (0 when absent).
 #[must_use]
 pub fn dir_size(path: &Path) -> u64 {
-    let _ = path;
-    todo!("cycle 5a red")
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let child = entry.path();
+            if child.is_dir() {
+                dir_size(&child)
+            } else {
+                entry.metadata().map_or(0, |m| m.len())
+            }
+        })
+        .sum()
 }
 
 /// `163_840` bytes → `160.0 KiB`-style human form.
+// Display-only conversion; precision loss past 2^53 bytes is irrelevant here.
+#[allow(clippy::cast_precision_loss)]
 #[must_use]
 pub fn human_bytes(bytes: u64) -> String {
-    let _ = bytes;
-    todo!("cycle 5a red")
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < 4 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", ["KiB", "MiB", "GiB", "TiB"][unit - 1])
 }
 
 impl Command for ListCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
-        let _ = ctx;
-        todo!("cycle 5a red")
+        let reg = ctx.registry()?;
+        if reg.models.is_empty() {
+            println!("no models registered — add one with `chekov pull <org/repo:QUANT>`");
+            return Ok(ExitCode::SUCCESS);
+        }
+        let rows = list_rows(&reg, &ctx.config.root);
+        println!(
+            "{}",
+            super::render_table(&["", "NAME", "QUANT", "SIZE", "REVISION"], &rows)
+        );
+        Ok(ExitCode::SUCCESS)
     }
 }
 
@@ -88,6 +134,9 @@ mod tests {
         let rows = list_rows(&reg, &root);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].contains(&"0123456789ab".to_owned()), "{rows:?}");
-        assert!(rows[0].iter().any(|c| c.contains('*')), "no active marker: {rows:?}");
+        assert!(
+            rows[0].iter().any(|c| c.contains('*')),
+            "no active marker: {rows:?}"
+        );
     }
 }

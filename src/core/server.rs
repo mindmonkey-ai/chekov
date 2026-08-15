@@ -116,6 +116,43 @@ pub fn shard_path(cfg: &Config, eff: &Effective) -> PathBuf {
     cfg.root.join(&eff.entry.path).join(&eff.entry.first_shard)
 }
 
+fn run_state_path(cfg: &Config) -> PathBuf {
+    cfg.logs_dir().join("chekov.model")
+}
+
+/// Record which model the daemon is serving (read by status/rm).
+pub fn write_run_state(cfg: &Config, name: &str) -> Result<(), ChekovError> {
+    let path = run_state_path(cfg);
+    std::fs::write(&path, format!("{name}\n"))
+        .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))
+}
+
+/// The model recorded as running, when a live server exists.
+#[must_use]
+pub fn read_run_state(cfg: &Config) -> Option<String> {
+    let name = std::fs::read_to_string(run_state_path(cfg)).ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// Remove the run-state marker (with the pidfile, on stop).
+pub fn clear_run_state(cfg: &Config) -> Result<(), ChekovError> {
+    let path = run_state_path(cfg);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| ChekovError::io(format!("removing {}", path.display()), e))?;
+    }
+    Ok(())
+}
+
+/// The live server's pid, if the pidfile names a running process.
+#[must_use]
+pub fn live_pid(cfg: &Config) -> Option<i32> {
+    PidFile::new(cfg.pidfile())
+        .read()
+        .filter(|&pid| process_alive(pid))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

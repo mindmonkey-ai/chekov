@@ -47,13 +47,12 @@ impl HttpClient for UreqClient {
         if let Some(token) = &req.bearer {
             builder = builder.header("Authorization", &format!("Bearer {token}"));
         }
-        let mut response =
-            builder
-                .send(&req.body)
-                .map_err(|e| ChekovError::EndpointDown {
-                    url: req.url.clone(),
-                    reason: e.to_string(),
-                })?;
+        let mut response = builder
+            .send(&req.body)
+            .map_err(|e| ChekovError::EndpointDown {
+                url: req.url.clone(),
+                reason: e.to_string(),
+            })?;
         response
             .body_mut()
             .read_to_string()

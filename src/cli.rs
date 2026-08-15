@@ -9,7 +9,11 @@ use crate::commands::{self, Command as _, Ctx};
 use crate::error::ChekovError;
 
 #[derive(Debug, Parser)]
-#[command(name = "chekov", version, about = "Local llama.cpp inference stack manager")]
+#[command(
+    name = "chekov",
+    version,
+    about = "Local llama.cpp inference stack manager"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -87,8 +91,8 @@ mod tests {
     fn parses_use_and_daemon_run() {
         let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "use", "m"]).expect("parse");
         assert!(matches!(cli.cmd, Cmd::Use(ref c) if c.name == "m"));
-        let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "run", "--daemon"])
-            .expect("parse");
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["chekov", "run", "--daemon"]).expect("parse");
         assert!(matches!(cli.cmd, Cmd::Run(ref c) if c.daemon && c.name.is_none()));
     }
 

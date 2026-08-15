@@ -14,7 +14,13 @@ pub struct UseCmd {
 
 impl Command for UseCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
-        let _ = ctx;
-        todo!("cycle 5a red")
+        let mut reg = ctx.registry()?;
+        reg.set_active(&self.name)?;
+        reg.save(&ctx.config.registry_path())?;
+        println!("active model is now '{}'", self.name);
+        if crate::core::server::live_pid(&ctx.config).is_some() {
+            println!("a server is still running the previous model — apply with `chekov restart`");
+        }
+        Ok(ExitCode::SUCCESS)
     }
 }

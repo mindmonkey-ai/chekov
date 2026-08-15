@@ -1,6 +1,8 @@
-//! `chekov pull <spec>` (§4.2): resolve revision, download quant-matching
-//! files, snapshot the license, register with defaults-seeded flags.
-//! Idempotent; a new revision never repoints (that is `update`'s job).
+//! `chekov pull <spec>` (§4.2).
+//!
+//! Resolve revision, download quant-matching files, snapshot the license,
+//! register with defaults-seeded flags. Idempotent; a new revision never
+//! repoints (that is `update`'s job).
 
 use std::process::ExitCode;
 

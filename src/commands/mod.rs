@@ -59,8 +59,29 @@ pub trait Command {
 /// Minimal aligned-columns table (hand-rolled instead of `tabled` — §9).
 #[must_use]
 pub fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
-    let _ = (headers, rows);
-    todo!("cycle 5a red")
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate().take(widths.len()) {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+    let fmt_row = |cells: &[&str]| -> String {
+        cells
+            .iter()
+            .zip(&widths)
+            .map(|(cell, w)| format!("{cell:<w$}"))
+            .collect::<Vec<_>>()
+            .join("  ")
+            .trim_end()
+            .to_owned()
+    };
+    let mut out = fmt_row(headers);
+    for row in rows {
+        let cells: Vec<&str> = row.iter().map(String::as_str).collect();
+        out.push('\n');
+        out.push_str(&fmt_row(&cells));
+    }
+    out
 }
 
 /// Interactive yes/no gate for destructive actions; `assume_yes` skips it.
