@@ -27,12 +27,61 @@ impl EngineStep {
     }
 }
 
+/// Clone on first contact, fast-forward pull thereafter.
+fn git_step(engine_dir: &Path) -> EngineStep {
+    let dir = engine_dir.display().to_string();
+    if engine_dir.join(".git").exists() {
+        EngineStep {
+            desc: "update llama.cpp checkout".into(),
+            program: "git".into(),
+            args: ["-C", &dir, "pull", "--ff-only"].map(String::from).to_vec(),
+            cwd: None,
+        }
+    } else {
+        EngineStep {
+            desc: "clone llama.cpp".into(),
+            program: "git".into(),
+            args: ["clone", LLAMA_CPP_GIT, &dir].map(String::from).to_vec(),
+            cwd: None,
+        }
+    }
+}
+
 /// The steps to bring the engine to a built state: clone (first time) or
 /// pull (thereafter), cmake configure with Metal, cmake build the targets.
 #[must_use]
 pub fn setup_steps(engine_dir: &Path) -> Vec<EngineStep> {
-    let _ = engine_dir;
-    todo!("cycle 4 red")
+    let dir = engine_dir.display().to_string();
+    let build = engine_dir.join("build").display().to_string();
+    let configure = EngineStep {
+        desc: "configure cmake (Metal)".into(),
+        program: "cmake".into(),
+        args: [
+            "-S",
+            &dir,
+            "-B",
+            &build,
+            "-DGGML_METAL=ON",
+            "-DCMAKE_BUILD_TYPE=Release",
+        ]
+        .map(String::from)
+        .to_vec(),
+        cwd: None,
+    };
+    let mut build_args = ["--build", &build, "--config", "Release", "-j"]
+        .map(String::from)
+        .to_vec();
+    for target in BUILD_TARGETS {
+        build_args.push("--target".into());
+        build_args.push(target.into());
+    }
+    let compile = EngineStep {
+        desc: "build llama.cpp targets".into(),
+        program: "cmake".into(),
+        args: build_args,
+        cwd: None,
+    };
+    vec![git_step(engine_dir), configure, compile]
 }
 
 /// Where the built server binary lands.
@@ -104,8 +153,14 @@ mod tests {
         let steps = setup_steps(&dir);
         let rendered: Vec<String> = steps.iter().map(super::EngineStep::render).collect();
         assert!(rendered[0].starts_with("git clone"), "{rendered:?}");
-        assert!(rendered.iter().any(|s| s.contains("-DGGML_METAL=ON")), "{rendered:?}");
-        assert!(rendered.iter().any(|s| s.contains("llama-gguf-split")), "{rendered:?}");
+        assert!(
+            rendered.iter().any(|s| s.contains("-DGGML_METAL=ON")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|s| s.contains("llama-gguf-split")),
+            "{rendered:?}"
+        );
     }
 
     #[test]

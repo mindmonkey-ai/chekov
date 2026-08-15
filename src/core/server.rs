@@ -25,7 +25,7 @@ pub enum StopOutcome {
 
 impl PidFile {
     #[must_use]
-    pub fn new(path: PathBuf) -> Self {
+    pub const fn new(path: PathBuf) -> Self {
         Self { path }
     }
 
@@ -38,39 +38,76 @@ impl PidFile {
     /// (treated as stale, never trusted).
     #[must_use]
     pub fn read(&self) -> Option<i32> {
-        todo!("cycle 4 red")
+        std::fs::read_to_string(&self.path)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
     }
 
     pub fn write(&self, pid: i32) -> Result<(), ChekovError> {
-        let _ = pid;
-        todo!("cycle 4 red")
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ChekovError::io(format!("creating {}", parent.display()), e))?;
+        }
+        std::fs::write(&self.path, format!("{pid}\n"))
+            .map_err(|e| ChekovError::io(format!("writing {}", self.path.display()), e))
     }
 
     pub fn remove(&self) -> Result<(), ChekovError> {
-        todo!("cycle 4 red")
+        if self.path.exists() {
+            std::fs::remove_file(&self.path)
+                .map_err(|e| ChekovError::io(format!("removing {}", self.path.display()), e))?;
+        }
+        Ok(())
     }
 }
 
 /// True when `pid` names a live process (signal-0 probe).
 #[must_use]
 pub fn process_alive(pid: i32) -> bool {
-    let _ = pid;
-    todo!("cycle 4 red")
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
 /// SIGTERM, wait up to `grace`, then SIGKILL with a warning to stderr.
 pub fn stop_pid(pid: i32, grace: Duration) -> Result<StopOutcome, ChekovError> {
-    let _ = (pid, grace);
-    todo!("cycle 4 red")
+    use nix::sys::signal::{Signal, kill};
+    let target = nix::unistd::Pid::from_raw(pid);
+    if kill(target, Signal::SIGTERM).is_err() {
+        return Ok(StopOutcome::Terminated); // already gone
+    }
+    let deadline = std::time::Instant::now() + grace;
+    while std::time::Instant::now() < deadline {
+        if !process_alive(pid) {
+            return Ok(StopOutcome::Terminated);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eprintln!("warning: pid {pid} ignored SIGTERM for {grace:?} — escalating to SIGKILL");
+    let _ = kill(target, Signal::SIGKILL);
+    Ok(StopOutcome::Killed)
 }
 
-/// The fully resolved llama-server argv (minus the program itself) — what
-/// `chekov show` prints and `chekov run` executes. Flag order: shard, ctx,
-/// host/port/api-key, then registry flags (defaults ++ extra, §4.3).
+/// The fully resolved llama-server argv (minus the program itself).
+///
+/// What `chekov show` prints and `chekov run` executes. Flag order: shard,
+/// ctx, host/port/api-key, then registry flags (defaults ++ extra, §4.3).
 #[must_use]
 pub fn launch_args(cfg: &Config, eff: &Effective) -> Vec<String> {
-    let _ = (cfg, eff);
-    todo!("cycle 4 red")
+    let mut args = vec![
+        "-m".to_owned(),
+        shard_path(cfg, eff).display().to_string(),
+        "--ctx-size".to_owned(),
+        eff.ctx_size.to_string(),
+        "--host".to_owned(),
+        cfg.file.server.host.clone(),
+        "--port".to_owned(),
+        cfg.file.server.port.to_string(),
+        "--api-key".to_owned(),
+        cfg.file.server.api_key.clone(),
+    ];
+    args.extend(eff.flags.iter().cloned());
+    args
 }
 
 /// Absolute path to the model's first shard.
@@ -131,7 +168,16 @@ mod tests {
     fn liveness_probe_sees_self_not_ghost() {
         let own = i32::try_from(std::process::id()).expect("pid fits");
         assert!(process_alive(own));
-        assert!(!process_alive(99_999_999_i32.min(i32::MAX)));
+        assert!(!process_alive(99_999_999));
+    }
+
+    /// Reap `child` in the background so it never lingers as a zombie —
+    /// `kill(pid, 0)` reports zombies as alive, which would defeat the poll.
+    fn reap(child: std::process::Child) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        })
     }
 
     #[test]
@@ -141,8 +187,10 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = i32::try_from(child.id()).expect("pid fits");
+        let reaper = reap(child);
         let outcome = stop_pid(pid, Duration::from_secs(5)).expect("stop");
         assert_eq!(outcome, StopOutcome::Terminated);
+        reaper.join().expect("reaper");
     }
 
     #[test]
@@ -153,15 +201,20 @@ mod tests {
             .expect("spawn trap");
         let pid = i32::try_from(child.id()).expect("pid fits");
         std::thread::sleep(Duration::from_millis(200)); // let the trap install
+        let reaper = reap(child);
         let outcome = stop_pid(pid, Duration::from_millis(400)).expect("stop");
         assert_eq!(outcome, StopOutcome::Killed);
+        reaper.join().expect("reaper");
     }
 
     #[test]
     fn launch_args_resolve_shard_ctx_and_concatenated_flags() {
         let (cfg, eff) = effective();
         let args = launch_args(&cfg, &eff).join(" ");
-        assert!(args.contains("models/m@abc/m-Q8_0.gguf"), "shard missing: {args}");
+        assert!(
+            args.contains("models/m@abc/m-Q8_0.gguf"),
+            "shard missing: {args}"
+        );
         assert!(args.contains("--ctx-size 98304"), "ctx missing: {args}");
         assert!(args.contains("--port 8080"), "port missing: {args}");
         let jinja = args.find("--jinja").expect("default flag");
