@@ -147,6 +147,7 @@ pub fn current_provider(existing: &str) -> Option<String> {
 }
 
 /// The cclocal launcher script. Pure so tests pin the contract.
+///
 /// The env eval is guarded: if `chekov env` fails (not installed, no active
 /// model), the launcher aborts instead of silently running against the cloud.
 #[must_use]
