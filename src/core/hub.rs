@@ -216,11 +216,15 @@ pub fn adoption_candidates(
     repo: &str,
     rfilename: &str,
 ) -> Vec<std::path::PathBuf> {
-    let _ = (model_loc, repo, rfilename);
-    todo!("model-loc red")
+    let repo_tail = repo.split_once('/').map_or(repo, |(_, tail)| tail);
+    vec![
+        model_loc.join(repo_tail).join(rfilename),
+        model_loc.join(rfilename),
+    ]
 }
 
 /// Hard-link `src` to `dest` after verifying its size against `expected`.
+///
 /// `Ok(true)` = linked; `Ok(false)` = size mismatch, caller must download
 /// instead (loudly — a truncated shard is never adopted silently).
 pub fn link_verified(
@@ -228,8 +232,21 @@ pub fn link_verified(
     dest: &std::path::Path,
     expected: Option<u64>,
 ) -> Result<bool, ChekovError> {
-    let _ = (src, dest, expected);
-    todo!("model-loc red")
+    let meta = std::fs::metadata(src)
+        .map_err(|e| ChekovError::io(format!("inspecting {}", src.display()), e))?;
+    if expected != Some(meta.len()) {
+        return Ok(false);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ChekovError::io(format!("creating {}", parent.display()), e))?;
+    }
+    // Same-volume hard link is instant and free; copy is the cross-volume
+    // fallback. Either way the source stays untouched.
+    std::fs::hard_link(src, dest)
+        .or_else(|_| std::fs::copy(src, dest).map(|_| ()))
+        .map_err(|e| ChekovError::io(format!("linking {}", src.display()), e))?;
+    Ok(true)
 }
 
 /// Download every planned file into the model directory, revision-pinned.
@@ -255,7 +272,10 @@ pub fn download_plan(spec: &DownloadSpec<'_>, plan: &PullPlan) -> Result<(), Che
             continue;
         }
         if try_adopt(spec, file)? {
-            println!("{} adopted from local copy (size verified, hard link)", file.path);
+            println!(
+                "{} adopted from local copy (size verified, hard link)",
+                file.path
+            );
             continue;
         }
         println!("downloading {} …", file.path);

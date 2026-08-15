@@ -54,8 +54,10 @@ impl NewModel {
     /// via `root.join(path)`, which passes absolute paths through unchanged.
     #[must_use]
     pub fn registry_path(&self) -> String {
-        let _ = &self.location;
-        todo!("model-loc red")
+        self.location.as_ref().map_or_else(
+            || format!("models/{}", self.dir_name()),
+            |loc| loc.join(self.dir_name()).display().to_string(),
+        )
     }
 
     /// The registry entry this pull produces (`hermes_ok` seeded true; flags
@@ -149,7 +151,11 @@ fn print_plan(model: &NewModel, plan: &crate::core::hub::PullPlan) {
     );
     println!("[dry-run] destination: {}", model.registry_path());
     for file in &plan.files {
-        println!("[dry-run]   {} ({} bytes)", file.path, file.size.unwrap_or(0));
+        println!(
+            "[dry-run]   {} ({} bytes)",
+            file.path,
+            file.size.unwrap_or(0)
+        );
     }
     println!("[dry-run] first shard: {}", plan.first_shard);
     println!(

@@ -72,11 +72,14 @@ pub fn parse_sysctl_mb(output: &str) -> Option<u64> {
 }
 
 /// A raw sysctl value of 0 means "unset — macOS system default", which is
-/// ~75% of physical RAM, NOT zero. Returns (effective MB, is_system_default).
+/// ~75% of physical RAM, NOT zero. Returns (effective MB, `is_system_default`).
 #[must_use]
-pub fn effective_wired_mb(raw: u64, memsize_bytes: u64) -> (u64, bool) {
-    let _ = (raw, memsize_bytes);
-    todo!("model-loc red")
+pub const fn effective_wired_mb(raw: u64, memsize_bytes: u64) -> (u64, bool) {
+    if raw == 0 {
+        (memsize_bytes / 4 * 3 / (1024 * 1024), true)
+    } else {
+        (raw, false)
+    }
 }
 
 /// Read the live GPU wired limit (macOS), resolving the 0-means-default
