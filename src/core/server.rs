@@ -1,0 +1,171 @@
+//! llama-server lifecycle: pidfile, launch arguments, signal escalation.
+//!
+//! State lives in a typed `PidFile` (§13.4/§C.4); every failure is a typed
+//! `Result` (§C.2). No async runtime — blocking waits with a deadline.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::core::config::Config;
+use crate::core::registry::Effective;
+use crate::error::ChekovError;
+
+/// The pidfile at `logs/chekov.pid` — presence + liveness defines "running".
+#[derive(Debug, Clone)]
+pub struct PidFile {
+    path: PathBuf,
+}
+
+/// How a stop ended: clean SIGTERM exit, or SIGKILL escalation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopOutcome {
+    Terminated,
+    Killed,
+}
+
+impl PidFile {
+    #[must_use]
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The recorded pid, if the file exists and parses. Garbage → `None`
+    /// (treated as stale, never trusted).
+    #[must_use]
+    pub fn read(&self) -> Option<i32> {
+        todo!("cycle 4 red")
+    }
+
+    pub fn write(&self, pid: i32) -> Result<(), ChekovError> {
+        let _ = pid;
+        todo!("cycle 4 red")
+    }
+
+    pub fn remove(&self) -> Result<(), ChekovError> {
+        todo!("cycle 4 red")
+    }
+}
+
+/// True when `pid` names a live process (signal-0 probe).
+#[must_use]
+pub fn process_alive(pid: i32) -> bool {
+    let _ = pid;
+    todo!("cycle 4 red")
+}
+
+/// SIGTERM, wait up to `grace`, then SIGKILL with a warning to stderr.
+pub fn stop_pid(pid: i32, grace: Duration) -> Result<StopOutcome, ChekovError> {
+    let _ = (pid, grace);
+    todo!("cycle 4 red")
+}
+
+/// The fully resolved llama-server argv (minus the program itself) — what
+/// `chekov show` prints and `chekov run` executes. Flag order: shard, ctx,
+/// host/port/api-key, then registry flags (defaults ++ extra, §4.3).
+#[must_use]
+pub fn launch_args(cfg: &Config, eff: &Effective) -> Vec<String> {
+    let _ = (cfg, eff);
+    todo!("cycle 4 red")
+}
+
+/// Absolute path to the model's first shard.
+#[must_use]
+pub fn shard_path(cfg: &Config, eff: &Effective) -> PathBuf {
+    cfg.root.join(&eff.entry.path).join(&eff.entry.first_shard)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{PidFile, StopOutcome, launch_args, process_alive, stop_pid};
+    use crate::core::config::Config;
+    use crate::core::registry::{ModelEntry, Registry};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("chekov-test-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn effective() -> (Config, crate::core::registry::Effective) {
+        let root = scratch("srv-args");
+        let cfg = Config::load(&root).expect("defaults");
+        let mut reg = Registry::default();
+        reg.models.insert(
+            "m".into(),
+            ModelEntry {
+                repo: "org/repo".into(),
+                quant: "Q8_0".into(),
+                revision: "abc".into(),
+                path: "models/m@abc".into(),
+                first_shard: "m-Q8_0.gguf".into(),
+                hermes_ok: false,
+                ctx_size: None,
+                extra_flags: vec!["--temp".into(), "1.0".into()],
+            },
+        );
+        (cfg, reg.effective("m").expect("registered"))
+    }
+
+    #[test]
+    fn pidfile_roundtrips_and_rejects_garbage() {
+        let dir = scratch("srv-pidfile");
+        let pf = PidFile::new(dir.join("chekov.pid"));
+        assert_eq!(pf.read(), None);
+        pf.write(4242).expect("write");
+        assert_eq!(pf.read(), Some(4242));
+        std::fs::write(pf.path(), "not-a-pid").expect("corrupt");
+        assert_eq!(pf.read(), None);
+        pf.remove().expect("remove");
+        assert_eq!(pf.read(), None);
+    }
+
+    #[test]
+    fn liveness_probe_sees_self_not_ghost() {
+        let own = i32::try_from(std::process::id()).expect("pid fits");
+        assert!(process_alive(own));
+        assert!(!process_alive(99_999_999_i32.min(i32::MAX)));
+    }
+
+    #[test]
+    fn stop_terminates_a_cooperative_process() {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = i32::try_from(child.id()).expect("pid fits");
+        let outcome = stop_pid(pid, Duration::from_secs(5)).expect("stop");
+        assert_eq!(outcome, StopOutcome::Terminated);
+    }
+
+    #[test]
+    fn stop_escalates_when_sigterm_is_ignored() {
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .spawn()
+            .expect("spawn trap");
+        let pid = i32::try_from(child.id()).expect("pid fits");
+        std::thread::sleep(Duration::from_millis(200)); // let the trap install
+        let outcome = stop_pid(pid, Duration::from_millis(400)).expect("stop");
+        assert_eq!(outcome, StopOutcome::Killed);
+    }
+
+    #[test]
+    fn launch_args_resolve_shard_ctx_and_concatenated_flags() {
+        let (cfg, eff) = effective();
+        let args = launch_args(&cfg, &eff).join(" ");
+        assert!(args.contains("models/m@abc/m-Q8_0.gguf"), "shard missing: {args}");
+        assert!(args.contains("--ctx-size 98304"), "ctx missing: {args}");
+        assert!(args.contains("--port 8080"), "port missing: {args}");
+        let jinja = args.find("--jinja").expect("default flag");
+        let temp = args.find("--temp").expect("extra flag");
+        assert!(jinja < temp, "defaults must precede extras: {args}");
+    }
+}
