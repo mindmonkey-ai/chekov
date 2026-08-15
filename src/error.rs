@@ -36,6 +36,12 @@ pub enum ChekovError {
     UnknownModel { name: String },
 
     #[error(
+        "no active model is set — pick one with `chekov use <name>` \
+         (see `chekov list` for registered models)"
+    )]
+    NoActiveModel,
+
+    #[error(
         "registry {path} is corrupt ({reason}) — restore it from a backup or \
          delete it and re-register models with `chekov pull <spec>`"
     )]
