@@ -153,6 +153,58 @@ pub fn live_pid(cfg: &Config) -> Option<i32> {
         .filter(|&pid| process_alive(pid))
 }
 
+fn server_command(cfg: &Config, eff: &Effective) -> std::process::Command {
+    let binary = crate::core::engine::server_binary(&cfg.engine_dir());
+    let mut cmd = std::process::Command::new(binary);
+    cmd.args(launch_args(cfg, eff));
+    cmd
+}
+
+/// Detached start: own process group, output appended to the server log,
+/// pidfile written. The child outlives this process by design.
+pub fn spawn_daemon(cfg: &Config, eff: &Effective) -> Result<i32, ChekovError> {
+    use std::os::unix::process::CommandExt;
+    std::fs::create_dir_all(cfg.logs_dir())
+        .map_err(|e| ChekovError::io(format!("creating {}", cfg.logs_dir().display()), e))?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cfg.server_log())
+        .map_err(|e| ChekovError::io(format!("opening {}", cfg.server_log().display()), e))?;
+    let log_err = log
+        .try_clone()
+        .map_err(|e| ChekovError::io("cloning log handle", e))?;
+    let mut cmd = server_command(cfg, eff);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(log)
+        .stderr(log_err)
+        .process_group(0);
+    let child = cmd
+        .spawn()
+        .map_err(|e| ChekovError::io("spawning llama-server", e))?;
+    let pid = i32::try_from(child.id()).unwrap_or(i32::MAX);
+    PidFile::new(cfg.pidfile()).write(pid)?;
+    // Intentionally not reaped: chekov exits immediately and the daemon is
+    // adopted by launchd.
+    drop(child);
+    Ok(pid)
+}
+
+/// Foreground start: inherits the terminal; returns the server's exit status.
+pub fn run_foreground(
+    cfg: &Config,
+    eff: &Effective,
+) -> Result<std::process::ExitCode, ChekovError> {
+    let status = server_command(cfg, eff)
+        .status()
+        .map_err(|e| ChekovError::io("spawning llama-server", e))?;
+    Ok(if status.success() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

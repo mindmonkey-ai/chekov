@@ -38,28 +38,180 @@ impl NewModel {
     /// `models/<name>@<rev12>` — one directory per model@revision (§4.2).
     #[must_use]
     pub fn dir_name(&self) -> String {
-        todo!("cycle 5b red")
+        let rev12: String = self.sha.chars().take(12).collect();
+        format!("{}@{rev12}", self.name)
     }
 
-    /// The registry entry this pull produces (hermes_ok seeded true; flags
+    /// The registry entry this pull produces (`hermes_ok` seeded true; flags
     /// inherit `[defaults]` at resolve time — concatenation semantics, §4.3).
     #[must_use]
     pub fn entry(&self) -> crate::core::registry::ModelEntry {
-        todo!("cycle 5b red")
+        crate::core::registry::ModelEntry {
+            repo: self.repo.clone(),
+            quant: self.quant.clone(),
+            revision: self.sha.clone(),
+            path: format!("models/{}", self.dir_name()),
+            first_shard: self.first_shard.clone(),
+            hermes_ok: true,
+            ctx_size: None,
+            extra_flags: vec![],
+        }
     }
 }
 
 /// `LICENSE.provenance` content: where the snapshot came from and when.
 #[must_use]
 pub fn provenance_text(model: &NewModel, source: &str, fetched_utc: &str) -> String {
-    let _ = (model, source, fetched_utc);
-    todo!("cycle 5b red")
+    format!(
+        "repo = {}\nrevision = {}\nsource = {source}\nfetched = {fetched_utc}\n",
+        model.repo, model.sha
+    )
+}
+
+/// Download the plan's files into `models/<name>@<rev12>/`, then write the
+/// `REVISION` file and license snapshot. Returns the model directory.
+pub(crate) fn materialize(
+    ctx: &Ctx,
+    model: &NewModel,
+    plan: &crate::core::hub::PullPlan,
+) -> Result<std::path::PathBuf, ChekovError> {
+    let dir = ctx.config.models_dir().join(model.dir_name());
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| ChekovError::io(format!("creating {}", dir.display()), e))?;
+    crate::core::hub::download_plan(
+        &crate::core::hub::DownloadSpec {
+            repo: &model.repo,
+            revision: &model.sha,
+            dest: &dir,
+        },
+        plan,
+    )?;
+    std::fs::write(dir.join("REVISION"), format!("{}\n", model.sha))
+        .map_err(|e| ChekovError::io("writing REVISION", e))?;
+    snapshot_license(ctx, model, &dir)?;
+    Ok(dir)
+}
+
+/// Snapshot the repo license (and optionally a base-model license) with
+/// provenance. A repo without a license file is recorded as such, loudly.
+fn snapshot_license(ctx: &Ctx, model: &NewModel, dir: &std::path::Path) -> Result<(), ChekovError> {
+    let mut source = "none found (checked LICENSE, LICENSE.md, LICENSE.txt)".to_owned();
+    for candidate in ["LICENSE", "LICENSE.md", "LICENSE.txt"] {
+        let url = format!(
+            "https://huggingface.co/{}/raw/{}/{candidate}",
+            model.repo, model.sha
+        );
+        if let Ok(text) = ctx.http.get(&url) {
+            std::fs::write(dir.join("LICENSE.snapshot"), text)
+                .map_err(|e| ChekovError::io("writing LICENSE.snapshot", e))?;
+            source = url;
+            break;
+        }
+    }
+    let stamp = crate::core::clock::utc_compact_now();
+    std::fs::write(
+        dir.join("LICENSE.provenance"),
+        provenance_text(model, &source, &stamp),
+    )
+    .map_err(|e| ChekovError::io("writing LICENSE.provenance", e))
+}
+
+/// Fetch `--license-url` (base-model license) when given.
+fn snapshot_base_license(ctx: &Ctx, url: &str, dir: &std::path::Path) -> Result<(), ChekovError> {
+    let text = ctx.http.get(url)?;
+    std::fs::write(dir.join("LICENSE.base.snapshot"), text)
+        .map_err(|e| ChekovError::io("writing LICENSE.base.snapshot", e))
+}
+
+fn print_plan(model: &NewModel, plan: &crate::core::hub::PullPlan) {
+    println!(
+        "[dry-run] pull {}:{} @ {}",
+        model.repo,
+        model.quant,
+        &model.sha[..12.min(model.sha.len())]
+    );
+    println!("[dry-run] destination: models/{}", model.dir_name());
+    for file in &plan.files {
+        println!("[dry-run]   {file}");
+    }
+    println!("[dry-run] first shard: {}", plan.first_shard);
+    println!(
+        "[dry-run] would register '{}' and snapshot the license",
+        model.name
+    );
+}
+
+/// Re-pull of the same revision with the shard on disk is a verified no-op.
+fn is_noop(ctx: &Ctx, model: &NewModel, existing_rev: Option<&str>) -> bool {
+    existing_rev == Some(model.sha.as_str())
+        && ctx
+            .config
+            .root
+            .join(model.entry().path)
+            .join(&model.first_shard)
+            .exists()
+}
+
+/// Register a fresh model, or — when the name already exists at an older
+/// revision — leave the registry untouched (§4.2.5: repointing is `update`'s
+/// gated job).
+fn register_or_notice(
+    ctx: &Ctx,
+    model: &NewModel,
+    existing_rev: Option<&str>,
+) -> Result<(), ChekovError> {
+    if existing_rev.is_some() && existing_rev != Some(model.sha.as_str()) {
+        println!(
+            "'{}' already registered at an older revision — new files are downloaded but the \
+             registry was NOT repointed; run `chekov update --model` for the gated repoint",
+            model.name
+        );
+        return Ok(());
+    }
+    let mut reg = ctx.registry()?;
+    reg.models.insert(model.name.clone(), model.entry());
+    reg.save(&ctx.config.registry_path())?;
+    println!(
+        "registered '{}' — next: `chekov use {}` then `chekov run`",
+        model.name, model.name
+    );
+    Ok(())
 }
 
 impl Command for PullCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
-        let _ = ctx;
-        todo!("cycle 5b red")
+        use crate::core::{hub, pullspec::PullSpec};
+        let spec = PullSpec::parse(&self.spec)?;
+        let snapshot =
+            hub::fetch_snapshot(ctx.http.as_ref(), &spec.repo, spec.revision.as_deref())?;
+        let plan = hub::plan_pull(&snapshot, &spec.repo, spec.quant.as_deref())?;
+        let model = NewModel {
+            name: self.name.clone().unwrap_or_else(|| spec.short_name()),
+            repo: spec.repo.to_string(),
+            quant: plan.quant.clone(),
+            sha: snapshot.sha,
+            first_shard: plan.first_shard.clone(),
+        };
+        if self.dry_run {
+            print_plan(&model, &plan);
+            return Ok(ExitCode::SUCCESS);
+        }
+        let reg = ctx.registry()?;
+        let existing_rev = reg.models.get(&model.name).map(|e| e.revision.clone());
+        if is_noop(ctx, &model, existing_rev.as_deref()) {
+            println!(
+                "'{}' is already at {} — verified no-op",
+                model.name,
+                model.dir_name()
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        let dir = materialize(ctx, &model, &plan)?;
+        if let Some(url) = &self.license_url {
+            snapshot_base_license(ctx, url, &dir)?;
+        }
+        register_or_notice(ctx, &model, existing_rev.as_deref())?;
+        Ok(ExitCode::SUCCESS)
     }
 }
 
@@ -93,7 +245,11 @@ mod tests {
 
     #[test]
     fn provenance_records_repo_revision_source_and_time() {
-        let text = provenance_text(&model(), "https://huggingface.co/x/LICENSE", "20260815T120000Z");
+        let text = provenance_text(
+            &model(),
+            "https://huggingface.co/x/LICENSE",
+            "20260815T120000Z",
+        );
         for needle in [
             "unsloth/MiniMax-M2.7-GGUF",
             "0123456789abcdef0123456789abcdef01234567",

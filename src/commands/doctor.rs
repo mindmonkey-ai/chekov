@@ -29,14 +29,162 @@ pub struct CheckResult {
 /// Run all five checks against the server (via the HTTP seam — tests inject
 /// canned responses).
 pub fn run_checks(http: &dyn HttpClient, cfg: &Config, eff: &Effective) -> Vec<CheckResult> {
-    let _ = (http, cfg, eff);
-    todo!("cycle 5b red")
+    let (openai, content) = check_openai(http, cfg, eff);
+    let anthropic = check_anthropic(http, cfg, eff);
+    let think = check_think(eff, content.as_deref());
+    let canary = check_canary(http, cfg, eff);
+    let ctx_floor = check_ctx(cfg, eff);
+    [
+        ("OpenAI door (/v1/chat/completions)", openai),
+        ("Anthropic door (/v1/messages)", anthropic),
+        ("think-tag retention", think),
+        ("NaN canary (degenerate output)", canary),
+        ("context floor (hermes)", ctx_floor),
+    ]
+    .map(|(name, status)| CheckResult { name, status })
+    .to_vec()
+}
+
+fn chat_body(eff: &Effective, prompt: &str, max_tokens: u32) -> String {
+    serde_json::json!({
+        "model": eff.name,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+    })
+    .to_string()
+}
+
+fn door_request(cfg: &Config, path: &str, body: String) -> crate::core::hub::JsonRequest {
+    crate::core::hub::JsonRequest {
+        url: format!("{}{path}", cfg.base_url()),
+        body,
+        bearer: Some(cfg.file.server.api_key.clone()),
+    }
+}
+
+fn check_openai(
+    http: &dyn HttpClient,
+    cfg: &Config,
+    eff: &Effective,
+) -> (CheckStatus, Option<String>) {
+    let req = door_request(
+        cfg,
+        "/v1/chat/completions",
+        chat_body(eff, "Reply with a short greeting.", 64),
+    );
+    match http.post_json(&req) {
+        Err(e) => (CheckStatus::Fail(e.to_string()), None),
+        Ok(body) => crate::core::checks::chat_content(&body).map_or_else(
+            || {
+                (
+                    CheckStatus::Fail("no choices[0].message.content in response".into()),
+                    None,
+                )
+            },
+            |content| (CheckStatus::Pass, Some(content)),
+        ),
+    }
+}
+
+fn check_anthropic(http: &dyn HttpClient, cfg: &Config, eff: &Effective) -> CheckStatus {
+    let req = door_request(
+        cfg,
+        "/v1/messages",
+        chat_body(eff, "Reply with a short greeting.", 64),
+    );
+    match http.post_json(&req) {
+        Err(e) => CheckStatus::Fail(e.to_string()),
+        Ok(body) => crate::core::checks::anthropic_content(&body).map_or_else(
+            || CheckStatus::Fail("no content[0].text in response".into()),
+            |_| CheckStatus::Pass,
+        ),
+    }
+}
+
+fn check_think(eff: &Effective, content: Option<&str>) -> CheckStatus {
+    let interleaved = eff
+        .flags
+        .windows(2)
+        .any(|w| w[0] == "--reasoning-format" && w[1] == "none");
+    if !interleaved {
+        return CheckStatus::Skipped("--reasoning-format none not set for this model".into());
+    }
+    match content {
+        None => CheckStatus::Skipped("OpenAI door failed; nothing to inspect".into()),
+        Some(c) if crate::core::checks::contains_think_tag(c) => CheckStatus::Pass,
+        Some(_) => CheckStatus::Fail("response lost its <think> tags".into()),
+    }
+}
+
+fn check_canary(http: &dyn HttpClient, cfg: &Config, eff: &Effective) -> CheckStatus {
+    let prompt = "Write a complete Rust module implementing a doubly linked list with \
+                  insert, remove, and iterator support, plus unit tests. Code only.";
+    let req = door_request(
+        cfg,
+        "/v1/chat/completions",
+        chat_body(eff, prompt, cfg.file.doctor.canary_max_tokens),
+    );
+    match http.post_json(&req) {
+        Err(e) => CheckStatus::Fail(e.to_string()),
+        Ok(body) => crate::core::checks::chat_content(&body).map_or_else(
+            || CheckStatus::Fail("no choices[0].message.content in response".into()),
+            |content| {
+                crate::core::checks::degenerate_reason(&content, &cfg.file.doctor)
+                    .map_or(CheckStatus::Pass, CheckStatus::Fail)
+            },
+        ),
+    }
+}
+
+fn check_ctx(cfg: &Config, eff: &Effective) -> CheckStatus {
+    let floor = cfg.file.limits.hermes_ctx_floor;
+    if eff.entry.hermes_ok {
+        if eff.ctx_size >= floor {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail(format!(
+                "effective ctx {} is below the hermes floor {floor}",
+                eff.ctx_size
+            ))
+        }
+    } else {
+        CheckStatus::Skipped(format!(
+            "hermes_ok = false (ctx {} vs floor {floor} is advisory)",
+            eff.ctx_size
+        ))
+    }
 }
 
 impl Command for DoctorCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
-        let _ = ctx;
-        todo!("cycle 5b red")
+        let reg = ctx.registry()?;
+        let name = crate::core::server::read_run_state(&ctx.config)
+            .unwrap_or(reg.active_name()?.to_owned());
+        let eff = reg.effective(&name)?;
+        let results = run_checks(ctx.http.as_ref(), &ctx.config, &eff);
+        let rows: Vec<Vec<String>> = results
+            .iter()
+            .map(|r| {
+                let (status, detail) = match &r.status {
+                    CheckStatus::Pass => ("PASS".to_owned(), String::new()),
+                    CheckStatus::Fail(reason) => ("FAIL".to_owned(), reason.clone()),
+                    CheckStatus::Skipped(note) => ("SKIP".to_owned(), note.clone()),
+                };
+                vec![r.name.to_owned(), status, detail]
+            })
+            .collect();
+        println!(
+            "{}",
+            super::render_table(&["CHECK", "STATUS", "DETAIL"], &rows)
+        );
+        let failed = results
+            .iter()
+            .any(|r| matches!(r.status, CheckStatus::Fail(_)));
+        Ok(if failed {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        })
     }
 }
 
@@ -88,7 +236,10 @@ mod tests {
         serde_json::json!({"content": [{"type": "text", "text": text}]}).to_string()
     }
 
-    fn fixture(reasoning: bool, ctx_size: Option<u32>) -> (Config, crate::core::registry::Effective) {
+    fn fixture(
+        reasoning: bool,
+        ctx_size: Option<u32>,
+    ) -> (Config, crate::core::registry::Effective) {
         let root = std::env::temp_dir().join("chekov-test-doctor");
         let _ = std::fs::create_dir_all(&root);
         let cfg = Config::load(&root).expect("defaults");
@@ -179,6 +330,10 @@ mod tests {
         let (cfg, eff) = fixture(true, None);
         let http = SeqHttp::new(&[]);
         let results = run_checks(&http, &cfg, &eff);
-        assert!(matches!(results[0].status, CheckStatus::Fail(_)), "{:?}", results[0]);
+        assert!(
+            matches!(results[0].status, CheckStatus::Fail(_)),
+            "{:?}",
+            results[0]
+        );
     }
 }

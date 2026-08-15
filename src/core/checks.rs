@@ -71,6 +71,21 @@ pub fn parse_sysctl_mb(output: &str) -> Option<u64> {
     output.trim().parse().ok()
 }
 
+/// Read the live GPU wired limit (macOS). `None` when unreadable — callers
+/// decide whether that is a warning or a hard stop.
+#[must_use]
+pub fn wired_limit_mb() -> Option<u64> {
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "iogpu.wired_limit_mb"])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        parse_sysctl_mb(&String::from_utf8_lossy(&out.stdout))
+    } else {
+        None
+    }
+}
+
 /// True when something is already listening on `host:port`.
 #[must_use]
 pub fn port_in_use(host: &str, port: u16) -> bool {

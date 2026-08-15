@@ -184,6 +184,41 @@ fn quant_like(token: &str) -> bool {
     q_digit(core) || matches!(core, "BF16" | "F16" | "F32")
 }
 
+/// Parameters for a revision-pinned shard download.
+pub struct DownloadSpec<'a> {
+    pub repo: &'a str,
+    pub revision: &'a str,
+    pub dest: &'a std::path::Path,
+}
+
+/// Download every planned file into the model directory, revision-pinned.
+///
+/// Network path — exercised only by real pulls, never by tests (prompt §2.4).
+/// hf-hub's blocking wrapper runs its own internal runtime thread; chekov
+/// itself stays synchronous.
+pub fn download_plan(spec: &DownloadSpec<'_>, plan: &PullPlan) -> Result<(), ChekovError> {
+    let failed = |reason: String| ChekovError::DownloadFailed {
+        repo: spec.repo.to_owned(),
+        reason,
+    };
+    let (owner, name) = spec
+        .repo
+        .split_once('/')
+        .ok_or_else(|| failed("repo id is missing the org/ prefix".to_owned()))?;
+    let client = hf_hub::HFClientSync::new().map_err(|e| failed(e.to_string()))?;
+    let repo = client.model(owner, name);
+    for file in &plan.files {
+        println!("downloading {file} …");
+        repo.download_file()
+            .filename(file.clone())
+            .local_dir(spec.dest.to_path_buf())
+            .revision(spec.revision.to_owned())
+            .send()
+            .map_err(|e| failed(format!("{file}: {e}")))?;
+    }
+    Ok(())
+}
+
 /// Strip a trailing `-00001-of-00004` shard marker if present.
 fn strip_shard_suffix(stem: &str) -> &str {
     let Some(idx) = stem.len().checked_sub(15) else {

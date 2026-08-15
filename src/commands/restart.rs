@@ -14,7 +14,13 @@ pub struct RestartCmd {
 
 impl Command for RestartCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
-        let _ = ctx;
-        todo!("cycle 5b red")
+        if crate::core::server::live_pid(&ctx.config).is_some() {
+            super::stop::StopCmd {}.run(ctx)?;
+        }
+        super::run::RunCmd {
+            name: self.name.clone(),
+            daemon: true,
+        }
+        .run(ctx)
     }
 }

@@ -49,8 +49,14 @@ fn dry_run_plans_without_writing_anything() {
     };
     let code = cmd.run(&ctx).expect("dry run succeeds");
     assert_eq!(code, ExitCode::SUCCESS);
-    assert!(!root.join("models.toml").exists(), "dry run must not register");
-    assert!(!root.join("models").exists(), "dry run must not create dirs");
+    assert!(
+        !root.join("models.toml").exists(),
+        "dry run must not register"
+    );
+    assert!(
+        !root.join("models").exists(),
+        "dry run must not create dirs"
+    );
 }
 
 #[test]
