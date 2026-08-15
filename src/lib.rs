@@ -8,5 +8,7 @@
 // Module-qualified names (registry::Registry) are idiomatic here.
 #![allow(clippy::module_name_repetitions)]
 
+pub mod cli;
+pub mod commands;
 pub mod core;
 pub mod error;

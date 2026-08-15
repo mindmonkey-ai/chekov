@@ -22,6 +22,48 @@ pub trait HttpClient {
     fn post_json(&self, req: &JsonRequest) -> Result<String, ChekovError>;
 }
 
+/// Production client: blocking `ureq` (no async runtime, prompt §2.1).
+pub struct UreqClient;
+
+impl HttpClient for UreqClient {
+    fn get(&self, url: &str) -> Result<String, ChekovError> {
+        let mut response = ureq::get(url)
+            .call()
+            .map_err(|e| ChekovError::HubRequestFailed {
+                url: url.to_owned(),
+                reason: e.to_string(),
+            })?;
+        response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| ChekovError::HubRequestFailed {
+                url: url.to_owned(),
+                reason: e.to_string(),
+            })
+    }
+
+    fn post_json(&self, req: &JsonRequest) -> Result<String, ChekovError> {
+        let mut builder = ureq::post(&req.url).header("Content-Type", "application/json");
+        if let Some(token) = &req.bearer {
+            builder = builder.header("Authorization", &format!("Bearer {token}"));
+        }
+        let mut response =
+            builder
+                .send(&req.body)
+                .map_err(|e| ChekovError::EndpointDown {
+                    url: req.url.clone(),
+                    reason: e.to_string(),
+                })?;
+        response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| ChekovError::EndpointDown {
+                url: req.url.clone(),
+                reason: e.to_string(),
+            })
+    }
+}
+
 /// HF model-info API response — only the fields chekov reads.
 ///
 /// `deny_unknown_fields` deliberately NOT set here: this is a third-party API
