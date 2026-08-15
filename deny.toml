@@ -1,0 +1,27 @@
+# §C.8 supply-chain gate, authored for CI use (`cargo deny check`).
+# Not wired into `make lint` — the bootstrap prompt (§6) fixes lint to
+# fmt + clippy; CI adds deny/audit per §C.13.
+
+[advisories]
+yanked = "deny"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+]
+
+[bans]
+multiple-versions = "deny"
+# Populate with explicit skips (crate + reason) only when a duplicate is
+# unavoidable — never silently.
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

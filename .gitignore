@@ -1,0 +1,13 @@
+# Build output (§11: generated assets are never committed; Cargo.lock IS
+# committed — binary crate, §D.7).
+/target
+
+# Downloaded weights and runtime state — one dir per model@rev, gigabytes each.
+/models/
+/logs/
+
+# Integration backups written by `chekov integrate` (<file>.bak-<UTC>).
+*.bak-*
+
+# Generated zsh completions (rebuilt by `make install`).
+/shell/_chekov

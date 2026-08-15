@@ -1,0 +1,9 @@
+# §3 core limits are NOT inherited mechanically by annex §C (its inherits list
+# omits §3) and clippy's defaults are looser (args 7, lines 100). The standards'
+# numbers are therefore encoded here explicitly:
+#   §3.4  — functions take at most 3 arguments
+#   §3.2  — functions are at most 40 LOC
+#   §3.12 — nesting at most 3 levels (threshold 4 = warn past 3)
+too-many-arguments-threshold = 3
+too-many-lines-threshold = 40
+excessive-nesting-threshold = 4
