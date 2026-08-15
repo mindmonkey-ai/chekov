@@ -26,21 +26,55 @@ pub enum IntegrateTarget {
     Claude,
 }
 
-/// The hermes config content. Pure so tests pin the contract.
+/// The `model:` block chekov manages (active-model selection).
 #[must_use]
-pub fn render_hermes_yaml(cfg: &Config, eff: &Effective) -> String {
+pub fn render_model_block(cfg: &Config, eff: &Effective) -> String {
     format!(
-        "# Managed by `chekov integrate hermes` — regenerate rather than hand-edit.\n\
-         provider: custom\n\
-         base_url: {base}/v1\n\
-         api_key: {key}\n\
-         model: {alias}\n\
-         context_length: {ctx}\n",
+        "model:\n\
+         \x20\x20api_key: {key}\n\
+         \x20\x20base_url: {base}/v1\n\
+         \x20\x20context_length: {ctx}\n\
+         \x20\x20default: {alias}\n\
+         \x20\x20provider: chekov\n",
         base = cfg.base_url(),
         key = cfg.file.server.api_key,
         alias = eff.name,
         ctx = eff.ctx_size,
     )
+}
+
+/// The `chekov` entry under `providers:` (two-space indented child).
+#[must_use]
+pub fn render_provider_entry(cfg: &Config, eff: &Effective) -> String {
+    format!(
+        "\x20\x20chekov:\n\
+         \x20\x20\x20\x20api: {base}/v1\n\
+         \x20\x20\x20\x20api_key: {key}\n\
+         \x20\x20\x20\x20default_model: {alias}\n\
+         \x20\x20\x20\x20models:\n\
+         \x20\x20\x20\x20\x20\x20- {alias}\n\
+         \x20\x20\x20\x20name: chekov (llama.cpp local)\n",
+        base = cfg.base_url(),
+        key = cfg.file.server.api_key,
+        alias = eff.name,
+    )
+}
+
+/// Merge chekov's model + provider blocks into an existing Hermes config,
+/// leaving every other line byte-identical. Wholesale replacement is
+/// forbidden: a live Hermes config carries MCP servers, toolsets, and plugin
+/// state that chekov must never clobber (STOP-3 spirit).
+#[must_use]
+pub fn merge_hermes_config(existing: &str, cfg: &Config, eff: &Effective) -> String {
+    let _ = (existing, cfg, eff);
+    todo!("hermes-merge red")
+}
+
+/// The provider currently selected in the existing config's `model:` block.
+#[must_use]
+pub fn current_provider(existing: &str) -> Option<String> {
+    let _ = existing;
+    todo!("hermes-merge red")
 }
 
 /// The cclocal launcher script. Pure so tests pin the contract.
@@ -85,16 +119,15 @@ fn write_managed(path: &std::path::Path, content: &str) -> Result<bool, ChekovEr
     Ok(true)
 }
 
-/// STOP-3 gates: ~/.hermes must already exist, and replacing an actively
-/// configured non-custom provider needs explicit confirmation.
-fn hermes_config_path(content: &str, assume_yes: bool) -> Result<std::path::PathBuf, ChekovError> {
+/// STOP-3 gate: ~/.hermes must already exist — chekov never creates another
+/// tool's config tree behind its back.
+fn hermes_config_file() -> Result<std::path::PathBuf, ChekovError> {
     let home = directories::UserDirs::new().map_or_else(
         || std::path::PathBuf::from("/"),
         |u| u.home_dir().to_path_buf(),
     );
     let hermes_dir = home.join(".hermes");
     if !hermes_dir.exists() {
-        // STOP-3: never create another tool's config tree behind its back.
         return Err(ChekovError::HermesConfigUnsafe {
             reason: format!(
                 "{} does not exist — is Hermes installed?",
@@ -102,17 +135,7 @@ fn hermes_config_path(content: &str, assume_yes: bool) -> Result<std::path::Path
             ),
         });
     }
-    let path = hermes_dir.join("config.yaml");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.contains("provider:") && !existing.contains("provider: custom") {
-        // STOP-3: an actively configured non-custom provider is being replaced.
-        println!(
-            "existing {} has a non-custom provider; intended replacement:\n{content}",
-            path.display()
-        );
-        super::confirm("replace the existing Hermes provider config", assume_yes)?;
-    }
-    Ok(path)
+    Ok(hermes_dir.join("config.yaml"))
 }
 
 fn integrate_hermes(ctx: &Ctx, assume_yes: bool) -> Result<ExitCode, ChekovError> {
@@ -126,11 +149,22 @@ fn integrate_hermes(ctx: &Ctx, assume_yes: bool) -> Result<ExitCode, ChekovError
             floor,
         });
     }
-    let content = render_hermes_yaml(&ctx.config, &eff);
-    let path = hermes_config_path(&content, assume_yes)?;
-    if write_managed(&path, &content)? {
+    let path = hermes_config_file()?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let merged = merge_hermes_config(&existing, &ctx.config, &eff);
+    if let Some(active) = current_provider(&existing).filter(|p| p != "chekov") {
+        // STOP-3: an actively configured non-chekov provider is being switched.
         println!(
-            "hermes now targets {} as '{}'",
+            "hermes currently uses provider '{active}'; chekov will repoint the model: \
+             block (only) to:\n{}",
+            render_model_block(&ctx.config, &eff)
+        );
+        super::confirm("switch the active Hermes provider to chekov", assume_yes)?;
+    }
+    if write_managed(&path, &merged)? {
+        println!(
+            "hermes now targets {} as '{}' (provider entry 'chekov'; all other \
+             config sections untouched)",
             ctx.config.base_url(),
             eff.name
         );
@@ -166,12 +200,25 @@ impl Command for IntegrateCmd {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_cclocal, render_hermes_yaml};
+    use super::{current_provider, merge_hermes_config, render_cclocal};
     use crate::core::config::Config;
     use crate::core::registry::{ModelEntry, Registry};
 
-    #[test]
-    fn hermes_yaml_points_at_local_v1_with_effective_ctx() {
+    const EXISTING: &str = "model:\n\
+        \x20\x20api_key: ollama\n\
+        \x20\x20base_url: http://127.0.0.1:11434/v1\n\
+        \x20\x20default: qwen3.6:35b\n\
+        \x20\x20provider: ollama-launch\n\
+        providers:\n\
+        \x20\x20ollama-launch:\n\
+        \x20\x20\x20\x20api: http://127.0.0.1:11434/v1\n\
+        \x20\x20\x20\x20name: Ollama\n\
+        toolsets:\n\
+        \x20\x20- hermes-cli\n\
+        agent:\n\
+        \x20\x20max_turns: 150\n";
+
+    fn fixture() -> (Config, crate::core::registry::Effective) {
         let root = std::env::temp_dir().join("chekov-test-integrate");
         let _ = std::fs::create_dir_all(&root);
         let cfg = Config::load(&root).expect("defaults");
@@ -190,11 +237,58 @@ mod tests {
             },
         );
         let eff = reg.effective("minimax-m2.7").expect("registered");
-        let yaml = render_hermes_yaml(&cfg, &eff);
-        assert!(yaml.contains("provider: custom"), "{yaml}");
-        assert!(yaml.contains("http://127.0.0.1:8080/v1"), "{yaml}");
-        assert!(yaml.contains("model: minimax-m2.7"), "{yaml}");
-        assert!(yaml.contains("context_length: 98304"), "{yaml}");
+        (cfg, eff)
+    }
+
+    #[test]
+    fn merge_repoints_model_block_only() {
+        let (cfg, eff) = fixture();
+        let merged = merge_hermes_config(EXISTING, &cfg, &eff);
+        assert!(merged.contains("provider: chekov"), "{merged}");
+        assert!(merged.contains("base_url: http://127.0.0.1:8080/v1"), "{merged}");
+        assert!(merged.contains("default: minimax-m2.7"), "{merged}");
+        assert!(merged.contains("context_length: 98304"), "{merged}");
+        assert!(!merged.contains("api_key: ollama"), "old model block left: {merged}");
+    }
+
+    #[test]
+    fn merge_preserves_every_other_section() {
+        let (cfg, eff) = fixture();
+        let merged = merge_hermes_config(EXISTING, &cfg, &eff);
+        for kept in ["toolsets:", "- hermes-cli", "max_turns: 150", "  ollama-launch:", "name: Ollama"] {
+            assert!(merged.contains(kept), "lost {kept:?}: {merged}");
+        }
+    }
+
+    #[test]
+    fn merge_inserts_chekov_provider_entry() {
+        let (cfg, eff) = fixture();
+        let merged = merge_hermes_config(EXISTING, &cfg, &eff);
+        assert!(merged.contains("\n  chekov:\n"), "{merged}");
+        assert!(merged.contains("    api: http://127.0.0.1:8080/v1"), "{merged}");
+        assert!(merged.contains("    default_model: minimax-m2.7"), "{merged}");
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let (cfg, eff) = fixture();
+        let once = merge_hermes_config(EXISTING, &cfg, &eff);
+        let twice = merge_hermes_config(&once, &cfg, &eff);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn merge_into_empty_builds_minimal_config() {
+        let (cfg, eff) = fixture();
+        let merged = merge_hermes_config("", &cfg, &eff);
+        assert!(merged.starts_with("model:\n"), "{merged}");
+        assert!(merged.contains("providers:\n  chekov:\n"), "{merged}");
+    }
+
+    #[test]
+    fn current_provider_reads_model_block() {
+        assert_eq!(current_provider(EXISTING).as_deref(), Some("ollama-launch"));
+        assert_eq!(current_provider(""), None);
     }
 
     #[test]
