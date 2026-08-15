@@ -147,12 +147,18 @@ pub fn current_provider(existing: &str) -> Option<String> {
 }
 
 /// The cclocal launcher script. Pure so tests pin the contract.
+/// The env eval is guarded: if `chekov env` fails (not installed, no active
+/// model), the launcher aborts instead of silently running against the cloud.
 #[must_use]
 pub fn render_cclocal() -> String {
     "#!/bin/sh\n\
      # Managed by `chekov integrate claude` — Claude Code against the local server.\n\
      # Cloud Claude Code stays the default; this launcher affects only itself.\n\
-     eval \"$(chekov env)\"\n\
+     env_exports=\"$(chekov env)\" || {\n\
+     \x20\x20echo \"cclocal: 'chekov env' failed — install chekov (make install) and set an active model; refusing to fall back to cloud\" >&2\n\
+     \x20\x20exit 1\n\
+     }\n\
+     eval \"$env_exports\"\n\
      exec claude \"$@\"\n"
         .to_owned()
 }
