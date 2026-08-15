@@ -9,8 +9,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// `YYYYMMDDTHHMMSSZ` for a given unix time (pure; unit-tested).
 #[must_use]
 pub fn utc_compact(secs_since_epoch: u64) -> String {
-    let _ = secs_since_epoch;
-    todo!("cycle 3 red")
+    let (h, m, s) = (
+        secs_since_epoch / 3600 % 24,
+        secs_since_epoch / 60 % 60,
+        secs_since_epoch % 60,
+    );
+    let (year, month, day) = civil_from_days(secs_since_epoch / 86_400);
+    format!("{year:04}{month:02}{day:02}T{h:02}{m:02}{s:02}Z")
+}
+
+/// Days-since-epoch → (year, month, day), Howard Hinnant's civil algorithm.
+const fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
+    (year, month, day)
 }
 
 /// `utc_compact` for the current instant.

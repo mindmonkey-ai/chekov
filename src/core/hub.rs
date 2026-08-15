@@ -23,6 +23,7 @@ pub trait HttpClient {
 }
 
 /// HF model-info API response — only the fields chekov reads.
+///
 /// `deny_unknown_fields` deliberately NOT set here: this is a third-party API
 /// whose schema grows fields routinely; §C.7 targets our own config surface.
 #[derive(Debug, Clone, Deserialize)]
@@ -51,8 +52,13 @@ pub fn fetch_snapshot(
     repo: &RepoId,
     revision: Option<&str>,
 ) -> Result<RepoSnapshot, ChekovError> {
-    let _ = (http, repo, revision);
-    todo!("cycle 3 red")
+    let rev = revision.unwrap_or("main");
+    let url = format!("https://huggingface.co/api/models/{repo}/revision/{rev}");
+    let body = http.get(&url)?;
+    serde_json::from_str(&body).map_err(|e| ChekovError::HubRequestFailed {
+        url,
+        reason: format!("unexpected response shape: {e}"),
+    })
 }
 
 /// Decide what to download: requires a quant tag (no silent default), errors
@@ -62,21 +68,99 @@ pub fn plan_pull(
     repo: &RepoId,
     quant: Option<&str>,
 ) -> Result<PullPlan, ChekovError> {
-    let _ = (snapshot, repo, quant);
-    todo!("cycle 3 red")
+    let available = available_quants(snapshot).join(", ");
+    let Some(quant) = quant else {
+        return Err(ChekovError::NoQuantSpecified {
+            repo: repo.to_string(),
+            available,
+        });
+    };
+    let files: Vec<String> = snapshot
+        .files
+        .iter()
+        .map(|f| f.rfilename.as_str())
+        .filter(|f| derived_quant(f).as_deref() == Some(quant))
+        .map(ToOwned::to_owned)
+        .collect();
+    if files.is_empty() {
+        return Err(ChekovError::QuantNotFound {
+            quant: quant.to_owned(),
+            repo: repo.to_string(),
+            available,
+        });
+    }
+    let first_shard = files
+        .iter()
+        .find(|f| f.contains("-00001-of-"))
+        .unwrap_or(&files[0])
+        .clone();
+    Ok(PullPlan {
+        quant: quant.to_owned(),
+        files,
+        first_shard,
+    })
 }
 
 /// Distinct quant tags present in a repo's GGUF files (subdir- and
 /// flat-filename styles).
 #[must_use]
 pub fn available_quants(snapshot: &RepoSnapshot) -> Vec<String> {
-    let _ = snapshot;
-    todo!("cycle 3 red")
+    let mut quants: Vec<String> = snapshot
+        .files
+        .iter()
+        .filter_map(|f| derived_quant(&f.rfilename))
+        .collect();
+    quants.sort();
+    quants.dedup();
+    quants
+}
+
+/// The quant tag a GGUF path belongs to: its directory when subdir-style
+/// (`UD-Q5_K_XL/model-....gguf`), else the tag embedded in the filename
+/// (`model-Q8_0.gguf`). One source of truth for matching AND listing, so an
+/// ambiguous spec like `Q5_K_XL` can never select `UD-Q5_K_XL` files.
+fn derived_quant(path: &str) -> Option<String> {
+    let stem = path.strip_suffix(".gguf")?;
+    if let Some((dir, _)) = path.split_once('/') {
+        return quant_like(dir).then(|| dir.to_owned());
+    }
+    let stem = strip_shard_suffix(stem);
+    stem.char_indices()
+        .filter(|&(_, c)| c == '-')
+        .map(|(i, _)| &stem[i + 1..])
+        .find(|cand| quant_like(cand))
+        .map(ToOwned::to_owned)
+}
+
+/// Heuristic for quant-tag tokens: `UD-Q5_K_XL`, `IQ4_XS`, `Q8_0`, `BF16`…
+fn quant_like(token: &str) -> bool {
+    let core = token.strip_prefix("UD-").unwrap_or(token);
+    let q_digit = |t: &str| {
+        t.strip_prefix("IQ")
+            .or_else(|| t.strip_prefix('Q'))
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    };
+    q_digit(core) || matches!(core, "BF16" | "F16" | "F32")
+}
+
+/// Strip a trailing `-00001-of-00004` shard marker if present.
+fn strip_shard_suffix(stem: &str) -> &str {
+    let Some(idx) = stem.len().checked_sub(15) else {
+        return stem;
+    };
+    let tail = &stem[idx..];
+    let shardish = tail.starts_with('-')
+        && tail[1..6].bytes().all(|b| b.is_ascii_digit())
+        && &tail[6..10] == "-of-"
+        && tail[10..].bytes().all(|b| b.is_ascii_digit());
+    if shardish { &stem[..idx] } else { stem }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HttpClient, JsonRequest, RepoSnapshot, available_quants, fetch_snapshot, plan_pull};
+    use super::{
+        HttpClient, JsonRequest, RepoSnapshot, available_quants, fetch_snapshot, plan_pull,
+    };
     use crate::core::pullspec::PullSpec;
     use crate::error::ChekovError;
 
@@ -108,8 +192,12 @@ mod tests {
     }"#;
 
     fn snapshot() -> RepoSnapshot {
-        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF").expect("spec").repo;
-        let fake = FakeHttp { body: API_JSON.into() };
+        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF")
+            .expect("spec")
+            .repo;
+        let fake = FakeHttp {
+            body: API_JSON.into(),
+        };
         fetch_snapshot(&fake, &repo, None).expect("parse fixture")
     }
 
@@ -123,26 +211,46 @@ mod tests {
     #[test]
     fn plan_selects_quant_files_and_first_shard() {
         let snap = snapshot();
-        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF").expect("spec").repo;
+        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF")
+            .expect("spec")
+            .repo;
         let plan = plan_pull(&snap, &repo, Some("UD-Q5_K_XL")).expect("quant exists");
         assert_eq!(plan.files.len(), 2);
-        assert!(plan.first_shard.ends_with("00001-of-00004.gguf"), "{}", plan.first_shard);
+        assert!(
+            plan.first_shard.ends_with("00001-of-00004.gguf"),
+            "{}",
+            plan.first_shard
+        );
     }
 
     #[test]
     fn plan_without_quant_lists_choices() {
         let snap = snapshot();
-        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF").expect("spec").repo;
-        let msg = plan_pull(&snap, &repo, None).expect_err("no silent default").to_string();
-        assert!(msg.contains("UD-Q5_K_XL") && msg.contains("Q8_0"), "choices missing: {msg}");
+        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF")
+            .expect("spec")
+            .repo;
+        let msg = plan_pull(&snap, &repo, None)
+            .expect_err("no silent default")
+            .to_string();
+        assert!(
+            msg.contains("UD-Q5_K_XL") && msg.contains("Q8_0"),
+            "choices missing: {msg}"
+        );
     }
 
     #[test]
     fn plan_with_wrong_quant_lists_choices() {
         let snap = snapshot();
-        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF").expect("spec").repo;
-        let msg = plan_pull(&snap, &repo, Some("Q2_K")).expect_err("unknown quant").to_string();
-        assert!(msg.contains("Q2_K") && msg.contains("UD-Q4_K_XL"), "bad message: {msg}");
+        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF")
+            .expect("spec")
+            .repo;
+        let msg = plan_pull(&snap, &repo, Some("Q2_K"))
+            .expect_err("unknown quant")
+            .to_string();
+        assert!(
+            msg.contains("Q2_K") && msg.contains("UD-Q4_K_XL"),
+            "bad message: {msg}"
+        );
     }
 
     #[test]

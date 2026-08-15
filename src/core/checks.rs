@@ -1,6 +1,7 @@
-//! Doctor building blocks (§5 of the bootstrap prompt): pure functions over
-//! injected data — thresholds come from config (§16.11), responses from the
-//! `HttpClient` seam, so everything here is unit-testable offline.
+//! Doctor building blocks (§5 of the bootstrap prompt).
+//!
+//! Pure functions over injected data — thresholds come from config (§16.11),
+//! responses from the `HttpClient` seam, so everything is testable offline.
 
 use crate::core::config::DoctorSection;
 
@@ -8,22 +9,54 @@ use crate::core::config::DoctorSection;
 /// Guards the known GGUF `blk.61` failure class.
 #[must_use]
 pub fn degenerate_reason(text: &str, cfg: &DoctorSection) -> Option<String> {
-    let _ = (text, cfg);
-    todo!("cycle 3 red")
+    if let Some(run) = longest_identical_run(text).filter(|&r| r >= cfg.degenerate_run_len) {
+        return Some(format!(
+            "{run} identical consecutive tokens (threshold {})",
+            cfg.degenerate_run_len
+        ));
+    }
+    let total = text.chars().count();
+    let bad = text.chars().filter(|&c| c == '\u{FFFD}').count();
+    if total > 0 && bad * 100 > total * usize::from(cfg.replacement_char_max_pct) {
+        return Some(format!(
+            "replacement-char density {}% exceeds {}%",
+            bad * 100 / total,
+            cfg.replacement_char_max_pct
+        ));
+    }
+    None
+}
+
+fn longest_identical_run(text: &str) -> Option<usize> {
+    let mut prev: Option<&str> = None;
+    let mut run = 0usize;
+    let mut max_run = 0usize;
+    for token in text.split_whitespace() {
+        run = if prev == Some(token) { run + 1 } else { 1 };
+        max_run = max_run.max(run);
+        prev = Some(token);
+    }
+    (max_run > 0).then_some(max_run)
 }
 
 /// `choices[0].message.content` from an OpenAI-door response body.
 #[must_use]
 pub fn chat_content(body: &str) -> Option<String> {
-    let _ = body;
-    todo!("cycle 3 red")
+    json_pointer_str(body, "/choices/0/message/content")
 }
 
 /// `content[0].text` from an Anthropic-door response body.
 #[must_use]
 pub fn anthropic_content(body: &str) -> Option<String> {
-    let _ = body;
-    todo!("cycle 3 red")
+    json_pointer_str(body, "/content/0/text")
+}
+
+fn json_pointer_str(body: &str, pointer: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .pointer(pointer)?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 /// Think-tag retention: interleaved reasoning must survive the round trip.
@@ -35,8 +68,7 @@ pub fn contains_think_tag(content: &str) -> bool {
 /// Parse `sysctl -n iogpu.wired_limit_mb` output.
 #[must_use]
 pub fn parse_sysctl_mb(output: &str) -> Option<u64> {
-    let _ = output;
-    todo!("cycle 3 red")
+    output.trim().parse().ok()
 }
 
 /// True when something is already listening on `host:port`.
@@ -87,7 +119,8 @@ mod tests {
 
     #[test]
     fn chat_content_reads_openai_shape() {
-        let body = r#"{"choices":[{"message":{"role":"assistant","content":"<think>x</think>hi"}}]}"#;
+        let body =
+            r#"{"choices":[{"message":{"role":"assistant","content":"<think>x</think>hi"}}]}"#;
         assert_eq!(chat_content(body).as_deref(), Some("<think>x</think>hi"));
         assert_eq!(chat_content("{}"), None);
     }
