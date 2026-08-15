@@ -5,6 +5,10 @@
 # Downloaded weights and runtime state — one dir per model@rev, gigabytes each.
 /models/
 /logs/
+# Machine-local registry (absolute paths) + generated launcher + engine checkout.
+/models.toml
+/bin/
+/llama.cpp/
 
 # Integration backups written by `chekov integrate` (<file>.bak-<UTC>).
 *.bak-*
