@@ -382,7 +382,22 @@ mod tests {
     fn cclocal_evals_env_and_execs_claude() {
         let script = render_cclocal();
         assert!(script.starts_with("#!/bin/sh"), "{script}");
-        assert!(script.contains(r#"eval "$(chekov env)""#), "{script}");
         assert!(script.contains(r#"exec claude "$@""#), "{script}");
+    }
+
+    /// Regression: `eval "$(chekov env)"` with chekov missing from PATH left
+    /// the env empty and claude silently fell through to the CLOUD — the
+    /// launcher must abort loudly instead (§C.2 never-degrade).
+    #[test]
+    fn cclocal_aborts_when_chekov_env_fails() {
+        let script = render_cclocal();
+        assert!(script.contains("exit 1"), "no loud failure path: {script}");
+        assert!(
+            script.contains("chekov env") && script.contains("|| {"),
+            "env eval is unguarded: {script}"
+        );
+        let eval_pos = script.find("eval").expect("eval present");
+        let exec_pos = script.find("exec claude").expect("exec present");
+        assert!(eval_pos < exec_pos, "guard must precede exec: {script}");
     }
 }
