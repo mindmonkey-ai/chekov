@@ -60,21 +60,90 @@ pub fn render_provider_entry(cfg: &Config, eff: &Effective) -> String {
     )
 }
 
-/// Merge chekov's model + provider blocks into an existing Hermes config,
-/// leaving every other line byte-identical. Wholesale replacement is
-/// forbidden: a live Hermes config carries MCP servers, toolsets, and plugin
-/// state that chekov must never clobber (STOP-3 spirit).
+/// Merge chekov's model + provider blocks into an existing Hermes config.
+///
+/// Every other line stays byte-identical. Wholesale replacement is forbidden:
+/// a live Hermes config carries MCP servers, toolsets, and plugin state that
+/// chekov must never clobber (STOP-3 spirit).
 #[must_use]
 pub fn merge_hermes_config(existing: &str, cfg: &Config, eff: &Effective) -> String {
-    let _ = (existing, cfg, eff);
-    todo!("hermes-merge red")
+    let model_block = render_model_block(cfg, eff);
+    let mut text = if let Some(range) = top_block(existing, "model:") {
+        let mut t = existing.to_owned();
+        t.replace_range(range, &model_block);
+        t
+    } else {
+        let mut t = model_block;
+        t.push_str(existing);
+        t
+    };
+    let entry = render_provider_entry(cfg, eff);
+    if let Some(range) = top_block(&text, "providers:") {
+        let updated = replace_child(&text[range.clone()], "  chekov:", &entry);
+        text.replace_range(range, &updated);
+    } else {
+        text.push_str("providers:\n");
+        text.push_str(&entry);
+    }
+    text
+}
+
+/// Byte range of a top-level YAML block: the `key` header line plus every
+/// following line until the next top-level key.
+fn top_block(text: &str, key: &str) -> Option<std::ops::Range<usize>> {
+    let mut start = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let is_top = !line.starts_with([' ', '\t', '#', '\n']) && line.contains(':');
+        if let Some(s) = start {
+            if is_top {
+                return Some(s..offset);
+            }
+        } else if is_top && line.trim_end() == key {
+            start = Some(offset);
+        }
+        offset += line.len();
+    }
+    start.map(|s| s..text.len())
+}
+
+/// Replace (or insert after the header) one two-space-indented child entry
+/// inside a top-level block.
+fn replace_child(block: &str, child_header: &str, entry: &str) -> String {
+    let mut start = None;
+    let mut end = block.len();
+    let mut offset = 0;
+    for line in block.split_inclusive('\n') {
+        let is_child_key =
+            line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':');
+        if start.is_some() {
+            if is_child_key {
+                end = offset;
+                break;
+            }
+        } else if line.trim_end() == child_header.trim_end() {
+            start = Some(offset);
+        }
+        offset += line.len();
+    }
+    let mut out = block.to_owned();
+    if let Some(s) = start {
+        out.replace_range(s..end, entry);
+    } else {
+        let after_header = block.find('\n').map_or(block.len(), |i| i + 1);
+        out.insert_str(after_header, entry);
+    }
+    out
 }
 
 /// The provider currently selected in the existing config's `model:` block.
 #[must_use]
 pub fn current_provider(existing: &str) -> Option<String> {
-    let _ = existing;
-    todo!("hermes-merge red")
+    let range = top_block(existing, "model:")?;
+    existing[range]
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("provider:"))
+        .map(|v| v.trim().to_owned())
 }
 
 /// The cclocal launcher script. Pure so tests pin the contract.
@@ -245,17 +314,29 @@ mod tests {
         let (cfg, eff) = fixture();
         let merged = merge_hermes_config(EXISTING, &cfg, &eff);
         assert!(merged.contains("provider: chekov"), "{merged}");
-        assert!(merged.contains("base_url: http://127.0.0.1:8080/v1"), "{merged}");
+        assert!(
+            merged.contains("base_url: http://127.0.0.1:8080/v1"),
+            "{merged}"
+        );
         assert!(merged.contains("default: minimax-m2.7"), "{merged}");
         assert!(merged.contains("context_length: 98304"), "{merged}");
-        assert!(!merged.contains("api_key: ollama"), "old model block left: {merged}");
+        assert!(
+            !merged.contains("api_key: ollama"),
+            "old model block left: {merged}"
+        );
     }
 
     #[test]
     fn merge_preserves_every_other_section() {
         let (cfg, eff) = fixture();
         let merged = merge_hermes_config(EXISTING, &cfg, &eff);
-        for kept in ["toolsets:", "- hermes-cli", "max_turns: 150", "  ollama-launch:", "name: Ollama"] {
+        for kept in [
+            "toolsets:",
+            "- hermes-cli",
+            "max_turns: 150",
+            "  ollama-launch:",
+            "name: Ollama",
+        ] {
             assert!(merged.contains(kept), "lost {kept:?}: {merged}");
         }
     }
@@ -265,8 +346,14 @@ mod tests {
         let (cfg, eff) = fixture();
         let merged = merge_hermes_config(EXISTING, &cfg, &eff);
         assert!(merged.contains("\n  chekov:\n"), "{merged}");
-        assert!(merged.contains("    api: http://127.0.0.1:8080/v1"), "{merged}");
-        assert!(merged.contains("    default_model: minimax-m2.7"), "{merged}");
+        assert!(
+            merged.contains("    api: http://127.0.0.1:8080/v1"),
+            "{merged}"
+        );
+        assert!(
+            merged.contains("    default_model: minimax-m2.7"),
+            "{merged}"
+        );
     }
 
     #[test]
