@@ -71,7 +71,7 @@ fn repoint(ctx: &Ctx, model: &super::pull::NewModel) -> Result<(), ChekovError> 
         })?;
     let old_rev: String = entry.revision.chars().take(12).collect();
     entry.revision.clone_from(&model.sha);
-    entry.path = format!("models/{}", model.dir_name());
+    entry.path = model.registry_path();
     entry.first_shard.clone_from(&model.first_shard);
     reg.save(&ctx.config.registry_path())?;
     println!(
@@ -100,12 +100,21 @@ fn resolve_newer(
         return Ok(None);
     }
     let plan = hub::plan_pull(&snapshot, &repo, Some(&entry.quant))?;
+    // An externally-located model (absolute path) keeps new revisions beside
+    // the old one: the location is the existing dir's parent.
+    let location = {
+        let old = std::path::Path::new(&entry.path);
+        old.is_absolute()
+            .then(|| old.parent().map(std::path::Path::to_path_buf))
+            .flatten()
+    };
     let model = super::pull::NewModel {
         name,
         repo: entry.repo,
         quant: plan.quant.clone(),
         sha: snapshot.sha,
         first_shard: plan.first_shard.clone(),
+        location,
     };
     Ok(Some((model, plan)))
 }

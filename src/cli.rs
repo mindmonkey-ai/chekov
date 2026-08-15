@@ -111,6 +111,20 @@ mod tests {
     }
 
     #[test]
+    fn pull_accepts_model_loc() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "chekov",
+            "pull",
+            "org/repo:Q8_0",
+            "--model-loc",
+            "/Volumes/jane/models",
+        ])
+        .expect("parse");
+        assert!(matches!(cli.cmd, Cmd::Pull(ref c)
+            if c.model_loc.as_deref() == Some(std::path::Path::new("/Volumes/jane/models"))));
+    }
+
+    #[test]
     fn update_flags_parse_independently() {
         let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "update", "--all", "--dry-run"])
             .expect("parse");

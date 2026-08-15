@@ -71,19 +71,33 @@ pub fn parse_sysctl_mb(output: &str) -> Option<u64> {
     output.trim().parse().ok()
 }
 
-/// Read the live GPU wired limit (macOS). `None` when unreadable — callers
-/// decide whether that is a warning or a hard stop.
+/// A raw sysctl value of 0 means "unset — macOS system default", which is
+/// ~75% of physical RAM, NOT zero. Returns (effective MB, is_system_default).
 #[must_use]
-pub fn wired_limit_mb() -> Option<u64> {
+pub fn effective_wired_mb(raw: u64, memsize_bytes: u64) -> (u64, bool) {
+    let _ = (raw, memsize_bytes);
+    todo!("model-loc red")
+}
+
+/// Read the live GPU wired limit (macOS), resolving the 0-means-default
+/// sentinel. `None` when unreadable — callers decide warning vs hard stop.
+#[must_use]
+pub fn wired_limit_mb() -> Option<(u64, bool)> {
     let out = std::process::Command::new("sysctl")
         .args(["-n", "iogpu.wired_limit_mb"])
         .output()
         .ok()?;
-    if out.status.success() {
-        parse_sysctl_mb(&String::from_utf8_lossy(&out.stdout))
-    } else {
-        None
+    if !out.status.success() {
+        return None;
     }
+    let raw = parse_sysctl_mb(&String::from_utf8_lossy(&out.stdout))?;
+    let memsize = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| parse_sysctl_mb(&String::from_utf8_lossy(&o.stdout)))?;
+    Some(effective_wired_mb(raw, memsize))
 }
 
 /// True when something is already listening on `host:port`.
@@ -151,5 +165,16 @@ mod tests {
     fn sysctl_output_parses_with_whitespace() {
         assert_eq!(parse_sysctl_mb("163840\n"), Some(163_840));
         assert_eq!(parse_sysctl_mb("garbage"), None);
+    }
+
+    #[test]
+    fn wired_zero_resolves_to_three_quarters_of_ram() {
+        // 256 GiB machine, unset limit → 196608 MB system default.
+        let (mb, is_default) = super::effective_wired_mb(0, 274_877_906_944);
+        assert_eq!(mb, 196_608);
+        assert!(is_default);
+        let (mb, is_default) = super::effective_wired_mb(230_000, 274_877_906_944);
+        assert_eq!(mb, 230_000);
+        assert!(!is_default);
     }
 }

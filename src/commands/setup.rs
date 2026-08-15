@@ -29,11 +29,12 @@ impl Command for SetupCmd {
             return Ok(ExitCode::SUCCESS);
         }
         match actual {
-            Some(actual) if actual >= required => {
-                println!("wired limit OK ({actual} MB >= {required} MB) — setup complete");
+            Some((actual, is_default)) if actual >= required => {
+                let origin = if is_default { ", system default" } else { "" };
+                println!("wired limit OK ({actual} MB{origin} >= {required} MB) — setup complete");
                 Ok(ExitCode::SUCCESS)
             }
-            Some(actual) => Err(ChekovError::SetupIncomplete {
+            Some((actual, _)) => Err(ChekovError::SetupIncomplete {
                 remaining: format!(
                     "iogpu.wired_limit_mb is {actual}, need {required}; run: \
                      sudo sysctl iogpu.wired_limit_mb={required}"

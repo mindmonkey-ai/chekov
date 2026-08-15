@@ -22,6 +22,11 @@ pub struct PullCmd {
     /// Also snapshot the base model's license from this URL.
     #[arg(long)]
     pub license_url: Option<String>,
+    /// Store the model under this directory instead of <root>/models.
+    /// Files already present there (hf-cli layout) are size-verified and
+    /// hard-linked instead of re-downloaded.
+    #[arg(long)]
+    pub model_loc: Option<std::path::PathBuf>,
 }
 
 /// Everything needed to register one pulled model.
@@ -32,6 +37,8 @@ pub struct NewModel {
     pub quant: String,
     pub sha: String,
     pub first_shard: String,
+    /// `--model-loc`: absolute external home for the weights, when set.
+    pub location: Option<std::path::PathBuf>,
 }
 
 impl NewModel {
@@ -42,6 +49,15 @@ impl NewModel {
         format!("{}@{rev12}", self.name)
     }
 
+    /// The registry `path` value: relative `models/<dir>` by default, or the
+    /// absolute `<model-loc>/<dir>` when a location is set. Consumers resolve
+    /// via `root.join(path)`, which passes absolute paths through unchanged.
+    #[must_use]
+    pub fn registry_path(&self) -> String {
+        let _ = &self.location;
+        todo!("model-loc red")
+    }
+
     /// The registry entry this pull produces (`hermes_ok` seeded true; flags
     /// inherit `[defaults]` at resolve time — concatenation semantics, §4.3).
     #[must_use]
@@ -50,7 +66,7 @@ impl NewModel {
             repo: self.repo.clone(),
             quant: self.quant.clone(),
             revision: self.sha.clone(),
-            path: format!("models/{}", self.dir_name()),
+            path: self.registry_path(),
             first_shard: self.first_shard.clone(),
             hermes_ok: true,
             ctx_size: None,
@@ -75,7 +91,7 @@ pub(crate) fn materialize(
     model: &NewModel,
     plan: &crate::core::hub::PullPlan,
 ) -> Result<std::path::PathBuf, ChekovError> {
-    let dir = ctx.config.models_dir().join(model.dir_name());
+    let dir = ctx.config.root.join(model.registry_path());
     std::fs::create_dir_all(&dir)
         .map_err(|e| ChekovError::io(format!("creating {}", dir.display()), e))?;
     crate::core::hub::download_plan(
@@ -83,6 +99,7 @@ pub(crate) fn materialize(
             repo: &model.repo,
             revision: &model.sha,
             dest: &dir,
+            adopt_from: model.location.as_deref(),
         },
         plan,
     )?;
@@ -130,9 +147,9 @@ fn print_plan(model: &NewModel, plan: &crate::core::hub::PullPlan) {
         model.quant,
         &model.sha[..12.min(model.sha.len())]
     );
-    println!("[dry-run] destination: models/{}", model.dir_name());
+    println!("[dry-run] destination: {}", model.registry_path());
     for file in &plan.files {
-        println!("[dry-run]   {file}");
+        println!("[dry-run]   {} ({} bytes)", file.path, file.size.unwrap_or(0));
     }
     println!("[dry-run] first shard: {}", plan.first_shard);
     println!(
@@ -191,6 +208,7 @@ impl Command for PullCmd {
             quant: plan.quant.clone(),
             sha: snapshot.sha,
             first_shard: plan.first_shard.clone(),
+            location: self.model_loc.clone(),
         };
         if self.dry_run {
             print_plan(&model, &plan);
@@ -226,7 +244,19 @@ mod tests {
             quant: "UD-Q5_K_XL".into(),
             sha: "0123456789abcdef0123456789abcdef01234567".into(),
             first_shard: "UD-Q5_K_XL/MiniMax-M2.7-UD-Q5_K_XL-00001-of-00004.gguf".into(),
+            location: None,
         }
+    }
+
+    #[test]
+    fn registry_path_is_absolute_when_located() {
+        let mut located = model();
+        located.location = Some("/Volumes/jane/models".into());
+        assert_eq!(
+            located.registry_path(),
+            "/Volumes/jane/models/minimax-m2.7@0123456789ab"
+        );
+        assert_eq!(model().registry_path(), "models/minimax-m2.7@0123456789ab");
     }
 
     #[test]

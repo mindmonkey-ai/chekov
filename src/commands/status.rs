@@ -52,7 +52,10 @@ fn status_rows(ctx: &Ctx) -> Result<Vec<Vec<String>>, ChekovError> {
     let required = ctx.config.file.limits.wired_limit_mb;
     let wired = checks::wired_limit_mb().map_or_else(
         || format!("unreadable (need {required} MB)"),
-        |actual| format!("{actual} MB (need {required} MB)"),
+        |(actual, is_default)| {
+            let origin = if is_default { " (system default)" } else { "" };
+            format!("{actual} MB{origin} (need {required} MB)")
+        },
     );
     Ok(vec![
         vec![

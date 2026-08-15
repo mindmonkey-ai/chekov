@@ -43,7 +43,7 @@ fn preflight(ctx: &Ctx, eff: &crate::core::registry::Effective) -> Result<(), Ch
     }
     let required = cfg.file.limits.wired_limit_mb;
     match checks::wired_limit_mb() {
-        Some(actual) if actual < required => {
+        Some((actual, _is_default)) if actual < required => {
             return Err(ChekovError::WiredLimitLow {
                 actual_mb: actual,
                 required_mb: required,

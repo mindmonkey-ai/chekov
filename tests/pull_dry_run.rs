@@ -46,6 +46,7 @@ fn dry_run_plans_without_writing_anything() {
         name: None,
         dry_run: true,
         license_url: None,
+        model_loc: None,
     };
     let code = cmd.run(&ctx).expect("dry run succeeds");
     assert_eq!(code, ExitCode::SUCCESS);
@@ -73,6 +74,7 @@ fn dry_run_without_quant_errors_with_choices() {
         name: None,
         dry_run: true,
         license_url: None,
+        model_loc: None,
     };
     let msg = cmd.run(&ctx).expect_err("no silent default").to_string();
     assert!(msg.contains("UD-Q5_K_XL"), "choices missing: {msg}");
