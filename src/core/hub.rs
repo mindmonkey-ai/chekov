@@ -97,6 +97,24 @@ pub struct PullPlan {
     pub first_shard: String,
 }
 
+/// One quant tag offered by a repo, with its shards summed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuantOption {
+    pub tag: String,
+    /// Total shard bytes, or `None` when the API omitted a size for any shard
+    /// — a partial sum would understate the download and is never shown.
+    pub bytes: Option<u64>,
+}
+
+/// What to plan a pull for, plus the memory budget the choices are judged
+/// against. Bundled because §3.4 caps `plan_pull` at three arguments.
+pub struct PullTarget<'a> {
+    pub repo: &'a RepoId,
+    pub quant: Option<&'a str>,
+    /// Effective `iogpu.wired_limit_mb`; `None` drops the verdict column.
+    pub wired_mb: Option<u64>,
+}
+
 /// Fetch repo metadata (sha + file list) at `revision` (default `main`).
 pub fn fetch_snapshot(
     http: &dyn HttpClient,
@@ -117,13 +135,12 @@ pub fn fetch_snapshot(
 /// with the available choices when it is absent or wrong (§4.1).
 pub fn plan_pull(
     snapshot: &RepoSnapshot,
-    repo: &RepoId,
-    quant: Option<&str>,
+    target: &PullTarget<'_>,
 ) -> Result<PullPlan, ChekovError> {
-    let available = available_quants(snapshot).join(", ");
-    let Some(quant) = quant else {
+    let available = render_quant_table(&quant_options(snapshot), target.wired_mb);
+    let Some(quant) = target.quant else {
         return Err(ChekovError::NoQuantSpecified {
-            repo: repo.to_string(),
+            repo: target.repo.to_string(),
             available,
         });
     };
@@ -139,7 +156,7 @@ pub fn plan_pull(
     if files.is_empty() {
         return Err(ChekovError::QuantNotFound {
             quant: quant.to_owned(),
-            repo: repo.to_string(),
+            repo: target.repo.to_string(),
             available,
         });
     }
@@ -160,14 +177,94 @@ pub fn plan_pull(
 /// flat-filename styles).
 #[must_use]
 pub fn available_quants(snapshot: &RepoSnapshot) -> Vec<String> {
-    let mut quants: Vec<String> = snapshot
-        .files
-        .iter()
-        .filter_map(|f| derived_quant(&f.rfilename))
+    quant_options(snapshot)
+        .into_iter()
+        .map(|opt| opt.tag)
+        .collect()
+}
+
+/// Every quant tag in the repo with its shards summed, smallest first.
+///
+/// Size order is half the answer to "which one fits". Tags whose sizes the
+/// API withheld sort last, since an unknown total cannot be compared.
+#[must_use]
+pub fn quant_options(snapshot: &RepoSnapshot) -> Vec<QuantOption> {
+    let mut totals: std::collections::BTreeMap<String, (Option<u64>, bool)> =
+        std::collections::BTreeMap::new();
+    for file in &snapshot.files {
+        let Some(tag) = derived_quant(&file.rfilename) else {
+            continue;
+        };
+        let entry = totals.entry(tag).or_insert((Some(0), false));
+        match file.size {
+            Some(bytes) => entry.0 = entry.0.map(|sum| sum + bytes),
+            None => entry.1 = true,
+        }
+    }
+    let mut options: Vec<QuantOption> = totals
+        .into_iter()
+        .map(|(tag, (sum, partial))| QuantOption {
+            tag,
+            bytes: if partial { None } else { sum },
+        })
         .collect();
-    quants.sort();
-    quants.dedup();
-    quants
+    options.sort_by_key(|opt| (opt.bytes.is_none(), opt.bytes, opt.tag.clone()));
+    options
+}
+
+/// Weights-only bytes at which a quant stops leaving room for the KV cache
+/// and compute buffers that load on top of it.
+const TIGHT_FRACTION_PCT: u64 = 85;
+
+/// Render the choice list carried in `NoQuantSpecified` / `QuantNotFound`.
+///
+/// Sizes are **weights only**: the KV cache and compute buffers come on top,
+/// and their size needs GGUF header geometry chekov does not have before the
+/// download. Naming that in the header beats inventing a number.
+#[must_use]
+pub fn render_quant_table(options: &[QuantOption], wired_mb: Option<u64>) -> String {
+    if options.is_empty() {
+        return "(none — this repo exposes no .gguf files)".to_owned();
+    }
+    let header = wired_mb.map_or_else(
+        || "weights only; KV cache and compute buffers come on top".to_owned(),
+        |mb| format!("weights only; KV cache and compute buffers come on top of these — wired limit {mb} MB"),
+    );
+    let width = options.iter().map(|o| o.tag.len()).max().unwrap_or(0);
+    let rows = options.iter().map(|opt| {
+        let size = opt
+            .bytes
+            .map_or_else(|| "size unknown".to_owned(), format_gib);
+        let verdict = verdict_for(opt.bytes, wired_mb);
+        format!("\n  {:<width$}  {size:>12}{verdict}", opt.tag)
+    });
+    format!("{header}:{}", rows.collect::<String>())
+}
+
+fn format_gib(bytes: u64) -> String {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "display-only: GiB with one decimal, exactness is irrelevant"
+    )]
+    let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    format!("{gib:.1} GiB")
+}
+
+/// `fits` / `tight` / `exceeds` against the wired limit. Empty when the
+/// budget or the size is unknown — a guess would be worse than a blank.
+fn verdict_for(bytes: Option<u64>, wired_mb: Option<u64>) -> String {
+    let (Some(bytes), Some(mb)) = (bytes, wired_mb) else {
+        return String::new();
+    };
+    let limit = mb * 1024 * 1024;
+    let word = if bytes > limit {
+        "exceeds"
+    } else if bytes * 100 >= limit * TIGHT_FRACTION_PCT {
+        "tight"
+    } else {
+        "fits"
+    };
+    format!("   {word}")
 }
 
 /// The quant tag a GGUF path belongs to: its directory when subdir-style
@@ -335,10 +432,17 @@ fn strip_shard_suffix(stem: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        HttpClient, JsonRequest, RepoSnapshot, available_quants, fetch_snapshot, plan_pull,
+        HttpClient, JsonRequest, PullTarget, QuantOption, RepoSnapshot, available_quants,
+        fetch_snapshot, plan_pull, quant_options, render_quant_table,
     };
-    use crate::core::pullspec::PullSpec;
+    use crate::core::pullspec::{PullSpec, RepoId};
     use crate::error::ChekovError;
+
+    fn repo() -> RepoId {
+        PullSpec::parse("unsloth/MiniMax-M2.7-GGUF")
+            .expect("spec")
+            .repo
+    }
 
     struct FakeHttp {
         body: String,
@@ -367,14 +471,13 @@ mod tests {
         ]
     }"#;
 
+    fn snapshot_from(json: &str) -> RepoSnapshot {
+        let fake = FakeHttp { body: json.into() };
+        fetch_snapshot(&fake, &repo(), None).expect("parse fixture")
+    }
+
     fn snapshot() -> RepoSnapshot {
-        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF")
-            .expect("spec")
-            .repo;
-        let fake = FakeHttp {
-            body: API_JSON.into(),
-        };
-        fetch_snapshot(&fake, &repo, None).expect("parse fixture")
+        snapshot_from(API_JSON)
     }
 
     #[test]
@@ -387,10 +490,15 @@ mod tests {
     #[test]
     fn plan_selects_quant_files_and_first_shard() {
         let snap = snapshot();
-        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF")
-            .expect("spec")
-            .repo;
-        let plan = plan_pull(&snap, &repo, Some("UD-Q5_K_XL")).expect("quant exists");
+        let plan = plan_pull(
+            &snap,
+            &PullTarget {
+                repo: &repo(),
+                quant: Some("UD-Q5_K_XL"),
+                wired_mb: None,
+            },
+        )
+        .expect("quant exists");
         assert_eq!(plan.files.len(), 2);
         assert_eq!(plan.files[0].size, Some(8_237_824), "sizes must ride along");
         assert!(
@@ -434,13 +542,16 @@ mod tests {
 
     #[test]
     fn plan_without_quant_lists_choices() {
-        let snap = snapshot();
-        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF")
-            .expect("spec")
-            .repo;
-        let msg = plan_pull(&snap, &repo, None)
-            .expect_err("no silent default")
-            .to_string();
+        let msg = plan_pull(
+            &snapshot(),
+            &PullTarget {
+                repo: &repo(),
+                quant: None,
+                wired_mb: None,
+            },
+        )
+        .expect_err("no silent default")
+        .to_string();
         assert!(
             msg.contains("UD-Q5_K_XL") && msg.contains("Q8_0"),
             "choices missing: {msg}"
@@ -449,13 +560,16 @@ mod tests {
 
     #[test]
     fn plan_with_wrong_quant_lists_choices() {
-        let snap = snapshot();
-        let repo = PullSpec::parse("unsloth/MiniMax-M2.7-GGUF")
-            .expect("spec")
-            .repo;
-        let msg = plan_pull(&snap, &repo, Some("Q2_K"))
-            .expect_err("unknown quant")
-            .to_string();
+        let msg = plan_pull(
+            &snapshot(),
+            &PullTarget {
+                repo: &repo(),
+                quant: Some("Q2_K"),
+                wired_mb: None,
+            },
+        )
+        .expect_err("unknown quant")
+        .to_string();
         assert!(
             msg.contains("Q2_K") && msg.contains("UD-Q4_K_XL"),
             "bad message: {msg}"
@@ -468,5 +582,111 @@ mod tests {
         assert!(quants.contains(&"UD-Q5_K_XL".to_owned()), "{quants:?}");
         assert!(quants.contains(&"UD-Q4_K_XL".to_owned()), "{quants:?}");
         assert!(quants.contains(&"Q8_0".to_owned()), "{quants:?}");
+    }
+
+    #[test]
+    fn quant_options_sums_shards_per_tag() {
+        let opts = quant_options(&snapshot());
+        let sized = opts
+            .iter()
+            .find(|o| o.tag == "UD-Q5_K_XL")
+            .expect("tag present");
+        assert_eq!(
+            sized.bytes,
+            Some(8_237_824 + 49_986_025_344),
+            "shards must sum, not max"
+        );
+    }
+
+    #[test]
+    fn quant_options_withholds_partial_totals() {
+        let opts = quant_options(&snapshot());
+        for tag in ["UD-Q4_K_XL", "Q8_0"] {
+            let opt = opts.iter().find(|o| o.tag == tag).expect("tag present");
+            assert_eq!(opt.bytes, None, "{tag} has an unsized shard");
+        }
+    }
+
+    const SIZED_JSON: &str = r#"{
+        "sha": "0123456789abcdef0123456789abcdef01234567",
+        "siblings": [
+            {"rfilename": "Q8_0/m-Q8_0.gguf", "size": 300},
+            {"rfilename": "UD-Q4_K_XL/m-UD-Q4_K_XL.gguf", "size": 100},
+            {"rfilename": "UD-Q5_K_XL/m-UD-Q5_K_XL.gguf", "size": 200}
+        ]
+    }"#;
+
+    #[test]
+    fn quant_options_sorted_by_size_then_unsized_last() {
+        let tags: Vec<String> = quant_options(&snapshot_from(SIZED_JSON))
+            .into_iter()
+            .map(|o| o.tag)
+            .collect();
+        assert_eq!(tags, ["UD-Q4_K_XL", "UD-Q5_K_XL", "Q8_0"], "size order");
+        let mixed: Vec<Option<u64>> = quant_options(&snapshot())
+            .into_iter()
+            .map(|o| o.bytes)
+            .collect();
+        assert!(
+            mixed.last().expect("options").is_none(),
+            "unsized tags sort last: {mixed:?}"
+        );
+    }
+
+    fn option(tag: &str, gib: u64) -> QuantOption {
+        QuantOption {
+            tag: tag.to_owned(),
+            bytes: Some(gib * 1024 * 1024 * 1024),
+        }
+    }
+
+    #[test]
+    fn render_marks_exceeds_at_wired_limit() {
+        // 100 GiB budget: 85 GiB is exactly the tight threshold, 100 GiB is
+        // exactly at the limit (still tight), 101 GiB is over.
+        let opts = [
+            option("A", 84),
+            option("B", 85),
+            option("C", 100),
+            option("D", 101),
+        ];
+        let table = render_quant_table(&opts, Some(100 * 1024));
+        let verdict = |tag: &str| {
+            table
+                .lines()
+                .find(|l| l.trim_start().starts_with(tag))
+                .expect("row")
+                .split_whitespace()
+                .last()
+                .expect("verdict")
+                .to_owned()
+        };
+        assert_eq!(verdict("A"), "fits");
+        assert_eq!(verdict("B"), "tight");
+        assert_eq!(verdict("C"), "tight", "exactly at the limit is not 'fits'");
+        assert_eq!(verdict("D"), "exceeds");
+    }
+
+    #[test]
+    fn render_without_budget_omits_verdict_column() {
+        let table = render_quant_table(&[option("A", 84)], None);
+        assert!(table.contains("84.0 GiB"), "size missing: {table}");
+        for word in ["fits", "tight", "exceeds", "wired limit"] {
+            assert!(!table.contains(word), "{word} leaked without a budget");
+        }
+    }
+
+    #[test]
+    fn render_names_unknown_sizes_rather_than_guessing() {
+        let opts = [QuantOption {
+            tag: "Q8_0".to_owned(),
+            bytes: None,
+        }];
+        let table = render_quant_table(&opts, Some(100 * 1024));
+        assert!(table.contains("size unknown"), "{table}");
+        assert!(
+            !table.contains("fits"),
+            "no verdict without a size: {table}"
+        );
     }
 }

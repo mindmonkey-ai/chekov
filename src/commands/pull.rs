@@ -77,6 +77,16 @@ impl NewModel {
     }
 }
 
+/// The memory budget quant choices are judged against: the live effective
+/// wired limit (sysctl, 0-sentinel already resolved), falling back to the
+/// configured requirement when sysctl is unreadable.
+#[must_use]
+pub(crate) fn wired_budget_mb(ctx: &Ctx) -> Option<u64> {
+    crate::core::checks::wired_limit_mb()
+        .map(|(actual, _is_default)| actual)
+        .or(Some(ctx.config.file.limits.wired_limit_mb))
+}
+
 /// `LICENSE.provenance` content: where the snapshot came from and when.
 #[must_use]
 pub fn provenance_text(model: &NewModel, source: &str, fetched_utc: &str) -> String {
@@ -207,7 +217,14 @@ impl Command for PullCmd {
         let spec = PullSpec::parse(&self.spec)?;
         let snapshot =
             hub::fetch_snapshot(ctx.http.as_ref(), &spec.repo, spec.revision.as_deref())?;
-        let plan = hub::plan_pull(&snapshot, &spec.repo, spec.quant.as_deref())?;
+        let plan = hub::plan_pull(
+            &snapshot,
+            &hub::PullTarget {
+                repo: &spec.repo,
+                quant: spec.quant.as_deref(),
+                wired_mb: wired_budget_mb(ctx),
+            },
+        )?;
         let model = NewModel {
             name: self.name.clone().unwrap_or_else(|| spec.short_name()),
             repo: spec.repo.to_string(),

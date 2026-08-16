@@ -13,15 +13,16 @@ pub enum ChekovError {
     InvalidPullSpec { spec: String },
 
     #[error(
-        "no quant tag given for {repo} and there is no silent default — \
-         re-run with one of the available tags: {available} \
-         (e.g. `chekov pull {repo}:<QUANT>`)"
+        "no quant tag given for {repo} and there is no silent default.\n\
+         Available tags, {available}\n\n\
+         re-run: chekov pull {repo}:<QUANT>"
     )]
     NoQuantSpecified { repo: String, available: String },
 
     #[error(
-        "quant tag '{quant}' not found in {repo} — available tags: {available}; \
-         re-run `chekov pull {repo}:<QUANT>` with one of them"
+        "quant tag '{quant}' not found in {repo}.\n\
+         Available tags, {available}\n\n\
+         re-run: chekov pull {repo}:<QUANT>"
     )]
     QuantNotFound {
         quant: String,

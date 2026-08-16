@@ -99,7 +99,14 @@ fn resolve_newer(
         );
         return Ok(None);
     }
-    let plan = hub::plan_pull(&snapshot, &repo, Some(&entry.quant))?;
+    let plan = hub::plan_pull(
+        &snapshot,
+        &hub::PullTarget {
+            repo: &repo,
+            quant: Some(&entry.quant),
+            wired_mb: super::pull::wired_budget_mb(ctx),
+        },
+    )?;
     // An externally-located model (absolute path) keeps new revisions beside
     // the old one: the location is the existing dir's parent.
     let location = {
