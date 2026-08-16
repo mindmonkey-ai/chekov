@@ -1,8 +1,12 @@
 # chekov machine config (§16.11 — tunables live here, never in code).
 #
-# MiniMax-M2.7 UD-Q5_K_XL is ~158 GiB of weights + ~12 GiB q8_0 KV at 98304
-# ctx + compute buffers ≈ ~175 GiB. The macOS system-default wired limit on
-# this 256 GiB M3 Ultra is ~192 GiB (75% of RAM), so 180000 MB is the honest
-# requirement — no sudo sysctl bump needed for this model.
+# MiniMax-M2.7 UD-Q5_K_XL is 157.81 GiB of weights. The GGUF declares 62 layers
+# and 8 KV heads at key/value length 128, so q8_0 KV costs 131.75 KiB/token —
+# 20.59 GiB at the 163840 ctx set in models.toml. Measured RSS at 131072 ctx
+# pinned compute buffers + runtime at 2.63 GiB, giving 181.02 GiB total. The
+# macOS system-default wired limit on this 256 GiB M3 Ultra is 192 GiB (75% of
+# RAM), so 187000 MB is the honest requirement — no sudo sysctl bump needed.
+# The model's GGUF ceiling is 196608 ctx (185.13 GiB), which would leave only a
+# 6.87 GiB desktop margin; taking it wants iogpu.wired_limit_mb raised first.
 [limits]
-wired_limit_mb = 180000
+wired_limit_mb = 187000
