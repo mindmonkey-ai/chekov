@@ -11,8 +11,11 @@ use serde_json::{Map, Value, json};
 
 /// Settings keys carried forward from the user's real config so a local-model
 /// session keeps the tools they expect. `env` is deliberately absent: it is
-/// the block chekov owns.
-const CARRIED_KEYS: [&str; 4] = ["mcpServers", "hooks", "enabledPlugins", "permissions"];
+/// the block chekov owns.  `extraKnownMarketplaces` is needed so local plugins
+/// (e.g. `pushkin-review@pushkin-review`) resolve to a known marketplace rather
+/// than producing a "marketplace not found" warning on launch.
+const CARRIED_KEYS: [&str; 5] =
+    ["mcpServers", "hooks", "enabledPlugins", "permissions", "extraKnownMarketplaces"];
 
 /// What a generated `settings.json` needs to describe. Bundled to stay within
 /// the 3-argument limit (§3.4).

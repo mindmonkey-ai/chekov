@@ -1,6 +1,6 @@
 # chekov
 
-[![ci](https://github.com/acoletti/chekov/actions/workflows/ci.yml/badge.svg)](https://github.com/acoletti/chekov/actions/workflows/ci.yml)
+[![ci](https://github.com/mindmonkey-ai/chekov/actions/workflows/ci.yml/badge.svg)](https://github.com/mindmonkey-ai/chekov/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Local llama.cpp inference stack manager for Apple Silicon (built for a Mac
@@ -32,12 +32,12 @@ chekov setup                     # clone + Metal-build llama.cpp under this root
 ```
 
 Prebuilt arm64 tarballs (binary + zsh shim + completions) are attached to
-each [GitHub Release](https://github.com/acoletti/chekov/releases).
+each [GitHub Release](https://github.com/mindmonkey-ai/chekov/releases).
 
 ### From source
 
 ```sh
-git clone https://github.com/acoletti/chekov.git && cd chekov
+git clone https://github.com/mindmonkey-ai/chekov.git && cd chekov
 cp config.example.toml config.toml   # optional: tune wired_limit_mb, port, …
 
 make setup      # cargo release build + clone/cmake llama.cpp with Metal
