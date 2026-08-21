@@ -4,6 +4,7 @@ pub mod config;
 pub mod engine;
 pub mod hub;
 pub mod launch;
+pub mod plugins;
 pub mod proxy;
 pub mod pullspec;
 pub mod registry;

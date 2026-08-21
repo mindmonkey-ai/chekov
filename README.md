@@ -310,9 +310,13 @@ requests silently go out under the pinned model and fail. `chekov launch`
 therefore generates `<root>/agents/claude/settings.json` and points Claude
 Code at it with `CLAUDE_CONFIG_DIR`. Your real settings are never touched.
 
-The generated settings carry your `mcpServers`, `hooks`, `enabledPlugins`, and
-`permissions` forward, so a local session keeps the tools you expect; only the
-`env` block is chekov's. `ANTHROPIC_CUSTOM_MODEL_OPTION` is what makes a
+The generated settings carry your `mcpServers`, `hooks`, `enabledPlugins`,
+`permissions`, and `extraKnownMarketplaces` forward, so a local session keeps
+the tools you expect; only the `env` block is chekov's. Plugins installed from
+a **local-directory marketplace** are mirrored into the session's
+`plugins/` tree (symlink + `installed_plugins.json` / `known_marketplaces.json`
+entries) so `enabledPlugins` resolves without a "marketplace not found"
+warning; git-backed marketplaces need nothing special. `ANTHROPIC_CUSTOM_MODEL_OPTION` is what makes a
 non-Anthropic id such as `minimax-m2.7` selectable in `/model` — it is the one
 id accepted without a validation probe. Gateway discovery is deliberately not
 used: it filters ids to those containing `claude`, which would mean renaming

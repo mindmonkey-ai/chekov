@@ -1,0 +1,48 @@
+# Pushkin manifest for chekov — manual-testing setup, 2026-08-21.
+# Rust-only repo: no Zod contracts, so no [[contracts]]/[[mappings]]; the
+# gates and the floor are the feature set under test.
+version = 1
+canonical = "json-schema-2020-12"
+authoring = "zod"
+
+[gates]
+# @ts-ignore / #[allow(...)] / noqa on gated paths are refused — fix the code.
+suppression_comments = "deny"
+# Agent-denied, unwaivable: the gate surface, CI, and the build recipe.
+protected_paths = ["pushkin.toml", ".claude/settings.json", ".github/**", "Makefile", "deny.toml", "rust-toolchain.toml"]
+# Committed tests: agents may add files, never edit existing ones.
+read_only_paths = ["tests/**"]
+# Reads under src/ must route through Scout, not raw Read.
+retrieval_paths = ["src/**/*.rs"]
+retrieval_tool = "mcp__scout__search"
+
+[features]
+git_hooks = false
+
+[[floor.commands]]
+name = "fmt"
+run = ["cargo", "fmt", "--check"]
+scope = "per_file"
+inputs = "toolchain"
+on_stop = true
+
+[[floor.commands]]
+name = "clippy"
+run = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+scope = "whole_repo"
+inputs = "toolchain"
+on_stop = true
+
+[[floor.commands]]
+name = "test"
+run = ["cargo", "test"]
+scope = "whole_repo"
+inputs = "repo"
+on_stop = true
+
+[[floor.commands]]
+name = "deny"
+run = ["cargo", "deny", "check"]
+scope = "whole_repo"
+inputs = "network"
+install = "cargo install --locked cargo-deny"
