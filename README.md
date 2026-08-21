@@ -3,8 +3,7 @@
 [![ci](https://github.com/mindmonkey-ai/chekov/actions/workflows/ci.yml/badge.svg)](https://github.com/mindmonkey-ai/chekov/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Local llama.cpp inference stack manager for Apple Silicon (built for a Mac
-Studio M3 Ultra, 256 GB). One static binary owns the full lifecycle —
+Local llama.cpp inference stack manager for Apple Silicon One static binary owns the full lifecycle —
 **pull → run → stop/restart → status → doctor → update** — with models
 abstracted behind a registry so adding one is a single `pull`, ollama-style.
 Integrates with zsh, Hermes Agent, and Claude Code.
