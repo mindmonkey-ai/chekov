@@ -45,6 +45,13 @@ impl Default for Defaults {
                 "q8_0",
                 "--cache-type-v",
                 "q8_0",
+                // llama-server's `--parallel` default is auto (4 slots, unified
+                // KV), which makes `--ctx-size` a pool SHARED by all slots:
+                // three concurrent ~35K requests fail mid-generation with
+                // "Context size has been exceeded". Pin one slot so ctx_size
+                // means what it says (and CLAUDE_CODE_MAX_CONTEXT_TOKENS is honest).
+                "-np",
+                "1",
             ]
             .map(String::from)
             .to_vec(),
