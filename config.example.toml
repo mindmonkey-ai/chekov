@@ -1,0 +1,24 @@
+# chekov machine config — copy to `config.toml` beside the binary root.
+# Every key is optional; a missing file means all defaults. Unknown keys are
+# rejected loudly. Tunables live here, never in code (§16.11).
+#
+# Worked example for a 256 GB M3 Ultra running MiniMax-M2.7 UD-Q5_K_XL:
+# 157.81 GiB of weights + 20.59 GiB q8_0 KV at 163840 ctx + ~2.6 GiB compute
+# buffers = ~181 GiB wired. macOS's system-default wired limit is 75% of RAM
+# (192 GiB), so 187000 MB is the honest requirement without a sysctl bump.
+# Scale this to your own machine and model; `chekov run` refuses to start if
+# the effective limit is below it, and prints the exact sysctl to fix it.
+
+[server]
+host = "127.0.0.1"
+port = 8080
+api_key = "chekov-local"
+
+[limits]
+wired_limit_mb = 187000
+hermes_ctx_floor = 65536
+
+[doctor]
+canary_max_tokens = 1500
+degenerate_run_len = 30
+replacement_char_max_pct = 5

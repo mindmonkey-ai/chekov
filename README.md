@@ -1,5 +1,8 @@
 # chekov
 
+[![ci](https://github.com/acoletti/chekov/actions/workflows/ci.yml/badge.svg)](https://github.com/acoletti/chekov/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Local llama.cpp inference stack manager for Apple Silicon (built for a Mac
 Studio M3 Ultra, 256 GB). One static binary owns the full lifecycle —
 **pull → run → stop/restart → status → doctor → update** — with models
@@ -21,7 +24,8 @@ Integrates with zsh, Hermes Agent, and Claude Code.
 ## Installation
 
 ```sh
-git clone <this repo> ~/personal_dev/chekov && cd ~/personal_dev/chekov
+git clone https://github.com/acoletti/chekov.git && cd chekov
+cp config.example.toml config.toml   # optional: tune wired_limit_mb, port, …
 
 make setup      # cargo release build + clone/cmake llama.cpp with Metal
                 # (builds llama-server, llama-cli, llama-gguf-split)
@@ -32,6 +36,11 @@ make install    # cargo install --path .  → chekov on PATH (~/.cargo/bin)
 
 exec zsh        # pick up PATH, `cclocal` alias, tab completion
 ```
+
+The clone directory is the chekov root: registry, logs, weights (unless
+`--model-loc`), and the llama.cpp checkout all live under it. `make install`
+records that path in `~/.zshrc`; if you move the checkout later, export
+`CHEKOV_HOME=/new/path` instead of re-running install.
 
 `setup` ends by verifying `iogpu.wired_limit_mb`. A sysctl value of `0`
 means "macOS system default" and is resolved as **75% of RAM** (192 GiB on a
@@ -113,57 +122,22 @@ Model load time: ~2 minutes for a ~158 GiB model from a fast external SSD.
 
 ### Swapping models
 
-All models are GGUF-format quants hosted by [Unsloth](https://huggingface.co/unsloth).
-Pick the quant that fits your RAM — M3 Ultra with 256 GB can comfortably run
-Q5_K_XL or Q6_K for most models in this list.
-
-| Model | Params | Context | Strengths | Suggested quant |
-|---|---|---|---|---|
-| `unsloth/MiniMax-M2.7-GGUF` | 30B MoE | 100k | Reasoning, code, already wired in | `UD-Q5_K_XL` |
-| `unsloth/Qwen2.5-72B-GGUF` | 72B dense | 128k | Generalist, strong coding | `Q6_K` |
-| `unsloth/DeepSeek-V3-GGUF` | 236B MoE | 128k | Top coding/reasoning, benchmark leader | `UD-Q5_K_XL` |
-| `unsloth/GLM-5.1-GGUF` | ~130B | 130k+ | Long-context tasks, strong instruction following | `UD-Q5_K_XL` |
-| `unsloth/Qwen2.5-Coder-32B-GGUF` | 32B dense | 131k | Best open coding model at its size | `Q6_K` |
-| `unsloth/Mistral-Small-22B-GGUF` | 22B dense | 131k | Fast inference, excellent all-rounder | `Q8_0` |
-| `unsloth/Llama-4-Scout-17B-16E-GGUF` | 17B MoE (16E) | 131k | Meta's latest, fast long-context | `Q6_K` |
+Any GGUF repo on Hugging Face works; the quant tag after the colon picks the
+files. Swapping is three commands — no file edits:
 
 ```sh
-# DeepSeek-V3 — top coding + reasoning, 128k context (~180 GB at Q5_K_XL)
-chekov pull unsloth/DeepSeek-V3-GGUF:UD-Q5_K_XL --model-loc /Volumes/jane/models
-chekov use deepseek-v3
-chekov restart
-chekov doctor
-
-# Qwen2.5 72B — strong generalist with 128k context (~90 GB at Q6_K)
-chekov pull unsloth/Qwen2.5-72B-GGUF:Q6_K --model-loc /Volumes/jane/models
-chekov use qwen2.5-72b
-chekov restart
-chekov doctor
-
-# GLM-5.1 — longest context in the registry, ~130k+
-chekov pull unsloth/GLM-5.1-GGUF:UD-Q5_K_XL --model-loc /Volumes/jane/models
-chekov use glm-5.1
-chekov restart
-chekov doctor
-
-# Qwen2.5 Coder 32B — best open coding model, 131k context
-chekov pull unsloth/Qwen2.5-Coder-32B-GGUF:Q6_K --model-loc /Volumes/jane/models
-chekov use qwen2.5-coder-32b
-chekov restart
-chekov doctor
-
-# Llama-4 Scout — Meta's latest, fast inference, 131k context
-chekov pull unsloth/Llama-4-Scout-17B-16E-GGUF:Q6_K --model-loc /Volumes/jane/models
-chekov use llama-4-scout
-chekov restart
-chekov doctor
-
-# Mistral Small 22B — fast, capable, Q8_0 fits easily in RAM
-chekov pull unsloth/Mistral-Small-22B-GGUF:Q8_0 --model-loc /Volumes/jane/models
-chekov use mistral-small-22b
+chekov pull unsloth/Qwen3.8-27B-GGUF:UD-Q6_K_XL --model-loc /Volumes/jane/models
+chekov use qwen3.8-27b
 chekov restart
 chekov doctor
 ```
+
+Rules of thumb for a 256 GB machine: weights + KV cache + ~3 GiB of compute
+buffers must fit under `[limits] wired_limit_mb`; `chekov show <name>` prints
+the resolved invocation and `chekov run` refuses to start rather than let
+macOS page a model. Sampling flags (`--temp`, `--top-p`, `--reasoning-format`)
+live per model in `extra_flags` — copy the vendor's recommended values from
+the model card into `models.toml` after the first pull.
 
 To see available quant variants for any repo, pull without a quant suffix:
 
@@ -343,12 +317,16 @@ replacement_char_max_pct = 5
 ```
 
 Unknown keys are rejected loudly (deny_unknown_fields), never ignored.
-`CHEKOV_HOME` overrides the root directory (default `~/personal_dev/chekov`).
+`config.example.toml` is a commented starting point; `config.toml` itself is
+gitignored because the numbers are machine-specific. `CHEKOV_HOME` overrides
+the root directory (default: `~/personal_dev/chekov`, i.e. the recommended
+clone location).
 
 ## Layout
 
 ```
-config.toml          # machine tunables (above)
+config.example.toml  # commented template for the machine tunables (above)
+config.toml          # your copy of it (gitignored)
 models.toml          # the registry — managed by pull/use/rm/update (gitignored)
 models/<name>@<rev12>/     # weights + REVISION + LICENSE.snapshot/.provenance
                            # (or an absolute --model-loc dir)
@@ -363,7 +341,8 @@ shell/_chekov        # generated zsh completions (make install)
 ## Development
 
 ```sh
-make test   # cargo test — 80+ tests, all offline against fakes/fixtures
+make test   # cargo test — 150+ tests, all offline against fakes/fixtures
+make deny   # cargo deny check — licenses, advisories, duplicate crates
 make lint   # cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ```
 
@@ -373,4 +352,12 @@ make lint   # cargo fmt --check && cargo clippy --all-targets -- -D warnings
   test ever touches the network or a real llama.cpp
 - TDD with committed-red history per module (`git log --oneline` shows the
   red→green pairs); repo-specific standards overrides live in `AGENTS.md`
-- `deny.toml` is authored for CI supply-chain checks (`cargo deny`)
+- `deny.toml` is authored for CI supply-chain checks (`cargo deny`); CI
+  (`.github/workflows/ci.yml`) runs fmt + clippy + tests on macOS and
+  `cargo deny` on every push and PR
+- Changes are tracked in [CHANGELOG.md](CHANGELOG.md)
+
+## License
+
+[MIT](LICENSE). Model weights pulled by chekov carry their own licenses —
+each pull snapshots the license text beside the weights (see above).

@@ -14,13 +14,28 @@ allow = [
     "ISC",
     "Unicode-DFS-2016",
     "Unicode-3.0",
+    # File-level weak copyleft / permissive, pulled in transitively (colored,
+    # option-ext, konst, webpki-roots). Fine for an MIT binary that does not
+    # modify them.
+    "MPL-2.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]
 multiple-versions = "deny"
-# Populate with explicit skips (crate + reason) only when a duplicate is
-# unavoidable — never silently.
-skip = []
+# Explicit skips only (crate + reason) — never silently. Every entry below is
+# a transitive duplicate inside the hf-hub → reqwest/tokio/windows tree that
+# this crate cannot unify from its own manifest; revisit on each hf-hub bump.
+skip = [
+    { name = "base64" },
+    { name = "cfg-if" },
+    { name = "core-foundation" },
+    { name = "getrandom" },
+    { name = "syn" },
+    { name = "wasi" },
+    { name = "windows-sys" },
+]
 
 [sources]
 unknown-registry = "deny"

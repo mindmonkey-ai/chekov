@@ -10,7 +10,8 @@ edition = "2024"
 rust-version = "1.95"
 description = "Local llama.cpp inference stack manager for Apple Silicon: pull, run, doctor, update"
 license = "MIT"
-repository = "https://github.com/amoscoletti/chekov"
+readme = "README.md"
+repository = "https://github.com/acoletti/chekov"
 keywords = ["llama-cpp", "llm", "cli", "metal", "gguf"]
 categories = ["command-line-utilities"]
 

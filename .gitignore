@@ -19,3 +19,12 @@
 
 # Generated zsh completions (rebuilt by `make install`).
 /shell/_chekov
+
+# Machine-local tunables — copy config.example.toml to config.toml.
+/config.toml
+
+# Agent/tooling state and local session dumps — never part of the release.
+/.claude/
+/.scout/
+/session*.json
+/review-contex*.json

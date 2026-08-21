@@ -1,7 +1,12 @@
 # Thin by design (bootstrap prompt §6): every target <=3 lines, zero logic
 # duplicated from the CLI. hermes/claude integration is `chekov integrate`.
+# The repo root is derived, not hardcoded — clone anywhere; `make install`
+# wires that location into ~/.zshrc. Set CHEKOV_HOME if you move it later.
 
-.PHONY: setup update install test lint
+ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+ZSH_LINE := source $(ROOT)/shell/chekov.zsh
+
+.PHONY: setup update install test lint deny
 
 setup:
 	cargo build --release
@@ -13,10 +18,13 @@ update:
 install:
 	cargo install --path .
 	chekov completions zsh > shell/_chekov
-	grep -qF 'source ~/personal_dev/chekov/shell/chekov.zsh' ~/.zshrc || echo 'source ~/personal_dev/chekov/shell/chekov.zsh' >> ~/.zshrc
+	grep -qF "$(ZSH_LINE)" ~/.zshrc || echo "$(ZSH_LINE)" >> ~/.zshrc
 
 test:
 	cargo test
 
 lint:
 	cargo fmt --check && cargo clippy --all-targets -- -D warnings
+
+deny:
+	cargo deny check
