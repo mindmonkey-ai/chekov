@@ -23,6 +23,19 @@ Integrates with zsh, Hermes Agent, and Claude Code.
 
 ## Installation
 
+### From crates.io
+
+```sh
+cargo install chekov-mac         # installs the `chekov` binary
+mkdir -p ~/personal_dev/chekov && cd ~/personal_dev/chekov   # or any dir + export CHEKOV_HOME
+chekov setup                     # clone + Metal-build llama.cpp under this root
+```
+
+Prebuilt arm64 tarballs (binary + zsh shim + completions) are attached to
+each [GitHub Release](https://github.com/acoletti/chekov/releases).
+
+### From source
+
 ```sh
 git clone https://github.com/acoletti/chekov.git && cd chekov
 cp config.example.toml config.toml   # optional: tune wired_limit_mb, port, …
@@ -356,6 +369,16 @@ make lint   # cargo fmt --check && cargo clippy --all-targets -- -D warnings
   (`.github/workflows/ci.yml`) runs fmt + clippy + tests on macOS and
   `cargo deny` on every push and PR
 - Changes are tracked in [CHANGELOG.md](CHANGELOG.md)
+
+### Cutting a release
+
+1. Bump `version` in `Cargo.toml`, move the `[Unreleased]` notes in
+   `CHANGELOG.md` under a new dated heading, commit on `main`.
+2. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+3. `.github/workflows/release.yml` verifies the tag matches `Cargo.toml`,
+   re-runs lint + tests, attaches an arm64 tarball to a GitHub Release, and
+   publishes `chekov-mac` to crates.io (needs the `CARGO_REGISTRY_TOKEN`
+   repository secret; the job skips with a warning when it is absent).
 
 ## License
 

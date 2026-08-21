@@ -1,7 +1,7 @@
 # chekov — local llama.cpp inference stack manager.
 # Package is `chekov-mac` because crates.io `chekov` is taken (a CQRS/ES
 # framework, 2019). The binary keeps the name `chekov` (bootstrap prompt §2.7).
-# Publishing is out of scope; metadata kept publishable per §D.7.
+# Published to crates.io by .github/workflows/release.yml on every `v*` tag.
 
 [package]
 name = "chekov-mac"
@@ -14,6 +14,9 @@ readme = "README.md"
 repository = "https://github.com/acoletti/chekov"
 keywords = ["llama-cpp", "llm", "cli", "metal", "gguf"]
 categories = ["command-line-utilities"]
+# Crate carries only what `cargo install` needs; CI and house-standards docs
+# stay in the repo.
+exclude = [".github/", "AGENTS.md", "clippy.toml", "deny.toml", "rustfmt.toml"]
 
 [lib]
 # Library target exists so tests/ can exercise modules directly; the binary
