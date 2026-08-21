@@ -1,0 +1,67 @@
+# chekov manifest — this repo self-hosts its own gate (adopted from pushkin).
+#
+# chekov is a Rust-only, single-crate macOS CLI (crate `chekov-mac`, binary/lib
+# `chekov`). It has no schema/contract system, so `schema_epoch`, `canonical`
+# and `authoring` are unused here — they exist only to keep the manifest shape
+# identical to the harness. Bump `schema_epoch` if chekov ever gains a
+# schema/contract surface.
+
+version = 1
+schema_epoch = 1
+canonical = "none"
+authoring = "none"
+
+# Gates off-for-now (mirrors pushkin 2026-08-18): the commit-protection /
+# read-only-paths direction is paused while chekov refocuses on code-quality
+# harnessing. The gates stay declarative and can be re-armed by uncommenting.
+# Uncomment a line to re-arm that gate.
+[gates]
+#suppression_comments = "deny"
+#protected_paths = ["pushkin.toml", ".claude/settings.json", "AGENTS.md", ".github/**", "clippy.toml", "deny.toml", "rustfmt.toml", "Cargo.toml", "Cargo.lock"]
+read_only_paths = ["tests/**"]
+retrieval_paths = ["src/**/*.rs"]
+retrieval_tool = "mcp__codebase-retrieval__codebase-retrieval"
+
+# Hooks are managed via Claude Code settings.json (`pushkin-v1`), not lefthook,
+# so the git-hooks plane stays off.
+[features]
+git_hooks = false
+
+# The declared mechanical floor (Rust-only). ONE table, read by `pushkin floor`
+# and the Makefile. Order is the order they run and report in; scope/inputs are
+# DECLARED, never inferred.
+[floor]
+
+# fmt — per_file faithful: rustfmt is the one floor command that IS per-file.
+[[floor.commands]]
+name = "fmt"
+run = ["cargo", "fmt", "--check"]
+scope = "per_file"
+inputs = "toolchain"
+on_stop = true
+
+# clippy — whole-crate. chekov encodes §3 limits (≤3 args, ≤40 LOC, nesting) as
+# clippy thresholds in clippy.toml.
+[[floor.commands]]
+name = "clippy"
+run = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+scope = "per_crate"
+inputs = "toolchain"
+on_stop = true
+
+# test — whole repo.
+[[floor.commands]]
+name = "test"
+run = ["cargo", "test"]
+scope = "whole_repo"
+inputs = "repo"
+reconcile_ignored = true
+
+# deny — supply-chain gate (cargo deny check). network inputs: the advisories
+# check consults the RustSec DB, so an unchanged commit can newly fail.
+[[floor.commands]]
+name = "deny"
+run = ["cargo", "deny", "check"]
+scope = "whole_repo"
+inputs = "network"
+install = "cargo install --locked cargo-deny"
