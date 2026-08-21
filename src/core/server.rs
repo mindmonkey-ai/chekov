@@ -299,11 +299,11 @@ mod tests {
     #[test]
     fn shard_path_passes_absolute_entry_paths_through() {
         let (cfg, mut eff) = effective();
-        eff.entry.path = "/Volumes/jane/models/m@abc".into();
+        eff.entry.path = "/Volumes/external/models/m@abc".into();
         let shard = super::shard_path(&cfg, &eff);
         assert_eq!(
             shard,
-            std::path::PathBuf::from("/Volumes/jane/models/m@abc/m-Q8_0.gguf")
+            std::path::PathBuf::from("/Volumes/external/models/m@abc/m-Q8_0.gguf")
         );
     }
 

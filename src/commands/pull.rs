@@ -274,10 +274,10 @@ mod tests {
     #[test]
     fn registry_path_is_absolute_when_located() {
         let mut located = model();
-        located.location = Some("/Volumes/jane/models".into());
+        located.location = Some("/Volumes/external/models".into());
         assert_eq!(
             located.registry_path(),
-            "/Volumes/jane/models/minimax-m2.7@0123456789ab"
+            "/Volumes/external/models/minimax-m2.7@0123456789ab"
         );
         assert_eq!(model().registry_path(), "models/minimax-m2.7@0123456789ab");
     }

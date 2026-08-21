@@ -14,8 +14,13 @@ use serde_json::{Map, Value, json};
 /// the block chekov owns.  `extraKnownMarketplaces` is needed so local plugins
 /// (e.g. `pushkin-review@pushkin-review`) resolve to a known marketplace rather
 /// than producing a "marketplace not found" warning on launch.
-const CARRIED_KEYS: [&str; 5] =
-    ["mcpServers", "hooks", "enabledPlugins", "permissions", "extraKnownMarketplaces"];
+const CARRIED_KEYS: [&str; 5] = [
+    "mcpServers",
+    "hooks",
+    "enabledPlugins",
+    "permissions",
+    "extraKnownMarketplaces",
+];
 
 /// What a generated `settings.json` needs to describe. Bundled to stay within
 /// the 3-argument limit (§3.4).

@@ -511,17 +511,19 @@ mod tests {
     #[test]
     fn adoption_candidates_prefer_hf_cli_layout() {
         let cands = super::adoption_candidates(
-            std::path::Path::new("/Volumes/jane/models"),
+            std::path::Path::new("/Volumes/external/models"),
             "unsloth/MiniMax-M2.7-GGUF",
             "UD-Q5_K_XL/x.gguf",
         );
         assert_eq!(
             cands[0],
-            std::path::PathBuf::from("/Volumes/jane/models/MiniMax-M2.7-GGUF/UD-Q5_K_XL/x.gguf")
+            std::path::PathBuf::from(
+                "/Volumes/external/models/MiniMax-M2.7-GGUF/UD-Q5_K_XL/x.gguf"
+            )
         );
         assert_eq!(
             cands[1],
-            std::path::PathBuf::from("/Volumes/jane/models/UD-Q5_K_XL/x.gguf")
+            std::path::PathBuf::from("/Volumes/external/models/UD-Q5_K_XL/x.gguf")
         );
     }
 

@@ -34,7 +34,7 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    /// Production context: `$CHEKOV_HOME` (or `~/personal_dev/chekov`) + ureq.
+    /// Production context: `$CHEKOV_HOME` (or `~/.chekov`) + ureq.
     pub fn from_env() -> Result<Self, ChekovError> {
         let home = directories::UserDirs::new()
             .map_or_else(|| PathBuf::from("/"), |u| u.home_dir().to_path_buf());

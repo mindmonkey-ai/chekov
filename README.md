@@ -3,8 +3,9 @@
 [![ci](https://github.com/mindmonkey-ai/chekov/actions/workflows/ci.yml/badge.svg)](https://github.com/mindmonkey-ai/chekov/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Local llama.cpp inference stack manager for Apple Silicon (built for a Mac
-Studio M3 Ultra, 256 GB). One static binary owns the full lifecycle —
+Local llama.cpp inference stack manager for Apple Silicon Macs with enough
+unified memory to run large GGUF models (developed on a 256 GB Mac Studio;
+anything from 32 GB up works with an appropriately sized model). One static binary owns the full lifecycle —
 **pull → run → stop/restart → status → doctor → update** — with models
 abstracted behind a registry so adding one is a single `pull`, ollama-style.
 Integrates with zsh, Hermes Agent, and Claude Code.
@@ -26,10 +27,12 @@ Integrates with zsh, Hermes Agent, and Claude Code.
 ### From crates.io
 
 ```sh
-cargo install chekov-mac         # installs the `chekov` binary
-mkdir -p ~/personal_dev/chekov && cd ~/personal_dev/chekov   # or any dir + export CHEKOV_HOME
-chekov setup                     # clone + Metal-build llama.cpp under this root
+cargo install chekov-mac   # installs the `chekov` binary
+chekov setup               # clone + Metal-build llama.cpp under ~/.chekov
 ```
+
+The root directory (registry, logs, engine checkout, default weights dir) is
+`~/.chekov`; set `CHEKOV_HOME` to put it elsewhere.
 
 Prebuilt arm64 tarballs (binary + zsh shim + completions) are attached to
 each [GitHub Release](https://github.com/mindmonkey-ai/chekov/releases).
@@ -50,14 +53,14 @@ make install    # cargo install --path .  → chekov on PATH (~/.cargo/bin)
 exec zsh        # pick up PATH, `cclocal` alias, tab completion
 ```
 
-The clone directory is the chekov root: registry, logs, weights (unless
-`--model-loc`), and the llama.cpp checkout all live under it. `make install`
-records that path in `~/.zshrc`; if you move the checkout later, export
-`CHEKOV_HOME=/new/path` instead of re-running install.
+When installed from source, the clone directory is the chekov root:
+`shell/chekov.zsh` exports `CHEKOV_HOME` pointing at itself, so registry,
+logs, weights (unless `--model-loc`), and the llama.cpp checkout all live
+under the clone. If you move the checkout, re-run `make install`.
 
 `setup` ends by verifying `iogpu.wired_limit_mb`. A sysctl value of `0`
-means "macOS system default" and is resolved as **75% of RAM** (192 GiB on a
-256 GB machine) — it is not treated as zero. If the effective limit is below
+means "macOS system default" and is resolved as **75% of RAM** (e.g. 192 GiB
+on a 256 GB machine) — it is not treated as zero. If the effective limit is below
 `[limits] wired_limit_mb` in `config.toml`, setup prints the exact
 `sudo sysctl iogpu.wired_limit_mb=<N>` command and marks itself incomplete;
 run it yourself and re-run `make setup` to verify. **chekov never executes
@@ -75,7 +78,7 @@ chekov doctor            # five health checks; non-zero exit on any failure
 Already have the weights on an external drive (huggingface-cli layout)?
 
 ```sh
-chekov pull unsloth/MiniMax-M2.7-GGUF:UD-Q5_K_XL --model-loc /Volumes/jane/models
+chekov pull unsloth/MiniMax-M2.7-GGUF:UD-Q5_K_XL --model-loc /Volumes/external/models
 ```
 
 Files found under `<loc>/<RepoName>/<rfilename>` (or `<loc>/<rfilename>`)
@@ -133,24 +136,83 @@ Model load time: ~2 minutes for a ~158 GiB model from a fast external SSD.
 `chekov run` returns immediately; poll `curl -s localhost:8080/health`
 (503 while loading, 200 when ready) or just run `chekov doctor`.
 
-### Swapping models
+### Finding a model
 
-Any GGUF repo on Hugging Face works; the quant tag after the colon picks the
-files. Swapping is three commands — no file edits:
+chekov runs any GGUF repo on Hugging Face. A workable way to choose:
+
+1. **Start from a quantizer you trust.** [unsloth](https://huggingface.co/unsloth)
+   and [bartowski](https://huggingface.co/bartowski) publish GGUF conversions of
+   most notable open-weight releases within days, with a quant table on every
+   model card; filter the Hub by the `gguf` library tag to find others.
+2. **Read the model card's quant table.** Each row is a tag (`Q4_K_M`,
+   `UD-Q5_K_XL`, `Q8_0`, …) with a file size. The tag is what goes after the
+   colon in the pull spec.
+3. **Size it against your memory.** Rule of thumb: `weights + KV cache + ~3 GiB`
+   must fit under `[limits] wired_limit_mb` (default: 75% of RAM). KV cache at
+   q8_0 is roughly `ctx × layers × kv_heads × head_dim × 2 bytes`; for a
+   100k context on a mid-size model budget 10–20 GiB. Pick the largest quant
+   that leaves that headroom — `chekov run` refuses to start rather than let
+   macOS page a model, so an over-ambitious pick fails loudly, not slowly.
+4. **Note the vendor's sampling advice.** Model cards usually list
+   recommended `temperature` / `top_p` / `top_k` and whether the model emits
+   `<think>` blocks; those become the model's `extra_flags`.
+
+Not sure which tags a repo offers? Pull without one and chekov lists them:
 
 ```sh
-chekov pull unsloth/Qwen3.8-27B-GGUF:UD-Q6_K_XL --model-loc /Volumes/jane/models
-chekov use qwen3.8-27b
-chekov restart
-chekov doctor
+chekov pull unsloth/Qwen3.8-27B-GGUF
+# error: no quant tag given for unsloth/Qwen3.8-27B-GGUF and there is no silent default.
+# Available tags, UD-Q4_K_XL, UD-Q5_K_XL, UD-Q6_K_XL, Q8_0, …
+#
+# re-run: chekov pull unsloth/Qwen3.8-27B-GGUF:<QUANT>
 ```
 
-Rules of thumb for a 256 GB machine: weights + KV cache + ~3 GiB of compute
-buffers must fit under `[limits] wired_limit_mb`; `chekov show <name>` prints
-the resolved invocation and `chekov run` refuses to start rather than let
-macOS page a model. Sampling flags (`--temp`, `--top-p`, `--reasoning-format`)
-live per model in `extra_flags` — copy the vendor's recommended values from
-the model card into `models.toml` after the first pull.
+### Adding a model
+
+```sh
+chekov pull unsloth/Qwen3.8-27B-GGUF:UD-Q6_K_XL          # download to <root>/models/
+chekov pull unsloth/Qwen3.8-27B-GGUF:UD-Q6_K_XL \
+    --model-loc /Volumes/external/models                  # …or onto an external volume
+chekov show qwen3.8-27b                                   # the exact llama-server invocation
+```
+
+`pull` resolves the repo's current revision, downloads only the files for
+that quant, snapshots the license, and registers the model under a short name
+(`unsloth/Qwen3.8-27B-GGUF` → `qwen3.8-27b`; override with `--name`). Then
+tune its entry in `models.toml` — this is the one place where a file edit is
+normal:
+
+```toml
+[models."qwen3.8-27b"]
+# …fields written by pull…
+ctx_size = 131072                      # override [defaults].ctx_size for this model
+hermes_ok = true                       # enforce the 65536 ctx floor in `doctor`
+extra_flags = ["--reasoning-format", "none",   # keep <think> blocks in the output
+               "--temp", "0.7", "--top-p", "0.8", "--top-k", "20"]
+```
+
+`extra_flags` are appended after `[defaults].flags`, never replacing them.
+Then activate and verify:
+
+```sh
+chekov use qwen3.8-27b
+chekov restart            # or `chekov run` if nothing is running
+chekov doctor             # both API doors, think-tags, NaN canary, ctx floor
+```
+
+Pin a specific revision with `org/repo:QUANT@<sha>`; use `--dry-run` to see
+what would be downloaded; `--license-url` points the license snapshot at a
+non-standard location when the repo keeps it elsewhere.
+
+### Swapping models
+
+Every registered model is one `use` away:
+
+```sh
+chekov list               # what is registered, sizes, which is active
+chekov use minimax-m2.7
+chekov restart
+```
 
 To see available quant variants for any repo, pull without a quant suffix:
 
@@ -295,7 +357,7 @@ flags = ["--jinja", "--flash-attn", "on",
 repo = "unsloth/MiniMax-M2.7-GGUF"
 quant = "UD-Q5_K_XL"
 revision = "d2a05ccf69491b03db0cc40b335aec14bdaf7198"
-path = "/Volumes/jane/models/minimax-m2.7@d2a05ccf6949"   # absolute = --model-loc
+path = "/Volumes/external/models/minimax-m2.7@d2a05ccf6949"   # absolute = --model-loc
 first_shard = "UD-Q5_K_XL/MiniMax-M2.7-UD-Q5_K_XL-00001-of-00005.gguf"
 hermes_ok = true
 extra_flags = ["--reasoning-format", "none",
@@ -332,8 +394,8 @@ replacement_char_max_pct = 5
 Unknown keys are rejected loudly (deny_unknown_fields), never ignored.
 `config.example.toml` is a commented starting point; `config.toml` itself is
 gitignored because the numbers are machine-specific. `CHEKOV_HOME` overrides
-the root directory (default: `~/personal_dev/chekov`, i.e. the recommended
-clone location).
+the root directory (default `~/.chekov`; a source install's shell shim sets
+it to the clone).
 
 ## Layout
 

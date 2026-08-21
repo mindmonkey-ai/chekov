@@ -144,13 +144,10 @@ impl Config {
     }
 }
 
-/// Root directory: `$CHEKOV_HOME` when set, else `~/personal_dev/chekov`.
+/// Root directory: `$CHEKOV_HOME` when set, else `~/.chekov`.
 #[must_use]
 pub fn resolve_root(env_home: Option<&str>, user_home: &Path) -> PathBuf {
-    env_home.map_or_else(
-        || user_home.join("personal_dev").join("chekov"),
-        PathBuf::from,
-    )
+    env_home.map_or_else(|| user_home.join(".chekov"), PathBuf::from)
 }
 
 #[cfg(test)]
@@ -205,7 +202,7 @@ mod tests {
         assert_eq!(resolve_root(Some("/x/y"), home), PathBuf::from("/x/y"));
         assert_eq!(
             resolve_root(None, home),
-            PathBuf::from("/Users/nobody/personal_dev/chekov")
+            PathBuf::from("/Users/nobody/.chekov")
         );
     }
 }

@@ -128,11 +128,11 @@ mod tests {
             "pull",
             "org/repo:Q8_0",
             "--model-loc",
-            "/Volumes/jane/models",
+            "/Volumes/external/models",
         ])
         .expect("parse");
         assert!(matches!(cli.cmd, Cmd::Pull(ref c)
-            if c.model_loc.as_deref() == Some(std::path::Path::new("/Volumes/jane/models"))));
+            if c.model_loc.as_deref() == Some(std::path::Path::new("/Volumes/external/models"))));
     }
 
     #[test]
