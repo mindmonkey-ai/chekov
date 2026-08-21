@@ -13,6 +13,7 @@ use crate::error::ChekovError;
 pub mod doctor;
 pub mod env;
 pub mod integrate;
+pub mod launch;
 pub mod list;
 pub mod pull;
 pub mod restart;

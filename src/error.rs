@@ -68,6 +68,13 @@ pub enum ChekovError {
     PortOccupied { port: u16 },
 
     #[error(
+        "agent binary '{binary}' was not found on PATH — install it, or run \
+         `chekov launch {binary} --print` to get the config directory and start \
+         it yourself"
+    )]
+    AgentBinaryMissing { binary: String },
+
+    #[error(
         "GPU wired limit is {actual_mb} MB but {required_mb} MB is required — \
          run: sudo sysctl iogpu.wired_limit_mb={required_mb} \
          then re-run this command to verify (chekov never executes sudo itself)"
@@ -80,7 +87,7 @@ pub enum ChekovError {
     )]
     ServerAlreadyRunning { pid: i32 },
 
-    #[error("no chekov-managed server is running — start one with `chekov run --daemon`")]
+    #[error("no chekov-managed server is running — start one with `chekov run`")]
     ServerNotRunning,
 
     #[error(
@@ -159,6 +166,19 @@ pub enum ChekovError {
     )]
     UpdateFlagsMissing,
 
+    #[error(
+        "proxy rejected a malformed agent request: {reason} — the agent sent \
+         something this facade does not understand; re-run with `chekov launch \
+         claude --proxy-only` and check the agent's base URL points at the proxy port"
+    )]
+    ProxyBadRequest { reason: String },
+
+    #[error(
+        "proxy could not reach the local server at {url}: {reason} — run \
+         `chekov status` to confirm it is up, then `chekov run`"
+    )]
+    ProxyUpstreamFailed { url: String, reason: String },
+
     #[error("{context}: {source} — check the path exists and is writable, then retry")]
     Io {
         context: String,
@@ -197,6 +217,16 @@ mod tests {
         let msg = ChekovError::PortOccupied { port: 8080 }.to_string();
         assert!(msg.contains("8080"), "no port in: {msg}");
         assert!(msg.contains("chekov status"), "no remediation in: {msg}");
+    }
+
+    #[test]
+    fn agent_binary_missing_offers_the_print_fallback() {
+        let msg = ChekovError::AgentBinaryMissing {
+            binary: "claude".to_owned(),
+        }
+        .to_string();
+        assert!(msg.contains("claude"), "no binary in: {msg}");
+        assert!(msg.contains("--print"), "no remediation in: {msg}");
     }
 
     #[test]

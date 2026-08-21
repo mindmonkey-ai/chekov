@@ -10,6 +10,10 @@
 /bin/
 /llama.cpp/
 
+# Generated agent config dirs written by `chekov launch` (carry forward the
+# user's real settings, so they hold machine-local MCP and plugin state).
+/agents/
+
 # Integration backups written by `chekov integrate` (<file>.bak-<UTC>).
 *.bak-*
 

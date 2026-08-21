@@ -1,5 +1,5 @@
-//! `chekov restart [name]` — stop (if running) then run --daemon; swaps
-//! models in one motion.
+//! `chekov restart [name]` — stop (if running) then run in the background;
+//! swaps models in one motion.
 
 use std::process::ExitCode;
 
@@ -19,7 +19,8 @@ impl Command for RestartCmd {
         }
         super::run::RunCmd {
             name: self.name.clone(),
-            daemon: true,
+            foreground: false,
+            daemon: false,
         }
         .run(ctx)
     }

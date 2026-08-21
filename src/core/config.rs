@@ -116,6 +116,12 @@ impl Config {
         self.root.join("models.toml")
     }
 
+    /// Generated agent config dirs (`chekov launch`), one per agent slug.
+    #[must_use]
+    pub fn agent_dir(&self, slug: &str) -> PathBuf {
+        self.root.join("agents").join(slug)
+    }
+
     #[must_use]
     pub fn pidfile(&self) -> PathBuf {
         self.logs_dir().join("chekov.pid")

@@ -1,5 +1,9 @@
-//! `chekov run [name] [--daemon]` — start llama-server after loud preflight:
+//! `chekov run [name] [--foreground]` — start llama-server after loud preflight:
 //! shard present, port free, wired limit sufficient, nothing already running.
+//!
+//! Backgrounds by default (pidfile logs/chekov.pid, output to
+//! logs/llama-server.log). `--foreground` blocks the terminal instead; the
+//! legacy `--daemon` flag is a hidden no-op kept so old scripts still parse.
 
 use std::process::ExitCode;
 
@@ -10,8 +14,11 @@ use crate::error::ChekovError;
 pub struct RunCmd {
     /// Registered model name (defaults to the active model).
     pub name: Option<String>,
-    /// Detach: pidfile logs/chekov.pid, output to logs/llama-server.log.
+    /// Block the terminal instead of detaching (ctrl-c to stop).
     #[arg(long)]
+    pub foreground: bool,
+    /// Deprecated: backgrounding is now the default. Accepted as a no-op.
+    #[arg(long, hide = true)]
     pub daemon: bool,
 }
 
@@ -65,7 +72,10 @@ impl Command for RunCmd {
         };
         let eff = reg.effective(&name)?;
         preflight(ctx, &eff)?;
-        if self.daemon {
+        if self.foreground {
+            println!("starting '{name}' in the foreground (ctrl-c to stop)");
+            server::run_foreground(&ctx.config, &eff)
+        } else {
             let pid = server::spawn_daemon(&ctx.config, &eff)?;
             server::write_run_state(&ctx.config, &name)?;
             println!(
@@ -73,9 +83,6 @@ impl Command for RunCmd {
                 ctx.config.server_log().display()
             );
             Ok(ExitCode::SUCCESS)
-        } else {
-            println!("starting '{name}' in the foreground (ctrl-c to stop)");
-            server::run_foreground(&ctx.config, &eff)
         }
     }
 }

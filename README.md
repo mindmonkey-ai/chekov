@@ -46,7 +46,7 @@ sudo.**
 ```sh
 chekov pull unsloth/MiniMax-M2.7-GGUF:UD-Q5_K_XL
 chekov use minimax-m2.7
-chekov run --daemon
+chekov run                # starts in the background by default
 chekov doctor            # five health checks; non-zero exit on any failure
 ```
 
@@ -66,9 +66,9 @@ The registry stores the absolute path; everything else works unchanged.
 
 | Command | What it does |
 |---|---|
-| `run [name] [--daemon]` | Start llama-server (default: active model). Refuses loudly if: shard missing, port occupied, wired limit below config, engine not built, or a server already running. |
+| `run [name] [--foreground]` | Start llama-server (default: active model). Backgrounds by default; `--foreground` blocks the terminal instead. Refuses loudly if: shard missing, port occupied, wired limit below config, engine not built, or a server already running. |
 | `stop` | SIGTERM via pidfile, 20 s grace, SIGKILL escalation with a warning. Detects and cleans stale pidfiles. |
-| `restart [name]` | Stop (if running) then `run --daemon`; swaps models in one motion. |
+| `restart [name]` | Stop (if running) then start in the background; swaps models in one motion. |
 | `status` | running/pid, model, revision, port, ctx, uptime, wired-limit actual (with system-default annotation) vs required, log tail path. |
 | `pull <spec> [--name N] [--dry-run] [--model-loc DIR] [--license-url URL]` | Resolve revision, download (or adopt) quant-matching files, snapshot license + provenance, register. Idempotent: same spec+revision is a verified no-op; a NEW revision downloads but never repoints (that is `update`'s gated job). |
 | `list` | Table: active marker, name, quant, size on disk, revision. |
@@ -81,6 +81,7 @@ The registry stores the absolute path; everything else works unchanged.
 | `integrate hermes [--yes]` | Surgical merge into `~/.hermes/config.yaml` (details below). |
 | `integrate claude` | Generate `bin/cclocal`; global Claude settings untouched. |
 | `env` | Stdout-only `ANTHROPIC_*` exports; diagnostics to stderr; safe for `eval "$(chekov env)"`. |
+| `launch <agent> [--model N] [--print] [--proxy-only [--port N]] [-- args]` | Start the agent wired to the local model: proxy in-thread, generated config dir, agent as a child (auto-starts the server if it isn't running). `--print` emits the command instead of running it. `--proxy-only` runs just the foreground protocol translator (Anthropic `/v1/messages` → the server's OpenAI endpoint) on `--port` (default 8787), with no child and no generated settings — for hand-wiring a different client. |
 
 ### The five doctor checks
 
@@ -100,23 +101,74 @@ The registry stores the absolute path; everything else works unchanged.
 
 ```sh
 chekov status                 # is it up? which model/revision? wired limit?
-chekov run --daemon           # start (refuses if something is off)
+chekov run                    # start in the background (refuses if something is off)
 chekov doctor                 # full health pass — run after any change
 chekov stop                   # clean shutdown
 tail -f logs/llama-server.log # watch the server
 ```
 
 Model load time: ~2 minutes for a ~158 GiB model from a fast external SSD.
-`run --daemon` returns immediately; poll `curl -s localhost:8080/health`
+`chekov run` returns immediately; poll `curl -s localhost:8080/health`
 (503 while loading, 200 when ready) or just run `chekov doctor`.
 
 ### Swapping models
 
+All models are GGUF-format quants hosted by [Unsloth](https://huggingface.co/unsloth).
+Pick the quant that fits your RAM — M3 Ultra with 256 GB can comfortably run
+Q5_K_XL or Q6_K for most models in this list.
+
+| Model | Params | Context | Strengths | Suggested quant |
+|---|---|---|---|---|
+| `unsloth/MiniMax-M2.7-GGUF` | 30B MoE | 100k | Reasoning, code, already wired in | `UD-Q5_K_XL` |
+| `unsloth/Qwen2.5-72B-GGUF` | 72B dense | 128k | Generalist, strong coding | `Q6_K` |
+| `unsloth/DeepSeek-V3-GGUF` | 236B MoE | 128k | Top coding/reasoning, benchmark leader | `UD-Q5_K_XL` |
+| `unsloth/GLM-5.1-GGUF` | ~130B | 130k+ | Long-context tasks, strong instruction following | `UD-Q5_K_XL` |
+| `unsloth/Qwen2.5-Coder-32B-GGUF` | 32B dense | 131k | Best open coding model at its size | `Q6_K` |
+| `unsloth/Mistral-Small-22B-GGUF` | 22B dense | 131k | Fast inference, excellent all-rounder | `Q8_0` |
+| `unsloth/Llama-4-Scout-17B-16E-GGUF` | 17B MoE (16E) | 131k | Meta's latest, fast long-context | `Q6_K` |
+
 ```sh
-chekov pull unsloth/GLM-5.1-GGUF:UD-IQ1_M --model-loc /Volumes/jane/models
-chekov use glm-5.1            # or in one motion: chekov restart glm-5.1
+# DeepSeek-V3 — top coding + reasoning, 128k context (~180 GB at Q5_K_XL)
+chekov pull unsloth/DeepSeek-V3-GGUF:UD-Q5_K_XL --model-loc /Volumes/jane/models
+chekov use deepseek-v3
 chekov restart
 chekov doctor
+
+# Qwen2.5 72B — strong generalist with 128k context (~90 GB at Q6_K)
+chekov pull unsloth/Qwen2.5-72B-GGUF:Q6_K --model-loc /Volumes/jane/models
+chekov use qwen2.5-72b
+chekov restart
+chekov doctor
+
+# GLM-5.1 — longest context in the registry, ~130k+
+chekov pull unsloth/GLM-5.1-GGUF:UD-Q5_K_XL --model-loc /Volumes/jane/models
+chekov use glm-5.1
+chekov restart
+chekov doctor
+
+# Qwen2.5 Coder 32B — best open coding model, 131k context
+chekov pull unsloth/Qwen2.5-Coder-32B-GGUF:Q6_K --model-loc /Volumes/jane/models
+chekov use qwen2.5-coder-32b
+chekov restart
+chekov doctor
+
+# Llama-4 Scout — Meta's latest, fast inference, 131k context
+chekov pull unsloth/Llama-4-Scout-17B-16E-GGUF:Q6_K --model-loc /Volumes/jane/models
+chekov use llama-4-scout
+chekov restart
+chekov doctor
+
+# Mistral Small 22B — fast, capable, Q8_0 fits easily in RAM
+chekov pull unsloth/Mistral-Small-22B-GGUF:Q8_0 --model-loc /Volumes/jane/models
+chekov use mistral-small-22b
+chekov restart
+chekov doctor
+```
+
+To see available quant variants for any repo, pull without a quant suffix:
+
+```sh
+chekov pull unsloth/DeepSeek-V3-GGUF   # errors with the available tags
 ```
 
 No file edits needed. `chekov show <name>` prints the exact invocation.
@@ -140,7 +192,7 @@ until you `chekov rm` them.
 |---|---|
 | `port 8080 is already in use` | `chekov status`; if it's a chekov server, `chekov stop`/`restart`; otherwise free the port or change `[server] port` in `config.toml`. |
 | `wired limit is X MB but Y MB is required` | Run the printed `sudo sysctl iogpu.wired_limit_mb=Y`, then retry. Reboots reset it. |
-| `stale pidfile … cleaned` on `stop` | The server died earlier (check the log tail). Just `chekov run --daemon` again. |
+| `stale pidfile … cleaned` on `stop` | The server died earlier (check the log tail). Just `chekov run` again. |
 | Doctor: NaN canary FAIL | Matches the known GGUF corruption class — re-pull the shards (`chekov pull <spec>`, size-verified) and re-run doctor. |
 | Doctor: think-tag FAIL | The model's `extra_flags` lost `--reasoning-format none`, or the template ate the tags — check `chekov show`. |
 | First Claude Code call is slow (~5–6 min) | Expected: Claude Code's initial request carries a ~60k-token system+tools prompt; MiniMax prompt-processes at ~180 tok/s. The server's prompt cache makes subsequent calls fast. |
@@ -187,6 +239,39 @@ to the cloud** (that failure mode actually happened; it's regression-tested).
 three `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` variables pointing at the
 active alias, so any Anthropic-SDK tool can be pointed locally with
 `eval "$(chekov env)"`.
+
+### Claude Code (`chekov launch claude`)
+
+```sh
+chekov launch claude                   # interactive, on the local model
+chekov launch claude -- -p "question"  # args after -- go to claude
+chekov launch claude --print           # emit the command, run it yourself
+chekov launch claude --proxy-only      # just the translator on :8787 (no child)
+```
+
+Starts the model server if it is down, binds the translator on an ephemeral
+loopback port, and runs `claude` as a child — so the proxy exits with the
+session rather than lingering on a port.
+
+**Why a config dir and not environment variables.** Claude Code writes every
+`env` entry from its settings file into the process environment at startup,
+replacing what the shell exported. A launcher that only sets variables is a
+no-op for anyone who pins `ANTHROPIC_MODEL` in `~/.claude/settings.json` —
+requests silently go out under the pinned model and fail. `chekov launch`
+therefore generates `<root>/agents/claude/settings.json` and points Claude
+Code at it with `CLAUDE_CONFIG_DIR`. Your real settings are never touched.
+
+The generated settings carry your `mcpServers`, `hooks`, `enabledPlugins`, and
+`permissions` forward, so a local session keeps the tools you expect; only the
+`env` block is chekov's. `ANTHROPIC_CUSTOM_MODEL_OPTION` is what makes a
+non-Anthropic id such as `minimax-m2.7` selectable in `/model` — it is the one
+id accepted without a validation probe. Gateway discovery is deliberately not
+used: it filters ids to those containing `claude`, which would mean renaming
+the model to satisfy a substring check and forfeiting the honest
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` declaration.
+
+Claude Code still logs `[claude-code:unrecognized_model]` once at startup from
+its own session-title call. Cosmetic — the request that matters is served.
 
 ## Pull-spec grammar
 
@@ -269,6 +354,7 @@ models/<name>@<rev12>/     # weights + REVISION + LICENSE.snapshot/.provenance
                            # (or an absolute --model-loc dir)
 logs/                # chekov.pid, chekov.model, llama-server.log
 llama.cpp/           # engine checkout + Metal build (managed by setup)
+agents/<agent>/      # generated agent settings for `chekov launch` (gitignored)
 bin/cclocal          # generated by `chekov integrate claude`
 shell/chekov.zsh     # PATH + cclocal alias + completions (sourced from ~/.zshrc)
 shell/_chekov        # generated zsh completions (make install)

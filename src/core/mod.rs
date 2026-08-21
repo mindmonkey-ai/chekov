@@ -3,6 +3,8 @@ pub mod clock;
 pub mod config;
 pub mod engine;
 pub mod hub;
+pub mod launch;
+pub mod proxy;
 pub mod pullspec;
 pub mod registry;
 pub mod server;

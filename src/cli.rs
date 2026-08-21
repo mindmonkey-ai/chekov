@@ -21,11 +21,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
-    /// Start llama-server for a model (foreground unless --daemon)
+    /// Start llama-server for a model (backgrounds by default; --foreground blocks)
     Run(commands::run::RunCmd),
     /// Stop the running server (SIGTERM, then SIGKILL after 20s)
     Stop(commands::stop::StopCmd),
-    /// Stop (if running) then start --daemon; swaps models in one motion
+    /// Stop (if running) then start in the background; swaps models in one motion
     Restart(commands::restart::RestartCmd),
     /// Show server state, model, revision, uptime, wired limit
     Status(commands::status::StatusCmd),
@@ -49,6 +49,8 @@ pub enum Cmd {
     Env(commands::env::EnvCmd),
     /// Wire up Hermes or Claude Code against the local server
     Integrate(commands::integrate::IntegrateCmd),
+    /// Start an agent wired to the local model (proxy + settings; --proxy-only for the translator alone)
+    Launch(commands::launch::LaunchCmd),
     /// Emit shell completions (used by `make install`).
     #[command(hide = true)]
     Completions {
@@ -86,6 +88,7 @@ pub fn dispatch(cmd: &Cmd, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
         Cmd::Update(c) => c.run(ctx),
         Cmd::Env(c) => c.run(ctx),
         Cmd::Integrate(c) => c.run(ctx),
+        Cmd::Launch(c) => c.run(ctx),
         Cmd::Completions { .. } => Ok(ExitCode::SUCCESS),
     }
 }
@@ -102,12 +105,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_use_and_daemon_run() {
+    fn parses_use_and_default_background_run() {
         let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "use", "m"]).expect("parse");
         assert!(matches!(cli.cmd, Cmd::Use(ref c) if c.name == "m"));
+        // A bare `run` now backgrounds by default: no --foreground flag set.
+        let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "run"]).expect("parse");
+        assert!(matches!(cli.cmd, Cmd::Run(ref c) if !c.foreground && c.name.is_none()));
+        // --foreground opts into the blocking path.
+        let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "run", "--foreground"])
+            .expect("parse");
+        assert!(matches!(cli.cmd, Cmd::Run(ref c) if c.foreground));
+        // Legacy --daemon still parses (hidden no-op alias) and stays background.
         let cli =
             <Cli as clap::Parser>::try_parse_from(["chekov", "run", "--daemon"]).expect("parse");
-        assert!(matches!(cli.cmd, Cmd::Run(ref c) if c.daemon && c.name.is_none()));
+        assert!(matches!(cli.cmd, Cmd::Run(ref c) if !c.foreground));
     }
 
     #[test]
