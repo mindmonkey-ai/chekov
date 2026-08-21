@@ -6,6 +6,17 @@ All notable changes to chekov are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `launch`: local-directory marketplace plugins (`extraKnownMarketplaces`
+  with `source = "directory"`) are mirrored into the session config dir so
+  `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
+
+### Changed
+- Default root is `~/.chekov` (was `~/personal_dev/chekov`); `CHEKOV_HOME`
+  still overrides, and `shell/chekov.zsh` exports it for source installs.
+- README: "Finding a model" / "Adding a model" guides; machine-specific
+  paths removed.
+
 ## [0.1.0] — 2026-08-21
 
 First release.

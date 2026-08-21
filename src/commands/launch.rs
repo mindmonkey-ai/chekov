@@ -23,6 +23,7 @@ use serde_json::Value;
 
 use super::{Command, Ctx};
 use crate::core::launch::{LocalSession, inject_mcp_servers, mcp_servers_of, render_settings_json};
+use crate::core::plugins::sync_local_plugins;
 use crate::core::proxy::serve::{Upstream, serve};
 use crate::core::proxy::{AgentFacade, AgentKind};
 use crate::core::registry::Effective;
@@ -184,7 +185,8 @@ impl LaunchCmd {
     }
 
     /// Generated settings in a chekov-owned config dir, carrying the user's
-    /// MCP servers, hooks, plugins, and permissions forward.
+    /// MCP servers, hooks, plugins, and permissions forward — and mirroring
+    /// local-directory plugins so `enabledPlugins` resolves in the session.
     fn write_settings(&self, ctx: &Ctx, session: &Session) -> Result<(), ChekovError> {
         std::fs::create_dir_all(&session.dir)
             .map_err(|e| ChekovError::io(format!("creating {}", session.dir.display()), e))?;
@@ -201,7 +203,8 @@ impl LaunchCmd {
         let path = session.dir.join("settings.json");
         std::fs::write(&path, text)
             .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))?;
-        Self::inject_claude_json(session, source.as_ref())
+        Self::inject_claude_json(session, source.as_ref())?;
+        sync_local_plugins(&session.dir, source.as_ref())
     }
 
     /// Write the carried-forward MCP servers into the config dir's
