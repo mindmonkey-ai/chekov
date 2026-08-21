@@ -28,3 +28,6 @@
 /.scout/
 /session*.json
 /review-contex*.json
+
+# pushkin runtime state (socket, event db); pushkin.toml is tracked.
+/.pushkin/
