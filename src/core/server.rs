@@ -317,6 +317,7 @@ mod tests {
         );
         assert!(args.contains("--ctx-size 98304"), "ctx missing: {args}");
         assert!(args.contains("--port 8080"), "port missing: {args}");
+        assert!(args.contains("-np 1"), "single slot missing: {args}");
         let jinja = args.find("--jinja").expect("default flag");
         let temp = args.find("--temp").expect("extra flag");
         assert!(jinja < temp, "defaults must precede extras: {args}");
