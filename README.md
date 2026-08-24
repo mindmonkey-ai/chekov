@@ -138,6 +138,8 @@ Model load time: ~2 minutes for a ~158 GiB model from a fast external SSD.
 
 ### Finding a model
 
+A full model-selection guide (quants, GGUF, sampling params, picking a model
+for your RAM) lives in [docs/HOWTOS.md](docs/HOWTOS.md). The short version:
 chekov runs any GGUF repo on Hugging Face. A workable way to choose:
 
 1. **Start from a quantizer you trust.** [unsloth](https://huggingface.co/unsloth)
