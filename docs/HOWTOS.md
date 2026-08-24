@@ -70,19 +70,19 @@ These 10 terms cover most of what you'll see. Learn them, the rest is detail.
 
 | Term | Plain meaning |
 |------|---------------|
-| **Model / checkpoint** | The saved weights — the "brain" of the AI. |
-| **Parameters (params)** | The number of numbers in the brain. More usually = smarter but heavier. |
-| **Weight** | One number in the network — the individual learned values. A model with 7B params has 7 billion weights. |
-| **Bits per weight** | How much memory each weight takes. Fewer bits = smaller file, lower quality. This is what "Q4" and "FP16" refer to. |
-| **FP16 / BF16** | The original high-precision (16-bit) format weights are trained and stored in. Big and lossless. |
-| **Quantization (quant)** | Compressing the weights to use less memory at some quality cost. |
-| **GGUF** | The file format llama.cpp uses to load quantized models. |
-| **Token** | A chunk of text (sometimes a word, sometimes part of a word) the model reads. |
-| **Context length (n_ctx)** | How much text the model can "see" at once. |
-| **VRAM / RAM** | Memory. VRAM is GPU memory (fast, small); RAM is system memory (slower, bigger). |
-| **Inference** | Running the model to produce output (a.k.a. "serving" or "generating"). |
-| **Perplexity** | A quality number — lower is better. |
-| **Sampling params** | Knobs like temperature that change how output is generated. |
+|| [Model / checkpoint](#checkpoint) | The saved weights — the "brain" of the AI. |
+| [Parameters (params)](#parameters) | The number of numbers in the brain. More usually = smarter but heavier. |
+| [Weight](#weight) | One number in the network — the individual learned values. A model with 7B params has 7 billion weights. |
+| [Bits per weight](#bits-per-weight) | How much memory each weight takes. Fewer bits = smaller file, lower quality. This is what "Q4" and "FP16" refer to. |
+| [FP16](#fp16) / [BF16](#bf16) | The original high-precision (16-bit) format weights are trained and stored in. Big and lossless. |
+| [Quantization (quant)](#quantization) | Compressing the weights to use less memory at some quality cost. |
+| [GGUF](#gguf) | The file format llama.cpp uses to load quantized models. |
+| [Token](#token) | A chunk of text (sometimes a word, sometimes part of a word) the model reads. |
+| [Context length (n_ctx)](#context-length) | How much text the model can "see" at once. |
+| [VRAM](#vram) / RAM | Memory. VRAM is GPU memory (fast, small); RAM is system memory (slower, bigger). |
+| [Inference](#inference) | Running the model to produce output (a.k.a. "serving" or "generating"). |
+| [Perplexity](#perplexity) | A quality number — lower is better. |
+| [Sampling](#sampling) params | Knobs like temperature that change how output is generated. |
 
 ---
 
@@ -118,9 +118,9 @@ mostly about fitting a model into your memory.
 
 ### Dense vs. MoE (Mixture of Experts)
 
-- **Dense** — every parameter is used for every token. Simpler, predictable.
+- [Dense](#dense) — every parameter is used for every token. Simpler, predictable.
   Most "7B", "70B" models are dense.
-- **MoE** — only a subset of "experts" activate per token. Can be much larger
+- [MoE](#moe) — only a subset of "experts" activate per token. Can be much larger
   in total params but cheaper to run. Example: Qwen3-235B-A22B means 235B total
   params, 22B active per token.
 
@@ -170,12 +170,12 @@ strengths. You'll see these names a lot:
 | **Yi** | 01.AI | Strong multilingual. |
 
 **Architecture-specific terms you'll see:**
-- **Attention** — how a model weighs different parts of its input.
-- **KV cache** — cached attention data; size affects how much context you can
+- [Attention](#attention) — how a model weighs different parts of its input.
+- [KV cache](#kv-cache) — cached attention data; size affects how much context you can
   hold and how much VRAM it needs.
-- **GQA (Grouped-Query Attention)** — a memory-saving attention variant.
+- [GQA](#gqa) (Grouped-Query Attention) — a memory-saving attention variant.
 - **Sliding window attention** — lets large models use long context cheaply.
-- **Rotary embeddings (RoPE)** — how position is encoded; affects context length.
+- [Rotary embeddings (RoPE)](#rope) — how position is encoded; affects context length.
 
 ---
 
@@ -343,8 +343,8 @@ better; the % shows how much worse than the original.
 
 ### imatrix (importance matrix)
 
-Some quants are built using an **imatrix** — a calibration of which weights
-matter most for a given domain. This can improve quality 10–20% at the same
+Some quants are built using an [imatrix](#imatrix) — a calibration of which
+weights matter most for a given domain. This can improve quality 10–20% at the same
 bitrate, and is essential for Q3 and below. Community repos (like Unsloth's
 `UD` quants) often use this.
 
@@ -376,7 +376,7 @@ You'll encounter several file formats on the Hub. Know which you need.
 | Format | Extension | Used by | You need it if… |
 |--------|-----------|---------|-----------------|
 | **GGUF** | `.gguf` | llama.cpp, MLX, llama.cpp-based tools | Running locally on CPU/Apple Silicon/GPU via llama.cpp |
-| **safetensors** | `.safetensors` | HF Transformers, PyTorch | Running via Python/Transformers (GPU-heavy) |
+|| [safetensors](#safetensors) | `.safetensors` | HF Transformers, PyTorch | Running via Python/Transformers (GPU-heavy) |
 | **PyTorch** | `.bin` / `.pt` | Older Transformers | Running via Python (older setups) |
 | **Sharded** | `*.safetensors.index.json` | Large models split across files | Downloading a huge model (needs the index) |
 
@@ -520,10 +520,10 @@ If you see these on a page, here's what they mean:
 
 | Term | Meaning |
 |------|---------|
-| **Checkpoint** | A saved point in training (e.g. `checkpoint-500`). Sometimes a partially-trained model you can use. |
-| **Fine-tune** | Continuing training a model on new data to specialize it. |
-| **LoRA** (Low-Rank Adaptation) | A tiny file that "adapts" a base model for a task without retraining everything. |
-| **Adapter** | Same idea as LoRA — a small additive module. |
+|| [Checkpoint](#checkpoint) | A saved point in training (e.g. `checkpoint-500`). Sometimes a partially-trained model you can use. |
+|| [Fine-tune](#fine-tune) | Continuing training a model on new data to specialize it. |
+|| [LoRA](#lora) (Low-Rank Adaptation) | A tiny file that "adapts" a base model for a task without retraining everything. |
+|| [Adapter](#adapter) | Same idea as LoRA — a small additive module. |
 | **PEFT** | HF library for applying LoRA/adapters easily. |
 | **Full fine-tune** | Retraining all parameters (expensive; large). |
 | **Checkpoint merging** | Fusing a LoRA into the base weights so you get one model file. |
@@ -665,48 +665,50 @@ images. Load it only when you need image input.
 
 ## 17. Glossary (alphabetical)
 
-- **Adapter** — a small additive module (see LoRA) that specializes a model.
-- **Bits per weight** — how much memory a single weight takes; the "bits" in a
-  quant name. Fewer bits = smaller file, lower quality. K-quants are mixed
-  precision, so `Q4_K_M` is really ~4.5 bits/weight.
-- **Attention** — mechanism letting a model weigh input parts relative to each
-  other.
-- **BF16** — Bfloat16, a 16-bit floating point format (common for weights).
-- **BPE** — Byte-Pair Encoding, a tokenization method.
-- **Checkpoint** — a saved training state / model snapshot.
-- **Context length (n_ctx)** — max tokens the model holds at once.
-- **Dense** — a model where all parameters run on every token.
-- **FP16** — 16-bit floating point; the usual full-precision weight format.
-- **Fine-tune** — continued training to specialize a model.
-- **GGUF** — GPT-Generated Unified Format; llama.cpp's model file format.
-- **GQA** — Grouped-Query Attention (memory-efficient attention).
-- **Instruct** — a chat/instruction-tuned model (vs. base).
-- **IQ** — Improved Quantization; small-file quants (e.g. IQ4_XS).
-- **imatrix** — importance matrix used to improve quant quality.
-- **KV cache** — cached attention state; grows with context.
-- **LoRA** — Low-Rank Adaptation; tiny file that adapts a base model.
-- **MoE** — Mixture of Experts; only some parameters activate per token.
-- **n_batch** — tokens processed per forward step.
-- **n_ctx** — context length in tokens.
-- **n_gpu_layers / ngl** — layers offloaded to the GPU.
-- **n_threads** — CPU cores used for inference.
-- **Parameters** — the trainable numbers in a model.
-- **Perplexity** — quality metric; lower is better.
-- **Prefill** — processing the input prompt.
-- **Quantization** — shrinking weights to fewer bits.
-- **Repetition penalty** — discourages repeated output.
-- **safetensors** — a fast, safe weight container format (Transformers).
-- **Seed** — fixes randomness for reproducible output.
-- **Stop sequence** — text that halts generation.
-- **Temperature** — controls output randomness.
-- **Token** — a unit of text the model reads (~0.75 words).
-- **top-k** — restricts sampling to the k most likely tokens.
-- **top-p** — nucleus sampling threshold.
-- **VRAM** — GPU memory.
-- **Vocabulary (vocab)** — the full set of tokens a model knows.
-- **Weight** — one number in the network; a 7B model has 7 billion weights.
-- **Q8_0 / Q6_K / Q5_K_M / Q4_K_M / Q3_K_M / Q2_K** — quant presets from
-  highest to lowest quality (and roughly size).
+- <a id="adapter"></a>**Adapter** — a small additive module (see [LoRA](#lora)) that specializes a model.
+- <a id="bits-per-weight"></a>**Bits per weight** — how much memory a single weight takes; the "bits" in a quant name. Fewer bits = smaller file, lower quality. K-quants are mixed precision, so `Q4_K_M` is really ~4.5 bits/weight.
+- <a id="attention"></a>**Attention** — mechanism letting a model weigh input parts relative to each other. See also [GQA](#gqa) and [KV cache](#kv-cache).
+- <a id="bf16"></a>**BF16** — Bfloat16, a 16-bit floating point format (common for weights). The other half of the "FP16 / BF16" pair.
+- <a id="bpe"></a>**BPE** — Byte-Pair Encoding, a tokenization method (see [Token](#token) and [Tokenization](#tokenization)).
+- <a id="checkpoint"></a>**Checkpoint** — a saved training state / model snapshot. Built from [Parameters](#parameters) and [Weights](#weight).
+- <a id="context-length"></a>**Context length (n_ctx)** — max [tokens](#token) the model holds at once.
+- <a id="dense"></a>**Dense** — a model where all parameters run on every token. The common case; see [MoE](#moe) for the alternative.
+- <a id="fp16"></a>**FP16** — 16-bit floating point; the usual full-precision weight format. Quantizing down from FP16 is what makes a model smaller.
+- <a id="fine-tune"></a>**Fine-tune** — continued training to specialize a model. [LoRA](#lora) is the cheap version of this.
+- <a id="gguf"></a>**GGUF** — GPT-Generated Unified Format (sometimes "Generic"). llama.cpp's model file format. It packs the quantized [weights](#weight), the [vocabulary](#vocab), and all the config the loader needs into one self-contained file — that's why a GGUF "just runs" in llama.cpp with no extra pieces. You'll spot it as `*.gguf` files and in `-GGUF` repo names.
+- <a id="gqa"></a>**GQA** — Grouped-Query Attention, a memory-efficient [Attention](#attention) variant that shrinks the [KV cache](#kv-cache).
+- <a id="instruct"></a>**Instruct** — a chat/instruction-tuned model (vs. [Base](#base)).
+- <a id="iq"></a>**IQ** — Improved Quantization; small-file quants (e.g. `IQ4_XS`). A [Quantization](#quantization) family.
+- <a id="imatrix"></a>**imatrix** — importance matrix used to improve [quantization](#quantization) quality (10–20% at the same bitrate; essential for Q3 and below).
+- <a id="kv-cache"></a>**KV cache** — cached attention state; grows with [context length](#context-length) and is a major [VRAM](#vram) consumer.
+- <a id="lora"></a>**LoRA** — Low-Rank Adaptation; a tiny file (MBs) that adapts a base model for a task without retraining everything.
+- <a id="moe"></a>**MoE** — Mixture of Experts; only some parameters activate per token. More total [parameters](#parameters) but cheaper to run than [Dense](#dense).
+- <a id="n-batch"></a>**n_batch** — how many [tokens](#token) are processed per forward step.
+- <a id="n-ctx"></a>**n_ctx** — [context length](#context-length) in tokens.
+- <a id="ngl"></a>**n_gpu_layers / ngl** — how many model layers are offloaded to the [GPU](#vram).
+- <a id="n-threads"></a>**n_threads** — CPU cores used for inference.
+- <a id="parameters"></a>**Parameters** — the trainable numbers in a model; a 7B model has 7 billion of them (each one is a [Weight](#weight)).
+- <a id="perplexity"></a>**Perplexity** — a quality metric; lower is better. Measured against the original [FP16](#fp16).
+- <a id="prefill"></a>**Prefill** — processing your input prompt (see [Decode](#decode)).
+- <a id="base"></a>**Base** — an un-tuned model that completes text (vs. [Instruct](#instruct)).
+- <a id="quantization"></a>**Quantization** — shrinking [weights](#weight) to fewer [bits](#bits-per-weight) to make a model smaller and faster. See the [photo analogy](#7-quantization-explained-the-quants).
+- <a id="rep-penalty"></a>**Repetition penalty** — discourages repeated output.
+- <a id="safetensors"></a>**safetensors** — a fast, safe weight container format used by HF Transformers; the main alternative to [GGUF](#gguf) for Python-based inference.
+- <a id="seed"></a>**Seed** — fixes randomness for reproducible output.
+- <a id="stop-seq"></a>**Stop sequence** — text that halts generation.
+- <a id="temperature"></a>**Temperature** — controls output randomness (part of [Sampling](#sampling)).
+- <a id="token"></a>**Token** — a unit of text the model reads (~0.75 words). See [Tokenization](#tokenization).
+- <a id="top-k"></a>**top-k** — restricts [Sampling](#sampling) to the k most likely tokens.
+- <a id="top-p"></a>**top-p** — nucleus [Sampling](#sampling) threshold.
+- <a id="vram"></a>**VRAM** — GPU memory; the hard limit for how much of a model can run on the GPU.
+- <a id="vocab"></a>**Vocabulary (vocab)** — the full set of [tokens](#token) a model knows.
+- <a id="weight"></a>**Weight** — one number in the network; a 7B model has 7 billion weights.
+- <a id="decode"></a>**Decode** — generating each output [token](#token) one at a time (the slow part; see [Prefill](#prefill)).
+- <a id="inference"></a>**Inference** — running the model to produce output (a.k.a. "serving").
+- <a id="tokenization"></a>**Tokenization** — splitting text into [tokens](#token); the method (BPE, WordPiece, etc.) defines the [vocabulary](#vocab).
+- <a id="sampling"></a>**Sampling** — how output tokens are chosen at run time: [temperature](#temperature), [top-p](#top-p), [top-k](#top-k).
+- <a id="rope"></a>**RoPE** — Rotary Position Embeddings; how a model encodes token position and thus its max [context length](#context-length).
+- <a id="q-presets"></a>**Q8_0 / Q6_K / Q5_K_M / Q4_K_M / Q3_K_M / Q2_K** — [quant](#quantization) presets from highest to lowest quality (and roughly size).
 
 ---
 
