@@ -72,6 +72,9 @@ These 10 terms cover most of what you'll see. Learn them, the rest is detail.
 |------|---------------|
 | **Model / checkpoint** | The saved weights — the "brain" of the AI. |
 | **Parameters (params)** | The number of numbers in the brain. More usually = smarter but heavier. |
+| **Weight** | One number in the network — the individual learned values. A model with 7B params has 7 billion weights. |
+| **Bits per weight** | How much memory each weight takes. Fewer bits = smaller file, lower quality. This is what "Q4" and "FP16" refer to. |
+| **FP16 / BF16** | The original high-precision (16-bit) format weights are trained and stored in. Big and lossless. |
 | **Quantization (quant)** | Compressing the weights to use less memory at some quality cost. |
 | **GGUF** | The file format llama.cpp uses to load quantized models. |
 | **Token** | A chunk of text (sometimes a word, sometimes part of a word) the model reads. |
@@ -238,6 +241,30 @@ FP16 (16 bits)  →  Q8 (8 bits)  →  Q4 (4 bits)  →  Q2 (2 bits)
    big / best        half / good     quarter / small     tiny / lossiest
 ```
 
+> **The bits-per-weight nuance.** The number in a quant name is *roughly* the
+> bits per weight, but K-quants use mixed precision, so the real number is a
+> bit different: `Q4_K_M` is actually **~4.5 bits/weight**, `Q5_K_M` is
+> **~5.5**, `Q6_K` is **~6.6**, and `Q8_0` is **~8**. The label is a name, not a
+> precise spec. `Q8_0` is the only one that's truly 8 bits — that's why it's the
+> reference for "near-lossless."
+
+### The photo-resolution analogy
+
+Think of a model's weights as a digital photograph.
+
+```
+FP16 (16-bit)  =  a 4K RAW image — full detail, huge file
+Q8_0  (8-bit)  =  a high-quality JPEG — looks identical to the eye, half the size
+Q6_K  (6-bit)  =  a very good JPEG — only an expert notices the difference
+Q4_K_M(4-bit)  =  a standard JPEG — great for everyday viewing, tiny file
+Q2_K  (2-bit)  =  a heavily compressed, blurry JPEG — you can see the artifacts
+```
+
+Quantization is like choosing an image-compression level. You lose a little
+detail, but for most people at most levels the picture looks the same. The
+"artifacts" in a model show up as slightly worse reasoning, rarer vocabulary, or
+occasional hallucinations — and they appear first at the aggressive end (Q2/Q3).
+
 ### Bits vs. size vs. quality — the trade-off
 
 There is a fundamental tension:
@@ -249,19 +276,30 @@ More bits   →  bigger file  +  slower  +  more memory      BUT   higher qualit
 
 ### The quant naming scheme decoded
 
-Take `Q4_K_M` and break it apart:
+The best way to read a quant name like `Q4_K_M` is to break it into its four
+pieces:
 
 ```
-Q   →  "Quantized"
-4   →  4-bit base precision
-_K  →  "K-quants" (a mixed-precision method by ggml)
-_M  →  Medium size/quality variant (S = small, M = medium, L = large)
+Q4_K_M
+| | |  | | +--- M = size variant (S = small, M = medium, L = large)
+| | |  | +----- K = a smarter "K-quant" method (mixed precision)
+| | |  +------- 4 = roughly 4 bits used per weight
+| | +---------- K = "K-quant" family
+| +------------ 4 = bits per weight
++-------------- Q = "Quantized"
 ```
+
+Read it left to right: **Q**uantized, ~**4** bits per weight, using the **K**
+mixed-precision method, in the **M**edium size. The same logic decodes any name:
+`Q6_K` = quantized, ~6 bits, K-quant (no size suffix → the single K-variant for
+that bitrate); `Q8_0` = quantized, 8 bits, "0" is the non-K block format.
 
 Other suffixes you'll see:
 - `_S` (small) — smaller, slightly lower quality, faster.
 - `_M` (medium) — the balanced default. **This is what most repos recommend.**
 - `_L` (large) — better quality, larger file.
+- `_0`, `_1` (e.g. `Q8_0`, `Q5_0`) — non-K "legacy" formats; `_0` is the
+  reference quality quant.
 
 ### The main quant families
 
@@ -628,6 +666,9 @@ images. Load it only when you need image input.
 ## 17. Glossary (alphabetical)
 
 - **Adapter** — a small additive module (see LoRA) that specializes a model.
+- **Bits per weight** — how much memory a single weight takes; the "bits" in a
+  quant name. Fewer bits = smaller file, lower quality. K-quants are mixed
+  precision, so `Q4_K_M` is really ~4.5 bits/weight.
 - **Attention** — mechanism letting a model weigh input parts relative to each
   other.
 - **BF16** — Bfloat16, a 16-bit floating point format (common for weights).
@@ -663,6 +704,7 @@ images. Load it only when you need image input.
 - **top-p** — nucleus sampling threshold.
 - **VRAM** — GPU memory.
 - **Vocabulary (vocab)** — the full set of tokens a model knows.
+- **Weight** — one number in the network; a 7B model has 7 billion weights.
 - **Q8_0 / Q6_K / Q5_K_M / Q4_K_M / Q3_K_M / Q2_K** — quant presets from
   highest to lowest quality (and roughly size).
 
