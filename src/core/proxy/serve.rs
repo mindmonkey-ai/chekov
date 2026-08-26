@@ -111,7 +111,16 @@ fn stream_upstream(
     };
     http::write_sse_head(stream)?;
     let mut translator = bridge.facade.stream_translator();
-    relay(stream, &mut translator, reader)?;
+    // A failed relay still owes the client a terminating envelope. Dropping
+    // the socket instead leaves the SDK reporting a protocol error rather than
+    // the real failure, and `finish()` alone would forge a clean `end_turn`
+    // over a turn that died (§C.2 — nothing degrades silently).
+    if let Err(e) = relay(stream, &mut translator, reader) {
+        for ev in translator.on_upstream_error(&e.to_string()) {
+            http::write_sse_event(stream, &ev)?;
+        }
+        return Err(e);
+    }
     for ev in translator.finish() {
         http::write_sse_event(stream, &ev)?;
     }
