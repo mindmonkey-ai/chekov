@@ -65,8 +65,11 @@ pub fn render_provider_entry(cfg: &Config, eff: &Effective) -> String {
 /// Every other line stays byte-identical. Wholesale replacement is forbidden:
 /// a live Hermes config carries MCP servers, toolsets, and plugin state that
 /// chekov must never clobber (STOP-3 spirit).
-#[must_use]
-pub fn merge_hermes_config(existing: &str, cfg: &Config, eff: &Effective) -> String {
+pub fn merge_hermes_config(
+    existing: &str,
+    cfg: &Config,
+    eff: &Effective,
+) -> Result<String, ChekovError> {
     let model_block = render_model_block(cfg, eff);
     let mut text = if let Some(range) = top_block(existing, "model:") {
         let mut t = existing.to_owned();
@@ -79,13 +82,20 @@ pub fn merge_hermes_config(existing: &str, cfg: &Config, eff: &Effective) -> Str
     };
     let entry = render_provider_entry(cfg, eff);
     if let Some(range) = top_block(&text, "providers:") {
+        // Refuse a shape we cannot edit safely (§C.2): writing a 2-space entry
+        // into a 4-space block leaves the stale one behind and the new one
+        // mis-nested.
+        match child_indent(&text[range.clone()]) {
+            Some(2) | None => {}
+            Some(indent) => return Err(ChekovError::HermesShapeUnsupported { indent }),
+        }
         let updated = replace_child(&text[range.clone()], "  chekov:", &entry);
         text.replace_range(range, &updated);
     } else {
         text.push_str("providers:\n");
         text.push_str(&entry);
     }
-    text
+    Ok(text)
 }
 
 /// Byte range of a top-level YAML block: the `key` header line plus every
@@ -99,12 +109,31 @@ fn top_block(text: &str, key: &str) -> Option<std::ops::Range<usize>> {
             if is_top {
                 return Some(s..offset);
             }
-        } else if is_top && line.trim_end() == key {
+        } else if is_top && top_key(line) == Some(key) {
             start = Some(offset);
         }
         offset += line.len();
     }
     start.map(|s| s..text.len())
+}
+
+/// The key of a top-level line, including its colon: `model:  # note` -> `model:`.
+/// Matching the whole line would miss a header carrying a trailing comment and
+/// silently append a SECOND top-level key of the same name.
+fn top_key(line: &str) -> Option<&str> {
+    let end = line.find(':')? + 1;
+    Some(&line[..end])
+}
+
+/// Indentation of the first child line inside a block, or `None` when the block
+/// has no children yet. Used to refuse a shape the splicer cannot safely edit
+/// rather than write 2-space entries into a 4-space file.
+fn child_indent(block: &str) -> Option<usize> {
+    block
+        .lines()
+        .skip(1)
+        .find(|l| !l.trim().is_empty() && l.starts_with([' ', '\t']))
+        .map(|l| l.len() - l.trim_start_matches(' ').len())
 }
 
 /// Replace (or insert after the header) one two-space-indented child entry
@@ -227,7 +256,7 @@ fn integrate_hermes(ctx: &Ctx, assume_yes: bool) -> Result<ExitCode, ChekovError
     }
     let path = hermes_config_file()?;
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let merged = merge_hermes_config(&existing, &ctx.config, &eff);
+    let merged = merge_hermes_config(&existing, &ctx.config, &eff)?;
     if let Some(active) = current_provider(&existing).filter(|p| p != "chekov") {
         // STOP-3: an actively configured non-chekov provider is being switched.
         println!(
@@ -316,10 +345,47 @@ mod tests {
         (cfg, eff)
     }
 
+    /// How many top-level `model:` keys the merged text has.
+    fn top_level_model_keys(text: &str) -> usize {
+        text.lines()
+            .filter(|l| !l.starts_with([' ', '\t', '#']) && l.trim_end().starts_with("model:"))
+            .count()
+    }
+
+    #[test]
+    fn a_model_header_with_a_trailing_comment_is_repointed_not_duplicated() {
+        let (cfg, eff) = fixture();
+        let existing = "model:  # the active model\n  provider: ollama\n  api_key: ollama\n\ntoolsets:\n  web: true\n";
+        let merged = merge_hermes_config(existing, &cfg, &eff).expect("mergeable");
+        assert_eq!(
+            top_level_model_keys(&merged),
+            1,
+            "a second top-level `model:` key makes the config ambiguous YAML: {merged}"
+        );
+        assert!(
+            !merged.contains("api_key: ollama"),
+            "the old model block survived alongside the new one: {merged}"
+        );
+    }
+
+    #[test]
+    fn a_four_space_indented_providers_block_is_refused_rather_than_corrupted() {
+        let (cfg, eff) = fixture();
+        let existing = "model:\n    provider: ollama\n\nproviders:\n    ollama:\n        base_url: http://localhost:11434\n    chekov:\n        base_url: http://stale\n";
+        let err = merge_hermes_config(existing, &cfg, &eff)
+            .expect_err("a shape the splicer cannot edit must be refused, not guessed at");
+        let msg = err.to_string();
+        assert!(msg.contains('4'), "must name the indentation found: {msg}");
+        assert!(
+            msg.contains("by hand") || msg.contains("2-space"),
+            "every refusal names its remediation: {msg}"
+        );
+    }
+
     #[test]
     fn merge_repoints_model_block_only() {
         let (cfg, eff) = fixture();
-        let merged = merge_hermes_config(EXISTING, &cfg, &eff);
+        let merged = merge_hermes_config(EXISTING, &cfg, &eff).expect("mergeable");
         assert!(merged.contains("provider: chekov"), "{merged}");
         assert!(
             merged.contains("base_url: http://127.0.0.1:8080/v1"),
@@ -336,7 +402,7 @@ mod tests {
     #[test]
     fn merge_preserves_every_other_section() {
         let (cfg, eff) = fixture();
-        let merged = merge_hermes_config(EXISTING, &cfg, &eff);
+        let merged = merge_hermes_config(EXISTING, &cfg, &eff).expect("mergeable");
         for kept in [
             "toolsets:",
             "- hermes-cli",
@@ -351,7 +417,7 @@ mod tests {
     #[test]
     fn merge_inserts_chekov_provider_entry() {
         let (cfg, eff) = fixture();
-        let merged = merge_hermes_config(EXISTING, &cfg, &eff);
+        let merged = merge_hermes_config(EXISTING, &cfg, &eff).expect("mergeable");
         assert!(merged.contains("\n  chekov:\n"), "{merged}");
         assert!(
             merged.contains("    api: http://127.0.0.1:8080/v1"),
@@ -366,15 +432,15 @@ mod tests {
     #[test]
     fn merge_is_idempotent() {
         let (cfg, eff) = fixture();
-        let once = merge_hermes_config(EXISTING, &cfg, &eff);
-        let twice = merge_hermes_config(&once, &cfg, &eff);
+        let once = merge_hermes_config(EXISTING, &cfg, &eff).expect("mergeable");
+        let twice = merge_hermes_config(&once, &cfg, &eff).expect("mergeable");
         assert_eq!(once, twice);
     }
 
     #[test]
     fn merge_into_empty_builds_minimal_config() {
         let (cfg, eff) = fixture();
-        let merged = merge_hermes_config("", &cfg, &eff);
+        let merged = merge_hermes_config("", &cfg, &eff).expect("mergeable");
         assert!(merged.starts_with("model:\n"), "{merged}");
         assert!(merged.contains("providers:\n  chekov:\n"), "{merged}");
     }

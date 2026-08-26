@@ -19,6 +19,16 @@ All notable changes to chekov are recorded here. The format follows
   engine, mirroring what `use` already does for models.
 
 ### Fixed
+- `integrate hermes`: a `model:` header carrying a trailing comment
+  (`model:  # active`) was not recognised, so the merge prepended a SECOND
+  top-level `model:` key and left the old block intact — ambiguous YAML in a
+  live Hermes config. The block header is now matched on its key, not the
+  whole line.
+- `integrate hermes`: a `providers:` block indented with anything other than
+  two spaces is now refused with a named remediation instead of silently
+  gaining a mis-nested duplicate `chekov:` entry beside the stale one. The
+  module is contractually forbidden from clobbering this file, so an
+  un-editable shape is a loud refusal, not a guess.
 - `launch`: `settings.json` and `.claude.json` carry the server API key and are
   now created 0600 inside a 0700 session dir (created with the mode, not
   chmod'd afterwards, so there is no world-readable window).

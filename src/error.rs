@@ -99,6 +99,14 @@ pub enum ChekovError {
     ServerModelUnknown,
 
     #[error(
+        "~/.hermes/config.yaml indents its `providers:` entries with {indent} \
+         spaces; chekov's merge only understands 2, and guessing would corrupt \
+         a config it is contractually forbidden to clobber — add the `chekov:` \
+         provider by hand, or reformat the file to 2-space indentation and retry"
+    )]
+    HermesShapeUnsupported { indent: usize },
+
+    #[error(
         "this model requires {required_mb} MB of wired GPU memory but this Mac has \
          only {ram_mb} MB of RAM — no sysctl can satisfy that; \
          lower `[limits] wired_limit_mb` in {config_path} to match a model this \
