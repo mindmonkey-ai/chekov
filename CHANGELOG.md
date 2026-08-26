@@ -12,6 +12,17 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Fixed
+- `plugins`: a `plugin.json` `name` is no longer trusted as a path component.
+  It was joined onto the marketplace cache dir and that path was then removed
+  and recreated, so `"name": "../.."` reached outside the cache and an
+  absolute name replaced it entirely. Unsafe names now fall back, loudly.
+- `plugins`: `installed_plugins.json` and `known_marketplaces.json` are written
+  atomically (process-unique temp + rename, mirroring `Registry::save`) rather
+  than truncate-in-place — these are another tool's live state files.
+- release: `shell/chekov.zsh` ships under `shell/` in the tarball instead of at
+  the root. It derives `CHEKOV_HOME` from its own depth, so the flattened
+  layout resolved one level too high and every tarball install had a wrong
+  `CHEKOV_HOME`, a wrong `PATH`, and unreachable completions.
 - `launch` now runs the same four refusal gates as `run` before starting a
   server, instead of spawning blind and surfacing an opaque connection error.
 - `launch` refuses to adopt a running server that is serving a different model

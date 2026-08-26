@@ -53,7 +53,11 @@ jobs:
           out="chekov-${GITHUB_REF_NAME}-aarch64-apple-darwin"
           mkdir -p "dist/${out}/shell"
           cp target/aarch64-apple-darwin/release/chekov "dist/${out}/"
-          cp shell/chekov.zsh LICENSE README.md config.example.toml "dist/${out}/"
+          cp LICENSE README.md config.example.toml "dist/${out}/"
+          # chekov.zsh must keep its repo-relative depth: it derives CHEKOV_HOME
+          # as `${${(%):-%x}:A:h:h}`, so flattening it to the tarball root
+          # resolves one level too high and breaks PATH and completions.
+          cp shell/chekov.zsh "dist/${out}/shell/"
           "dist/${out}/chekov" completions zsh > "dist/${out}/shell/_chekov"
           tar -C dist -czf "dist/${out}.tar.gz" "${out}"
           (cd dist && shasum -a 256 "${out}.tar.gz" > "${out}.tar.gz.sha256")

@@ -110,11 +110,32 @@ pub fn upsert_plugin_entry(installed: &mut InstalledPlugins, key: &str, entry: P
 /// the marketplace name when the manifest is absent or shapeless.
 #[must_use]
 pub fn plugin_name(plugin_dir: &Path, fallback: &str) -> String {
-    std::fs::read_to_string(plugin_dir.join("plugin.json"))
+    let declared = std::fs::read_to_string(plugin_dir.join("plugin.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|manifest| manifest.get("name")?.as_str().map(str::to_owned))
-        .unwrap_or_else(|| fallback.to_owned())
+        .and_then(|manifest| manifest.get("name")?.as_str().map(str::to_owned));
+    safe_component(declared.as_deref().unwrap_or(fallback), fallback)
+}
+
+/// True for a name that is exactly one ordinary path component.
+fn is_safe_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
+}
+
+/// The manifest name becomes a path component under the marketplace cache,
+/// and `link_plugin` removes and recreates that path — so a name carrying
+/// separators or `..` would let an untrusted `plugin.json` reach outside the
+/// cache dir, and an absolute one would replace it entirely. Fall back rather
+/// than trust it, and say so (§C.2 — never silently).
+fn safe_component(candidate: &str, fallback: &str) -> String {
+    if is_safe_component(candidate) {
+        return candidate.to_owned();
+    }
+    eprintln!("chekov: ignoring unsafe plugin name {candidate:?} — not a single path component");
+    if is_safe_component(fallback) {
+        return fallback.to_owned();
+    }
+    "plugin".to_owned()
 }
 
 /// Mirror every local marketplace from `source` into `<session_dir>/plugins`.
@@ -192,12 +213,25 @@ fn read_json(path: &Path) -> Option<Value> {
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 
+/// Scratch path for an atomic write. Process-unique: a fixed `.tmp` would let
+/// two chekov processes rename each other's half-written state into place.
+fn temp_path_for(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp.{}", std::process::id()));
+    path.with_file_name(name)
+}
+
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ChekovError> {
     let mut text = serde_json::to_string_pretty(value)
         .map_err(|e| ChekovError::io(format!("serializing {}", path.display()), e.into()))?;
     text.push('\n');
-    std::fs::write(path, text)
-        .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))
+    // Atomic: this rewrites another tool's live state file, so a crash or a
+    // concurrent chekov must never leave it truncated (mirrors Registry::save).
+    let tmp = temp_path_for(path);
+    std::fs::write(&tmp, text)
+        .map_err(|e| ChekovError::io(format!("writing {}", tmp.display()), e))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| ChekovError::io(format!("renaming {} into place", tmp.display()), e))
 }
 
 #[cfg(test)]
@@ -220,6 +254,53 @@ mod tests {
 
     fn directory_market(path: &str) -> Value {
         json!({ "source": { "source": "directory", "path": path } })
+    }
+
+    #[test]
+    fn a_traversing_plugin_name_cannot_escape_the_marketplace_cache() {
+        let dir = scratch("traversal");
+        std::fs::write(
+            dir.join("plugin.json"),
+            json!({ "name": "../../../escaped" }).to_string(),
+        )
+        .expect("manifest");
+        let name = plugin_name(&dir, "fallback");
+        assert!(
+            !name.contains('/') && name != ".." && !name.is_empty(),
+            "an untrusted manifest name is joined onto the cache dir and the \
+             result is removed and recreated — it must stay one safe \
+             component, got: {name:?}"
+        );
+    }
+
+    #[test]
+    fn an_absolute_plugin_name_cannot_redirect_the_link() {
+        let dir = scratch("absolute");
+        std::fs::write(
+            dir.join("plugin.json"),
+            json!({ "name": "/etc/cron.d/evil" }).to_string(),
+        )
+        .expect("manifest");
+        let cache = scratch("absolute-cache");
+        let link = cache.join(plugin_name(&dir, "fallback"));
+        assert!(
+            link.starts_with(&cache),
+            "Path::join replaces the base when given an absolute path: {link:?}"
+        );
+    }
+
+    #[test]
+    fn the_atomic_write_scratch_path_is_unique_per_process() {
+        let target = Path::new("/r/plugins/installed_plugins.json");
+        let tmp = temp_path_for(target);
+        assert_ne!(tmp, target, "the scratch path must not be the target");
+        assert!(
+            tmp.to_string_lossy()
+                .contains(&std::process::id().to_string()),
+            "two chekov processes writing concurrently would race on a shared \
+             scratch file and one would rename the other's half-written state \
+             into place, got: {tmp:?}"
+        );
     }
 
     #[test]
