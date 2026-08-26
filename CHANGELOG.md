@@ -19,6 +19,16 @@ All notable changes to chekov are recorded here. The format follows
   engine, mirroring what `use` already does for models.
 
 ### Fixed
+- proxy: a non-2xx from llama-server no longer collapses to `http status: 400`
+  with the body discarded. ureq's `http_status_as_error` is turned off so the
+  status is taken directly and the server's own `error.message` — the only
+  thing that says *why*, e.g. a context overflow — reaches the user, bounded so
+  a runaway body cannot become a 20 KB log line.
+- proxy: inbound headers are bounded. The body had a 64 MB ceiling but the
+  header loop had no count cap and no per-line cap, so a local peer could hold
+  a proxy thread open indefinitely or grow a single line without limit. Now
+  100 headers and 16 KB per line, and an over-long line reports the ceiling
+  instead of the misleading "client closed the connection".
 - `update --model`: the "old revision kept on disk" notice told the user to run
   `chekov rm <name>`, but `repoint` has already moved the registry entry to the
   NEW revision — following that advice deleted the weights just downloaded and

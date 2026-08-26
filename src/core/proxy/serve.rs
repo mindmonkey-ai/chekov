@@ -149,19 +149,61 @@ impl Bridge<'_> {
     /// POST the translated body upstream, returning the response reader.
     fn post(&self, fwd: &super::Forward) -> Result<impl Read, ChekovError> {
         let url = format!("{}{}", self.upstream.base_url, fwd.path);
-        ureq::post(&url)
+        // http_status_as_error(false): ureq's default renders a non-2xx as
+        // "http status: 400" and drops the body, but llama-server puts the real
+        // cause there. Take the status ourselves so the explanation survives.
+        let res = ureq::post(&url)
+            .config()
+            .http_status_as_error(false)
+            .build()
             .header("content-type", "application/json")
             .header(
                 "authorization",
                 &format!("Bearer {}", self.upstream.api_key),
             )
             .send(&fwd.body)
-            .map(|res| res.into_body().into_reader())
             .map_err(|e| ChekovError::ProxyUpstreamFailed {
-                url,
+                url: url.clone(),
                 reason: e.to_string(),
-            })
+            })?;
+        let status = res.status().as_u16();
+        let mut body = res.into_body().into_reader();
+        if !(200..300).contains(&status) {
+            let mut text = String::new();
+            // A body we cannot read is not a reason to lose the status.
+            let _ = body.read_to_string(&mut text);
+            return Err(ChekovError::ProxyUpstreamFailed {
+                url,
+                reason: upstream_reason(status, &text),
+            });
+        }
+        Ok(body)
     }
+}
+
+/// Why an upstream call failed, in words the user can act on.
+///
+/// ureq renders a non-2xx as `http status: 400` and drops the body, but the
+/// body is the only thing that says WHY — llama-server puts the real cause
+/// (context overflow, a bad sampler value) in `error.message` there.
+fn upstream_reason(status: u16, body: &str) -> String {
+    /// Error strings are logged and shown to the user; a runaway body must not
+    /// become a 20 KB log line.
+    const MAX: usize = 400;
+    let detail = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.get("message")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| body.trim().to_owned());
+    if detail.is_empty() {
+        return format!("http status: {status} (upstream sent no explanation)");
+    }
+    let clipped: String = detail.chars().take(MAX).collect();
+    let ellipsis = if detail.chars().count() > MAX {
+        "…"
+    } else {
+        ""
+    };
+    format!("http status: {status}: {clipped}{ellipsis}")
 }
 
 fn read_all<R: Read>(mut reader: R) -> Result<String, ChekovError> {
@@ -170,4 +212,43 @@ fn read_all<R: Read>(mut reader: R) -> Result<String, ChekovError> {
         .read_to_string(&mut out)
         .map_err(|e| ChekovError::io("reading upstream response", e))?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upstream_reason;
+
+    #[test]
+    fn an_upstream_failure_keeps_the_servers_own_explanation() {
+        let body = r#"{"error":{"code":400,"message":"the request exceeds the available context size","type":"invalid_request_error"}}"#;
+        let reason = upstream_reason(400, body);
+        assert!(
+            reason.contains("the request exceeds the available context size"),
+            "the body is the only thing that says why: {reason}"
+        );
+        assert!(
+            reason.contains("400"),
+            "the status should survive too: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_non_json_upstream_body_still_reaches_the_user() {
+        let reason = upstream_reason(503, "upstream connect error");
+        assert!(
+            reason.contains("upstream connect error"),
+            "a plain-text body must not be dropped either: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_runaway_upstream_body_is_bounded() {
+        let huge = "x".repeat(20_000);
+        let reason = upstream_reason(500, &huge);
+        assert!(
+            reason.len() < 1_000,
+            "an error string is logged and shown; it must not carry 20 KB: {} bytes",
+            reason.len()
+        );
+    }
 }
