@@ -129,6 +129,28 @@ fn execute(step: &EngineStep) -> Result<(), ChekovError> {
     }
 }
 
+/// Path of the marker recording which engine commit was last built.
+fn commit_marker(logs_dir: &Path) -> PathBuf {
+    logs_dir.join("chekov.engine")
+}
+
+/// Record the engine commit that was just built successfully.
+pub fn record_commit(logs_dir: &Path, commit: &str) -> Result<(), ChekovError> {
+    std::fs::create_dir_all(logs_dir)
+        .map_err(|e| ChekovError::io(format!("creating {}", logs_dir.display()), e))?;
+    let path = commit_marker(logs_dir);
+    std::fs::write(&path, format!("{commit}\n"))
+        .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))
+}
+
+/// The engine commit chekov last built, if one was recorded.
+#[must_use]
+pub fn recorded_commit(logs_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(commit_marker(logs_dir)).ok()?;
+    let commit = text.trim();
+    (!commit.is_empty()).then(|| commit.to_owned())
+}
+
 /// Current HEAD commit of the engine checkout, short form.
 #[must_use]
 pub fn current_commit(engine_dir: &Path) -> Option<String> {
@@ -166,6 +188,23 @@ mod tests {
         assert!(
             rendered.iter().any(|s| s.contains("llama-gguf-split")),
             "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn a_recorded_engine_commit_survives_a_round_trip() {
+        let logs = scratch("engine-marker");
+        assert_eq!(
+            super::recorded_commit(&logs),
+            None,
+            "an unrecorded engine must read as unknown, never as a guess"
+        );
+        super::record_commit(&logs, "abc1234").expect("record");
+        assert_eq!(
+            super::recorded_commit(&logs).as_deref(),
+            Some("abc1234"),
+            "the built commit must be readable back so `status` can show what \
+             is actually installed"
         );
     }
 
