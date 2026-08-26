@@ -12,6 +12,22 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Fixed
+- `launch`: `settings.json` and `.claude.json` carry the server API key and are
+  now created 0600 inside a 0700 session dir (created with the mode, not
+  chmod'd afterwards, so there is no world-readable window).
+- The llama.cpp build no longer passes a bare `cmake -j`, which reached make
+  with no job count — unbounded compile jobs with the jobserver disabled, on a
+  machine that may be holding a 158 GiB model resident. Now one job per
+  logical core.
+- CI, release and the Makefile pass `--locked` on every cargo invocation that
+  resolves dependencies, so a `Cargo.toml`/`Cargo.lock` drift fails the build
+  instead of silently re-resolving inside the runner.
+- `CARGO_REGISTRY_TOKEN` is scoped to the publish step instead of the whole
+  `crates-io` job, where it was also live during `actions/checkout` and
+  `dtolnay/rust-toolchain@master`.
+- Documentation: `README.md` no longer claims "No async runtime" without
+  qualification, and the `hf-hub` dependency comment no longer states that
+  `blocking` avoids tokio — upstream defines that feature as `["tokio/rt"]`.
 - `plugins`: a `plugin.json` `name` is no longer trusted as a path component.
   It was joined onto the marketplace cache dir and that path was then removed
   and recreated, so `"name": "../.."` reached outside the cache and an

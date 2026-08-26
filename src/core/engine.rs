@@ -68,7 +68,13 @@ pub fn setup_steps(engine_dir: &Path) -> Vec<EngineStep> {
         .to_vec(),
         cwd: None,
     };
-    let mut build_args = ["--build", &build, "--config", "Release", "-j"]
+    // Bare `-j` reaches make with no number: unbounded jobs and no jobserver.
+    // One job per logical core is what a reader already assumes it means.
+    let jobs = format!(
+        "-j{}",
+        std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
+    );
+    let mut build_args = ["--build", &build, "--config", "Release", &jobs]
         .map(String::from)
         .to_vec();
     for target in BUILD_TARGETS {
@@ -160,6 +166,33 @@ mod tests {
         assert!(
             rendered.iter().any(|s| s.contains("llama-gguf-split")),
             "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn the_build_bounds_its_job_count() {
+        let steps = setup_steps(&scratch("jobs").join("llama.cpp"));
+        let build = steps
+            .iter()
+            .map(super::EngineStep::render)
+            .find(|r| r.contains("--build"))
+            .expect("a build step");
+        // A bare `-j` reaches make with no number, which means unbounded jobs
+        // and a disabled jobserver — unbounded clang forks on a box holding a
+        // 158 GiB model resident is the exact pressure this tool exists to avoid.
+        assert!(
+            !build.contains("-j ") && !build.ends_with("-j"),
+            "-j must carry an explicit job count: {build}"
+        );
+        assert!(
+            build.contains(&format!(
+                "-j{}",
+                std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
+            )) || build.contains(&format!(
+                "-j {}",
+                std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
+            )),
+            "job count should track available parallelism: {build}"
         );
     }
 
