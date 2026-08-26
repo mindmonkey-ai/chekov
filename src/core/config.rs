@@ -47,7 +47,7 @@ pub struct LimitsSection {
 impl Default for LimitsSection {
     fn default() -> Self {
         Self {
-            wired_limit_mb: 200_000,
+            wired_limit_mb: 187_000,
             hermes_ctx_floor: 65_536,
         }
     }
@@ -154,7 +154,21 @@ pub fn resolve_root(env_home: Option<&str>, user_home: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Config, resolve_root};
+    use super::{Config, LimitsSection, resolve_root};
+    use crate::core::checks::{WiredVerdict, effective_wired_mb, wired_verdict};
+
+    #[test]
+    fn the_shipped_default_is_satisfiable_on_a_stock_mac() {
+        // A 256 GB Mac with `iogpu.wired_limit_mb` unset: macOS's own default
+        // is 75% of RAM. A fresh `cargo install` must not refuse there.
+        let (actual_mb, is_system_default) = effective_wired_mb(0, 274_877_906_944);
+        assert!(is_system_default, "0 means the macOS default, not zero");
+        assert_eq!(
+            wired_verdict(LimitsSection::default().wired_limit_mb, actual_mb, 262_144),
+            WiredVerdict::Satisfied,
+            "the built-in requirement must be met by a stock machine at {actual_mb} MB"
+        );
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("chekov-test-{name}"));

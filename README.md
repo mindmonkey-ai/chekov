@@ -150,7 +150,7 @@ chekov runs any GGUF repo on Hugging Face. A workable way to choose:
    `UD-Q5_K_XL`, `Q8_0`, …) with a file size. The tag is what goes after the
    colon in the pull spec.
 3. **Size it against your memory.** Rule of thumb: `weights + KV cache + ~3 GiB`
-   must fit under `[limits] wired_limit_mb` (default: 75% of RAM). KV cache at
+   must fit under `[limits] wired_limit_mb` (default: 187000 MB). KV cache at
    q8_0 is roughly `ctx × layers × kv_heads × head_dim × 2 bytes`; for a
    100k context on a mid-size model budget 10–20 GiB. Pick the largest quant
    that leaves that headroom — `chekov run` refuses to start rather than let
@@ -388,7 +388,7 @@ port = 8080               # default
 api_key = "chekov-local"  # default; passed to llama-server --api-key
 
 [limits]
-wired_limit_mb = 180000   # required GPU wired memory before `run` proceeds
+wired_limit_mb = 187000   # required GPU wired memory before `run` proceeds
 hermes_ctx_floor = 65536  # hard floor when a model is hermes_ok
 
 [doctor]

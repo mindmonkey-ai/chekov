@@ -71,6 +71,14 @@ pub trait StreamTranslator {
     /// The upstream stream ended; emit whatever terminal frames the agent's
     /// protocol requires (closing blocks, stop reason, usage).
     fn finish(&mut self) -> Vec<SseEvent>;
+
+    /// The upstream connection failed mid-stream. Emit whatever the agent's
+    /// protocol uses to report a failed turn; the default is silence, which
+    /// keeps the serve loop protocol-blind for translators that have none.
+    fn on_upstream_error(&mut self, reason: &str) -> Vec<SseEvent> {
+        let _ = reason;
+        Vec::new()
+    }
 }
 
 /// Every agent chekov can proxy for.

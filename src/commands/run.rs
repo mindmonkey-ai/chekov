@@ -24,7 +24,10 @@ pub struct RunCmd {
 
 /// All four refusal gates, checked before anything starts (§C.2 — never
 /// degrade, never auto-shrink, never fall back).
-fn preflight(ctx: &Ctx, eff: &crate::core::registry::Effective) -> Result<(), ChekovError> {
+pub(crate) fn preflight(
+    ctx: &Ctx,
+    eff: &crate::core::registry::Effective,
+) -> Result<(), ChekovError> {
     use crate::core::{checks, engine, server};
     let cfg = &ctx.config;
     if let Some(pid) = server::live_pid(cfg) {
@@ -48,18 +51,33 @@ fn preflight(ctx: &Ctx, eff: &crate::core::registry::Effective) -> Result<(), Ch
             port: cfg.file.server.port,
         });
     }
-    let required = cfg.file.limits.wired_limit_mb;
-    match checks::wired_limit_mb() {
-        Some((actual, _is_default)) if actual < required => {
-            return Err(ChekovError::WiredLimitLow {
-                actual_mb: actual,
-                required_mb: required,
-            });
-        }
-        Some(_) => {}
-        None => eprintln!("warning: could not read iogpu.wired_limit_mb — proceeding unverified"),
+    wired_gate(cfg, cfg.file.limits.wired_limit_mb)
+}
+
+/// The wired-limit refusal, split on whether the machine could ever satisfy it.
+/// A requirement above physical RAM has no sysctl remedy, so pointing the user
+/// at one would be a lie (§C.2 — every refusal names a real remediation).
+fn wired_gate(cfg: &crate::core::config::Config, required_mb: u64) -> Result<(), ChekovError> {
+    use crate::core::checks::{WiredVerdict, physical_ram_mb, wired_verdict};
+    let Some((actual_mb, _is_default)) = crate::core::checks::wired_limit_mb() else {
+        eprintln!("warning: could not read iogpu.wired_limit_mb — proceeding unverified");
+        return Ok(());
+    };
+    // Unreadable RAM must never upgrade a refusal to "unreachable" — stay loud
+    // but stay accurate.
+    let ram_mb = physical_ram_mb().unwrap_or(u64::MAX);
+    match wired_verdict(required_mb, actual_mb, ram_mb) {
+        WiredVerdict::Satisfied => Ok(()),
+        WiredVerdict::Low => Err(ChekovError::WiredLimitLow {
+            actual_mb,
+            required_mb,
+        }),
+        WiredVerdict::Unreachable => Err(ChekovError::WiredLimitUnreachable {
+            required_mb,
+            ram_mb,
+            config_path: cfg.root.join("config.toml"),
+        }),
     }
-    Ok(())
 }
 
 impl Command for RunCmd {
