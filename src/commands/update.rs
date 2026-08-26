@@ -73,6 +73,22 @@ fn print_license_diff(old: &std::path::Path, new: &std::path::Path) {
     }
 }
 
+/// What to tell the user about the superseded weights.
+///
+/// It must NOT say `chekov rm <name>`: `repoint` has already moved
+/// `entry.path` to the new revision, so `rm` would delete the freshly
+/// downloaded weights and orphan the old directory forever — invisible to
+/// `list`, which only iterates registered entries.
+fn repoint_notice(name: &str, old_rev: &str, new_rev: &str) -> String {
+    format!(
+        "model '{name}': {old_rev} → {new_rev}\n\
+         the previous revision's weights are still on disk at \
+         models/{name}@{old_rev} — delete that directory when you no longer \
+         need it. Do NOT use `chekov rm {name}`: the registry entry now points \
+         at the new revision, so it would delete the download you just made."
+    )
+}
+
 fn repoint(ctx: &Ctx, model: &super::pull::NewModel) -> Result<(), ChekovError> {
     let mut reg = ctx.registry()?;
     let entry = reg
@@ -87,9 +103,8 @@ fn repoint(ctx: &Ctx, model: &super::pull::NewModel) -> Result<(), ChekovError> 
     entry.first_shard.clone_from(&model.first_shard);
     reg.save(&ctx.config.registry_path())?;
     println!(
-        "model '{}': {old_rev} → {} (old revision kept on disk; `chekov rm` when ready)",
-        model.name,
-        model.dir_name()
+        "{}",
+        repoint_notice(&model.name, &old_rev, &model.dir_name())
     );
     Ok(())
 }
@@ -183,6 +198,29 @@ impl Command for UpdateCmd {
 
 #[cfg(test)]
 mod tests {
+    use super::repoint_notice;
+
+    #[test]
+    fn the_repoint_notice_names_the_stale_directory_not_a_destructive_command() {
+        let note = repoint_notice("minimax-m2.7", "abc123456789", "def987654321");
+        assert!(
+            note.contains("models/minimax-m2.7@abc123456789"),
+            "the old weights are only reachable by path — nothing else can \
+             name them once the entry is repointed: {note}"
+        );
+        assert!(
+            !note.contains("`chekov rm` when ready"),
+            "the old notice recommended the command that destroys the new \
+             download: {note}"
+        );
+        // Naming `rm` inside an explicit warning is fine — recommending it is not.
+        assert!(
+            note.contains("Do NOT use `chekov rm minimax-m2.7`"),
+            "the trap is non-obvious enough that the notice should warn about \
+             it by name: {note}"
+        );
+    }
+
     use super::license_gate_needed;
 
     #[test]
