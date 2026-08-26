@@ -19,6 +19,16 @@ All notable changes to chekov are recorded here. The format follows
   engine, mirroring what `use` already does for models.
 
 ### Fixed
+- `update --model`: the "old revision kept on disk" notice told the user to run
+  `chekov rm <name>`, but `repoint` has already moved the registry entry to the
+  NEW revision — following that advice deleted the weights just downloaded and
+  orphaned the old directory permanently (nothing enumerates the models dir, so
+  an unreferenced revision is invisible to `list`). The notice now names the
+  stale directory by path and warns against `rm` explicitly.
+- `restart` with no argument targets the active model, which may not be the one
+  running. It now says so before stopping — resolving run-state before the stop
+  clears it — and names `chekov restart <running>` for keeping the loaded model.
+  Unloading and reloading 100+ GB is never silent.
 - `integrate hermes`: a `model:` header carrying a trailing comment
   (`model:  # active`) was not recognised, so the merge prepended a SECOND
   top-level `model:` key and left the old block intact — ambiguous YAML in a
