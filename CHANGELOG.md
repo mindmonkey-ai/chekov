@@ -11,6 +11,13 @@ All notable changes to chekov are recorded here. The format follows
   with `source = "directory"`) are mirrored into the session config dir so
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
+### Added
+- `setup` and `update --engine` record the llama.cpp commit they built to
+  `logs/chekov.engine`, and `chekov status` shows it — an unrecorded engine
+  says so and names the command that records one, rather than being guessed.
+- `update --engine` now says when the running server is still the previous
+  engine, mirroring what `use` already does for models.
+
 ### Fixed
 - `launch`: `settings.json` and `.claude.json` carry the server API key and are
   now created 0600 inside a 0700 session dir (created with the mode, not

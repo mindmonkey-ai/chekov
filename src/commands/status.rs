@@ -41,6 +41,13 @@ fn model_facts(reg: &crate::core::registry::Registry, model: &str) -> (String, S
     (revision, ctx_size)
 }
 
+/// The engine commit chekov last built. Never guessed: an unrecorded engine
+/// says so and names the command that records one.
+fn engine_row(ctx: &Ctx) -> String {
+    crate::core::engine::recorded_commit(&ctx.config.logs_dir())
+        .unwrap_or_else(|| "unrecorded — run `chekov setup` or `chekov update --engine`".to_owned())
+}
+
 fn status_rows(ctx: &Ctx) -> Result<Vec<Vec<String>>, ChekovError> {
     use crate::core::{checks, server};
     let reg = ctx.registry()?;
@@ -75,6 +82,7 @@ fn status_rows(ctx: &Ctx) -> Result<Vec<Vec<String>>, ChekovError> {
             },
         ],
         vec!["wired limit".into(), wired],
+        vec!["engine".into(), engine_row(ctx)],
         vec![
             "log tail".into(),
             ctx.config.server_log().display().to_string(),

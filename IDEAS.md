@@ -24,3 +24,33 @@ Worked recipes for flipping a flag's default while keeping a hidden back-compat
 alias, and folding an overlapping subcommand into another as a mode flag. See
 the `chekov-development` skill `references/cli-evolution.md`.
 Proposed 2026-08-21 — status: documented.
+
+## Pin the llama.cpp engine to a ref (2026-08-25)
+`setup` clones llama.cpp master with no ref and `update --engine` fast-forwards
+it, so the engine chekov builds is whatever upstream HEAD was that day. Model
+weights are revision-pinned; the binary that runs them is not. Proposal: an
+`[engine] git_ref` config key, `git fetch origin <ref>` + `checkout --detach
+FETCH_HEAD` instead of `pull --ff-only`, and `--branch <ref>` on the clone.
+Deferred from the provenance work, which only records the built commit — pinning
+adds config surface and changes what `setup` does on every machine.
+Proposed 2026-08-25 — status: OPEN
+
+## Verify the engine binary after building it (2026-08-25)
+`update --engine` never runs the binary it just built: a llama.cpp change that
+breaks the build's output surfaces later, as a failed `run`. Proposal: a fourth
+`EngineStep` running `llama-server --version`, so a bad build fails as
+`EngineStepFailed` naming the step, and `--dry-run` prints it like the others.
+Auto-rollback was considered and rejected — `git checkout <before>` plus a full
+rebuild is a multi-minute silent side effect, the opposite of the loud-failure
+creed. With the commit now recorded in `logs/chekov.engine`, a manual revert has
+something to name.
+Proposed 2026-08-25 — status: OPEN
+
+## Replace hf-hub with the ureq already in the tree (2026-08-25)
+`hf_hub` appears at exactly one call site (`core/hub.rs:363`) and its three-call
+surface is `new()` / `model()` / one `download_file()` builder, yet it pulls 225
+of the crate's 256 transitive dependencies — including tokio, reqwest, hyper and
+the xet stack. chekov already queries the HF API over ureq at `hub.rs:126`.
+Against it: hf-hub provides resume and Xet-accelerated transfer, which matter for
+100+ GB pulls; hand-rolling means Range-request resume and losing Xet.
+Proposed 2026-08-25 — status: OPEN

@@ -47,6 +47,18 @@ fn update_engine(ctx: &Ctx, dry_run: bool) -> Result<(), ChekovError> {
     engine::run_steps(&engine::setup_steps(&dir), dry_run)?;
     let after = engine::current_commit(&dir).unwrap_or_else(|| "none".into());
     println!("engine: {before} → {after}");
+    if dry_run {
+        return Ok(());
+    }
+    engine::record_commit(&ctx.config.logs_dir(), &after)?;
+    // The live server is still the old binary; say so rather than let the user
+    // assume the upgrade took effect (§C.2).
+    if before != after && crate::core::server::live_pid(&ctx.config).is_some() {
+        println!(
+            "a server is still running the previous engine ({before}) — \
+             apply with `chekov restart`"
+        );
+    }
     Ok(())
 }
 
