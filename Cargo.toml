@@ -48,8 +48,12 @@ thiserror = "2"
 anyhow = "1"
 # Blocking HTTP — this tool has no need for an async runtime (prompt §2.1).
 ureq = "3.4"
-# Revision-aware Hugging Face downloads. default-features off to keep only
-# the blocking backend (no tokio); rustls for TLS per §C.11.
+# Revision-aware Hugging Face downloads. NOTE: `blocking` is defined upstream as
+# `["tokio/rt"]` — it is a block_on wrapper over hf-hub's async core, not an
+# alternative to it, so this DOES pull tokio/reqwest/hyper and the xet stack
+# (225 of the tree's 256 crates, for one call site at core/hub.rs:363).
+# Kept deliberately: hf-hub provides resume and Xet-accelerated transfers, which
+# matter for 100+ GB pulls. rustls for TLS per §C.11.
 hf-hub = { version = "1", default-features = false, features = ["blocking", "rustls-tls"] }
 # Home-directory resolution for the default CHEKOV root.
 directories = "6"

@@ -9,7 +9,7 @@ ZSH_LINE := source $(ROOT)/shell/chekov.zsh
 .PHONY: setup update install test lint deny
 
 setup:
-	cargo build --release
+	cargo build --locked --release
 	./target/release/chekov setup
 
 update:
@@ -21,10 +21,10 @@ install:
 	grep -qF "$(ZSH_LINE)" ~/.zshrc || echo "$(ZSH_LINE)" >> ~/.zshrc
 
 test:
-	cargo test
+	cargo test --locked
 
 lint:
-	cargo fmt --check && cargo clippy --all-targets -- -D warnings
+	cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings
 
 deny:
 	cargo deny check

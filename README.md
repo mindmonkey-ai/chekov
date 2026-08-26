@@ -11,7 +11,9 @@ abstracted behind a registry so adding one is a single `pull`, ollama-style.
 Integrates with zsh, Hermes Agent, and Claude Code.
 
 - Package name: `chekov-mac` (crates.io `chekov` is taken); binary: `chekov`
-- No async runtime; blocking `ureq` + `hf-hub` for downloads
+- Blocking `ureq` for the HF API and llama-server; `hf-hub` for downloads
+  (which does pull `tokio` transitively via `reqwest`/`hyper` — chekov itself
+  spawns no runtime and awaits nothing)
 - Every failure is loud and names its remediation command; nothing degrades
   silently (no auto-shrunk ctx, no model fallback, no skipped checks)
 

@@ -188,7 +188,10 @@ impl LaunchCmd {
     /// MCP servers, hooks, plugins, and permissions forward — and mirroring
     /// local-directory plugins so `enabledPlugins` resolves in the session.
     fn write_settings(&self, ctx: &Ctx, session: &Session) -> Result<(), ChekovError> {
-        std::fs::create_dir_all(&session.dir)
+        // 0700: this directory holds settings.json and .claude.json, both of
+        // which carry the server API key.
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(&session.dir)
             .map_err(|e| ChekovError::io(format!("creating {}", session.dir.display()), e))?;
         let source = self.agent.read_user_settings();
         let text = render_settings_json(
@@ -201,8 +204,7 @@ impl LaunchCmd {
             source.as_ref(),
         );
         let path = session.dir.join("settings.json");
-        std::fs::write(&path, text)
-            .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))?;
+        write_private(&path, &text)?;
         Self::inject_claude_json(session, source.as_ref())?;
         sync_local_plugins(&session.dir, source.as_ref())
     }
@@ -227,8 +229,7 @@ impl LaunchCmd {
         let mut text = serde_json::to_string_pretty(&injected)
             .map_err(|e| ChekovError::io(format!("serializing {}", path.display()), e.into()))?;
         text.push('\n');
-        std::fs::write(&path, text)
-            .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))
+        write_private(&path, &text)
     }
 
     /// Serve the proxy in a scoped thread while the agent runs as a child.
@@ -281,6 +282,23 @@ fn ensure_server_up(ctx: &Ctx, eff: &Effective) -> Result<(), ChekovError> {
     server::write_run_state(&ctx.config, &eff.name)?;
     eprintln!("chekov launch: server started (pid {pid})");
     Ok(())
+}
+
+/// Write a file that carries the server API key. Created 0600 rather than
+/// chmod'd afterwards — a chmod leaves a window in which any local process can
+/// read the credential.
+fn write_private(path: &Path, text: &str) -> Result<(), ChekovError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))?;
+    file.write_all(text.as_bytes())
+        .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))
 }
 
 /// A live server must be serving the model this launch is about to advertise.
@@ -356,6 +374,22 @@ mod tests {
         if let Some(name) = running_model {
             std::fs::write(logs.join("chekov.model"), format!("{name}\n")).expect("run state");
         }
+    }
+
+    #[test]
+    fn files_carrying_the_api_key_are_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join("chekov-test-launch-perms");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("scratch");
+        let path = root.join("settings.json");
+        super::write_private(&path, "{\"ANTHROPIC_AUTH_TOKEN\":\"secret\"}\n").expect("write");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "settings.json carries the server api key and is written into a \
+             shared temp-ish tree; any local process could read it at {mode:o}"
+        );
     }
 
     #[test]
