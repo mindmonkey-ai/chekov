@@ -19,6 +19,23 @@ All notable changes to chekov are recorded here. The format follows
   engine, mirroring what `use` already does for models.
 
 ### Fixed
+- `chekov show` no longer prints the server API key. The invocation line
+  carried `--api-key <key>` verbatim, and that output is exactly what people
+  paste into bug reports. The value is withheld positionally, so a stray
+  `--api-key` in `extra_flags` is covered too; `launch_args` — the thing that
+  actually executes — is untouched.
+- `doctor`'s context-floor row is renamed "context floor (config, not the
+  server)". It compares `models.toml` to `config.toml` and nothing else, so it
+  is the one row that can report PASS while the server is down — beside four
+  FAILs, an unqualified PASS reads as evidence the server is healthy, which
+  this check cannot know.
+- `pull` no longer offers a vision projector as a quant. `mmproj-F16.gguf`
+  matched the tag heuristic, so `unsloth/GLM-5.3-Flash-GGUF` listed an "F16" of
+  1.1 GiB beside real quants of 86-186 GiB — sorted to the top of the table as
+  the cheapest-looking option — and pulling it registered a projector as a
+  runnable model with `first_shard = mmproj-F16.gguf`. It was also summed into
+  the genuine `BF16` total (Qwen3.8-27B read 51.8 GiB against real weights of
+  50.9). Found by running the tool against live repos, not by reading it.
 - README's `[defaults]` block omitted `-np 1`, so anyone following the docs to
   hand-edit `models.toml` silently reintroduced the shared-KV-slot context
   split. Two new tests parse README's own TOML fences and compare them against
@@ -109,6 +126,20 @@ All notable changes to chekov are recorded here. The format follows
   dropping the socket, which the SDK reported as a protocol error.
 
 ### Changed
+- Downloads no longer go through `hf-hub`. It was reached from exactly one call
+  site and pulled 190 of the tree's 256 crates, including `tokio` — which the
+  README said chekov does not use — plus the `xet` stack, and a yank anywhere
+  in it could break `cargo deny` without a line of chekov changing (it did).
+  Replaced with a streaming `ureq` GET against the same revision-pinned
+  `resolve/` URL hf-hub was calling. **256 crates -> 66, and tokio is gone.**
+  Measured first: the repos are Xet-backed, but the Xet bridge serves plain
+  HTTPS, and a single stream already saturates the link at ~54 MB/s while
+  parallel streams do not beat it — so Xet's chunked parallelism had nothing to
+  win here. Downloads now land via a `.part` file and a rename.
+- `deny.toml` evaluates the graph for the Apple targets chekov actually ships
+  for, and its seven unversioned duplicate-skips are gone. Each of those
+  disarmed duplicate detection for a crate at *every* version, forever; with
+  the hf-hub tree removed the graph unifies on its own.
 - `[limits] wired_limit_mb` default is 187000 (was 200000). The old value
   exceeded macOS's own 75%-of-RAM default on every shipping Apple Silicon Mac,
   so a fresh install refused to `run` until the user hand-wrote a config file.

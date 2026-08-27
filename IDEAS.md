@@ -73,3 +73,15 @@ ALLOW unattended acceptance is a separate policy call — update.rs:147 says
 shows anyone running `update --model` unattended. Only add the flag if that
 changes.
 Proposed 2026-08-26 — status: OPEN
+
+## A live context-window check in `doctor` (2026-08-27)
+`doctor`'s fifth row compares `models.toml` to `config.toml` and nothing else,
+so it is the one row that can report PASS while the server is down. It is now
+named "context floor (config, not the server)" so it cannot be misread as
+evidence of health — but nothing yet verifies the context the SERVER actually
+loaded, which can differ from the registry's intent indefinitely (the
+`status-reports-registry-not-server` finding). Proposal: a sixth row probing
+llama-server's `/props` for `n_ctx` and comparing it to the effective
+`ctx_size`. A new check is new capability, and it touches every "five checks"
+doc surface, so it waits here.
+Proposed 2026-08-27 — status: OPEN
