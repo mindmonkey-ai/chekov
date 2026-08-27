@@ -54,3 +54,22 @@ the xet stack. chekov already queries the HF API over ureq at `hub.rs:126`.
 Against it: hf-hub provides resume and Xet-accelerated transfer, which matter for
 100+ GB pulls; hand-rolling means Range-request resume and losing Xet.
 Proposed 2026-08-25 — status: OPEN
+
+## `chekov stop --if-running` (2026-08-26)
+A teardown script cannot call `stop` idempotently: stopping an already-stopped
+server exits 1, and every error class shares exit 1, so the script cannot tell
+that benign case from a real failure. Proposal: an opt-in `--if-running` flag
+that prints "nothing to stop" and exits 0. Opt-in, not the default — a silent
+no-op by default would weaken the loud-failure creed. A new flag is new
+capability, so it waits here.
+Proposed 2026-08-26 — status: OPEN
+
+## `update --accept-license-change` for unattended runs (2026-08-26)
+`update --model` cannot run in cron once a vendor changes their license text:
+the STOP-4 gate needs a tty. The confirmation now says so plainly rather than
+reporting a phantom decline, which is the honest half of the fix. Whether to
+ALLOW unattended acceptance is a separate policy call — update.rs:147 says
+"STOP-4: explicit confirmation, never assumed", and no evidence in the repo
+shows anyone running `update --model` unattended. Only add the flag if that
+changes.
+Proposed 2026-08-26 — status: OPEN

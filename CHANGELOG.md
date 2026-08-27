@@ -19,6 +19,11 @@ All notable changes to chekov are recorded here. The format follows
   engine, mirroring what `use` already does for models.
 
 ### Fixed
+- Confirmation prompts no longer report a phantom decline when there is no
+  terminal. `confirm` read EOF from a non-tty stdin and reported the user as
+  having declined, with a remediation ("re-run and answer 'y'") that cannot be
+  followed in cron or launchd. It now checks for a tty first and fails with
+  `ConfirmationRequiresTerminal`, which states the actual situation.
 - proxy: a non-2xx from llama-server no longer collapses to `http status: 400`
   with the body discarded. ureq's `http_status_as_error` is turned off so the
   status is taken directly and the server's own `error.message` — the only

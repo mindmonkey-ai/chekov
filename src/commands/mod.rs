@@ -2,6 +2,7 @@
 //! each implementing `Command` against a shared `Ctx`. Traits carry behavior
 //! only (§C.6).
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -91,12 +92,29 @@ pub fn confirm(action: &str, assume_yes: bool) -> Result<(), ChekovError> {
     if assume_yes {
         return Ok(());
     }
+    // Ask only where an answer can actually come from. Reading EOF from a
+    // non-tty and calling it a decline invents an answer nobody gave, and
+    // sends the user after a remediation that cannot work unattended.
+    if !std::io::stdin().is_terminal() {
+        return answer_verdict(action, None);
+    }
     eprint!("{action} — proceed? [y/N] ");
     let mut line = String::new();
     std::io::stdin()
         .read_line(&mut line)
         .map_err(|e| ChekovError::io("reading confirmation from stdin", e))?;
-    match line.trim().to_ascii_lowercase().as_str() {
+    answer_verdict(action, Some(&line))
+}
+
+/// The confirmation decision, separated from stdin so both paths are testable.
+/// `None` means there was no terminal to ask.
+fn answer_verdict(action: &str, answer: Option<&str>) -> Result<(), ChekovError> {
+    let Some(answer) = answer else {
+        return Err(ChekovError::ConfirmationRequiresTerminal {
+            action: action.to_owned(),
+        });
+    };
+    match answer.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => Ok(()),
         _ => Err(ChekovError::ConfirmationDeclined {
             action: action.to_owned(),
@@ -106,7 +124,31 @@ pub fn confirm(action: &str, assume_yes: bool) -> Result<(), ChekovError> {
 
 #[cfg(test)]
 mod tests {
-    use super::render_table;
+    use super::{answer_verdict, render_table};
+
+    #[test]
+    fn no_terminal_is_not_the_same_as_a_decline() {
+        let err = answer_verdict("update the model", None)
+            .expect_err("there was nowhere to ask, so this cannot succeed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("terminal") || msg.contains("tty"),
+            "reporting a DECLINE invents an answer nobody gave, and its \
+             remediation (re-run and answer 'y') is impossible unattended: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_no_is_still_a_decline() {
+        let err = answer_verdict("update the model", Some("n\n")).expect_err("declined");
+        assert!(err.to_string().contains("was not confirmed"), "{err}");
+    }
+
+    #[test]
+    fn yes_in_either_form_proceeds() {
+        assert!(answer_verdict("x", Some("y\n")).is_ok());
+        assert!(answer_verdict("x", Some("YES\n")).is_ok());
+    }
 
     #[test]
     fn table_aligns_columns_and_headers() {

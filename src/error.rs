@@ -168,6 +168,13 @@ pub enum ChekovError {
     ConfirmationDeclined { action: String },
 
     #[error(
+        "'{action}' needs an interactive terminal by design — chekov never \
+         pre-approves a change like this, and stdin here is not a tty so there \
+         is no answer to read; run it from a terminal"
+    )]
+    ConfirmationRequiresTerminal { action: String },
+
+    #[error(
         "refusing to write hermes config: {reason} — re-run \
          `chekov integrate hermes` and confirm explicitly once resolved"
     )]
