@@ -19,6 +19,16 @@ All notable changes to chekov are recorded here. The format follows
   engine, mirroring what `use` already does for models.
 
 ### Fixed
+- `chekov show` no longer prints the server API key. The invocation line
+  carried `--api-key <key>` verbatim, and that output is exactly what people
+  paste into bug reports. The value is withheld positionally, so a stray
+  `--api-key` in `extra_flags` is covered too; `launch_args` — the thing that
+  actually executes — is untouched.
+- `doctor`'s context-floor row is renamed "context floor (config, not the
+  server)". It compares `models.toml` to `config.toml` and nothing else, so it
+  is the one row that can report PASS while the server is down — beside four
+  FAILs, an unqualified PASS reads as evidence the server is healthy, which
+  this check cannot know.
 - `pull` no longer offers a vision projector as a quant. `mmproj-F16.gguf`
   matched the tag heuristic, so `unsloth/GLM-5.3-Flash-GGUF` listed an "F16" of
   1.1 GiB beside real quants of 86-186 GiB — sorted to the top of the table as
