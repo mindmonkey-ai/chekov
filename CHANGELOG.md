@@ -19,6 +19,13 @@ All notable changes to chekov are recorded here. The format follows
   engine, mirroring what `use` already does for models.
 
 ### Fixed
+- `pull` no longer offers a vision projector as a quant. `mmproj-F16.gguf`
+  matched the tag heuristic, so `unsloth/GLM-5.3-Flash-GGUF` listed an "F16" of
+  1.1 GiB beside real quants of 86-186 GiB — sorted to the top of the table as
+  the cheapest-looking option — and pulling it registered a projector as a
+  runnable model with `first_shard = mmproj-F16.gguf`. It was also summed into
+  the genuine `BF16` total (Qwen3.8-27B read 51.8 GiB against real weights of
+  50.9). Found by running the tool against live repos, not by reading it.
 - README's `[defaults]` block omitted `-np 1`, so anyone following the docs to
   hand-edit `models.toml` silently reintroduced the shared-KV-slot context
   split. Two new tests parse README's own TOML fences and compare them against

@@ -275,6 +275,9 @@ fn verdict_for(bytes: Option<u64>, wired_mb: Option<u64>) -> String {
 /// ambiguous spec like `Q5_K_XL` can never select `UD-Q5_K_XL` files.
 fn derived_quant(path: &str) -> Option<String> {
     let stem = path.strip_suffix(".gguf")?;
+    if !is_weights(path) {
+        return None;
+    }
     if let Some((dir, _)) = path.split_once('/') {
         return quant_like(dir).then(|| dir.to_owned());
     }
@@ -284,6 +287,18 @@ fn derived_quant(path: &str) -> Option<String> {
         .map(|(i, _)| &stem[i + 1..])
         .find(|cand| quant_like(cand))
         .map(ToOwned::to_owned)
+}
+
+/// True for a file that is actually model weights.
+///
+/// A vision projector is named `mmproj-F16.gguf`, so the tag heuristic below
+/// reads `F16` out of it and offers a 1 GiB "quant" of a 100 GiB model — the
+/// cheapest-looking row in the table, and not a runnable model at all.
+/// `docs/HOWTOS.md` already tells readers `mmproj` "is **not** the model";
+/// this teaches the code the same thing.
+fn is_weights(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    !name.starts_with("mmproj") && !name.contains("-mmproj-")
 }
 
 /// Heuristic for quant-tag tokens: `UD-Q5_K_XL`, `IQ4_XS`, `Q8_0`, `BF16`…
@@ -627,6 +642,27 @@ mod tests {
         assert!(quants.contains(&"UD-Q5_K_XL".to_owned()), "{quants:?}");
         assert!(quants.contains(&"UD-Q4_K_XL".to_owned()), "{quants:?}");
         assert!(quants.contains(&"Q8_0".to_owned()), "{quants:?}");
+    }
+
+    #[test]
+    fn a_vision_projector_is_not_offered_as_a_quant() {
+        // Verified live against unsloth/GLM-5.3-Flash-GGUF, whose real quants
+        // are 86-186 GiB: `mmproj-F16.gguf` was listed as an `F16` of 1.1 GiB
+        // and sorted to the TOP of the fit table, so it read as the cheapest
+        // option. Pulling it registered a projector as a runnable model.
+        assert_eq!(super::derived_quant("mmproj-F16.gguf"), None);
+        assert_eq!(super::derived_quant("mmproj-BF16.gguf"), None);
+        assert_eq!(super::derived_quant("GLM-5.3-Flash-mmproj-F16.gguf"), None);
+        // Real weights must still resolve, including the genuine BF16 folder
+        // whose total the projector was being summed into.
+        assert_eq!(
+            super::derived_quant("Qwen3.8-27B-UD-Q4_K_M.gguf").as_deref(),
+            Some("UD-Q4_K_M")
+        );
+        assert_eq!(
+            super::derived_quant("BF16/Qwen3.8-27B-BF16-00001-of-00002.gguf").as_deref(),
+            Some("BF16")
+        );
     }
 
     #[test]
