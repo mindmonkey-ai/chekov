@@ -29,6 +29,8 @@ pub enum Cmd {
     Restart(commands::restart::RestartCmd),
     /// Show server state, model, revision, uptime, wired limit
     Status(commands::status::StatusCmd),
+    /// Report what this Mac is and what it can hold, with each number's provenance
+    Capability(commands::capability::CapabilityCmd),
     /// Download and register a model: org/repo[:QUANT][@rev]
     Pull(commands::pull::PullCmd),
     /// List registered models
@@ -83,6 +85,7 @@ pub fn dispatch(cmd: &Cmd, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
         Cmd::Use(c) => c.run(ctx),
         Cmd::Rm(c) => c.run(ctx),
         Cmd::Show(c) => c.run(ctx),
+        Cmd::Capability(c) => c.run(ctx),
         Cmd::Doctor(c) => c.run(ctx),
         Cmd::Setup(c) => c.run(ctx),
         Cmd::Update(c) => c.run(ctx),

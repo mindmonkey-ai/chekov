@@ -59,10 +59,13 @@ pub(crate) fn preflight(
 /// at one would be a lie (§C.2 — every refusal names a real remediation).
 fn wired_gate(cfg: &crate::core::config::Config, required_mb: u64) -> Result<(), ChekovError> {
     use crate::core::checks::{WiredVerdict, physical_ram_mb, wired_verdict};
-    let Some((actual_mb, _is_default)) = crate::core::checks::wired_limit_mb() else {
-        eprintln!("warning: could not read iogpu.wired_limit_mb — proceeding unverified");
+    // Same resolver `chekov capability` prints, so the gate and the report can
+    // never disagree about what this machine can hold.
+    let Some(budget) = crate::core::machine::live_gpu_budget(&cfg.engine_dir()) else {
+        eprintln!("warning: could not determine the GPU budget — proceeding unverified");
         return Ok(());
     };
+    let actual_mb = budget.value;
     // Unreadable RAM must never upgrade a refusal to "unreachable" — stay loud
     // but stay accurate.
     let ram_mb = physical_ram_mb().unwrap_or(u64::MAX);

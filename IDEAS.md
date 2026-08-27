@@ -85,3 +85,16 @@ llama-server's `/props` for `n_ctx` and comparing it to the effective
 `ctx_size`. A new check is new capability, and it touches every "five checks"
 doc surface, so it waits here.
 Proposed 2026-08-27 — status: OPEN
+
+## Machine capability scan, frontier graph, recommendations and agent bench (2026-08-25)
+`chekov capability {scan,graph,recommend,explain,bench,compare}` — probe the machine
+(sysctl / ioreg / `llama-server --list-devices` / df+mount), render an ASCII+SVG frontier of
+model x quant x ctx with fits/tight/exceeds and predicted-vs-measured tok/s, recommend
+candidates with the sizing math shown, and benchmark them through chekov's own
+Anthropic->OpenAI translator against a built-in fixture or the user's own repo.
+Motivated by a measured defect: `checks::effective_wired_mb` reports 196608 MiB on this
+machine where the engine reports 228065 MiB — chekov understates its own budget by 30.7 GiB.
+Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
+`MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)`.
+Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
+Proposed 2026-08-25 — status: **slice 1 (`capability` scan) SHIPPED; slices 2-6 OPEN**

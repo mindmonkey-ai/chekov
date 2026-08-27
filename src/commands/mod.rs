@@ -11,6 +11,7 @@ use crate::core::hub::{HttpClient, UreqClient};
 use crate::core::registry::Registry;
 use crate::error::ChekovError;
 
+pub mod capability;
 pub mod doctor;
 pub mod env;
 pub mod integrate;
