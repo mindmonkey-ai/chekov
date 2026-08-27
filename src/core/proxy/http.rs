@@ -14,6 +14,12 @@ use crate::error::ChekovError;
 /// a ceiling a malformed `Content-Length` becomes an OOM.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+/// The body is bounded; the headers were not. A local peer could hold a proxy
+/// thread open forever with an endless header stream, or grow one line without
+/// limit — the listener is loopback-only, but any local process can reach it.
+const MAX_HEADERS: usize = 100;
+const MAX_HEADER_BYTES: u64 = 16 * 1024;
+
 /// A parsed inbound request.
 #[derive(Debug)]
 pub struct HttpRequest {
@@ -95,7 +101,7 @@ pub fn read_request<R: Read>(stream: R) -> Result<HttpRequest, ChekovError> {
 fn read_content_length<R: Read>(reader: &mut BufReader<R>) -> Result<usize, ChekovError> {
     let mut len = 0_usize;
     let mut line = String::new();
-    loop {
+    for _ in 0..MAX_HEADERS {
         read_line(reader, &mut line)?;
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
@@ -107,6 +113,9 @@ fn read_content_length<R: Read>(reader: &mut BufReader<R>) -> Result<usize, Chek
             len = parse_length(value.trim())?;
         }
     }
+    Err(ChekovError::ProxyBadRequest {
+        reason: format!("more than {MAX_HEADERS} headers before the blank line"),
+    })
 }
 
 fn parse_length(raw: &str) -> Result<usize, ChekovError> {
@@ -124,13 +133,27 @@ fn parse_length(raw: &str) -> Result<usize, ChekovError> {
 /// Read one CRLF-terminated line, erroring on a truncated stream.
 fn read_line<R: Read>(reader: &mut BufReader<R>, buf: &mut String) -> Result<(), ChekovError> {
     buf.clear();
-    let read = reader
+    let read = (&mut *reader)
+        .take(MAX_HEADER_BYTES)
         .read_line(buf)
         .map_err(|e| ChekovError::io("reading proxy request line", e))?;
     if read == 0 {
         return Err(ChekovError::ProxyBadRequest {
             reason: "client closed the connection mid-request".to_owned(),
         });
+    }
+    if !buf.ends_with('\n') {
+        // No newline within the cap means the peer is still sending; a short
+        // read without one is a genuinely truncated stream.
+        return if read as u64 >= MAX_HEADER_BYTES {
+            Err(ChekovError::ProxyBadRequest {
+                reason: format!("a header line exceeds the {MAX_HEADER_BYTES}-byte ceiling"),
+            })
+        } else {
+            Err(ChekovError::ProxyBadRequest {
+                reason: "client closed the connection mid-line".to_owned(),
+            })
+        };
     }
     Ok(())
 }
@@ -174,6 +197,38 @@ pub fn write_sse_event<W: Write>(out: &mut W, ev: &super::SseEvent) -> Result<()
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_flood_of_headers_is_refused_rather_than_read_forever() {
+        let mut raw = String::from("POST /v1/messages HTTP/1.1\r\n");
+        for i in 0..5_000 {
+            use std::fmt::Write;
+            write!(raw, "x-pad-{i}: y\r\n").expect("string write");
+        }
+        raw.push_str("content-length: 0\r\n\r\n");
+        let err = read_request(raw.as_bytes())
+            .expect_err("a peer that never sends the blank line must be cut off");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("header"),
+            "the refusal should name what was exceeded: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_header_line_is_refused_by_length() {
+        let mut raw = String::from("POST /v1/messages HTTP/1.1\r\n");
+        raw.push_str("x-huge: ");
+        raw.push_str(&"A".repeat(200_000));
+        let err = read_request(raw.as_bytes())
+            .expect_err("an endless header line must not be buffered without bound");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("header") || msg.contains("line"),
+            "the refusal should name the line/header limit, not look like a \
+             truncated stream: {msg}"
+        );
+    }
     use super::{HttpResponse, MAX_BODY_BYTES, read_request, write_response};
 
     #[test]
