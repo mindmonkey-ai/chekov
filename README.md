@@ -153,8 +153,14 @@ chekov runs any GGUF repo on Hugging Face. A workable way to choose:
    colon in the pull spec.
 3. **Size it against your memory.** Rule of thumb: `weights + KV cache + ~3 GiB`
    must fit under `[limits] wired_limit_mb` (default: 187000 MB). KV cache at
-   q8_0 is roughly `ctx × layers × kv_heads × head_dim × 2 bytes`; for a
-   100k context on a mid-size model budget 10–20 GiB. Pick the largest quant
+   q8_0 is roughly `ctx × cached_layers × kv_heads × head_dim × 2 × 1.0625
+   bytes` — q8_0 is 34 bytes per 32 elements, not one byte, and
+   `cached_layers` is **not** the model's layer count on modern architectures:
+   MoE and sliding-window models cache only a fraction of their blocks, so
+   using `block_count` overestimates by 4-5×. When in doubt, launch once and
+   read `llama_kv_cache: size = …` from the server log — measured beats
+   predicted. For a 100k context on a mid-size model budget 10–20 GiB. Pick the
+   largest quant
    that leaves that headroom — `chekov run` refuses to start rather than let
    macOS page a model, so an over-ambitious pick fails loudly, not slowly.
 4. **Note the vendor's sampling advice.** Model cards usually list
@@ -196,6 +202,13 @@ extra_flags = ["--reasoning-format", "none",   # keep <think> blocks in the outp
 ```
 
 `extra_flags` are appended after `[defaults].flags`, never replacing them.
+
+`-np 1` pins llama-server to a single KV slot. Without it, `--parallel` is auto
+and `--ctx-size` becomes a pool shared across slots, so concurrent agent
+requests exhaust it mid-generation with "Context size has been exceeded" — and
+`chekov status` still reports the full number. Keep the pin unless you know you
+want the shared pool; the trade is that background agent traffic serialises
+behind the foreground turn.
 Then activate and verify:
 
 ```sh
@@ -359,7 +372,8 @@ active = "minimax-m2.7"          # top-level keys must precede [tables]
 [defaults]
 ctx_size = 98304
 flags = ["--jinja", "--flash-attn", "on",
-         "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"]
+         "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
+         "-np", "1"]        # one KV slot: see below
 
 [models."minimax-m2.7"]
 repo = "unsloth/MiniMax-M2.7-GGUF"
