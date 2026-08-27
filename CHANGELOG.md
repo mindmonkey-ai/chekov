@@ -109,6 +109,20 @@ All notable changes to chekov are recorded here. The format follows
   dropping the socket, which the SDK reported as a protocol error.
 
 ### Changed
+- Downloads no longer go through `hf-hub`. It was reached from exactly one call
+  site and pulled 190 of the tree's 256 crates, including `tokio` — which the
+  README said chekov does not use — plus the `xet` stack, and a yank anywhere
+  in it could break `cargo deny` without a line of chekov changing (it did).
+  Replaced with a streaming `ureq` GET against the same revision-pinned
+  `resolve/` URL hf-hub was calling. **256 crates -> 66, and tokio is gone.**
+  Measured first: the repos are Xet-backed, but the Xet bridge serves plain
+  HTTPS, and a single stream already saturates the link at ~54 MB/s while
+  parallel streams do not beat it — so Xet's chunked parallelism had nothing to
+  win here. Downloads now land via a `.part` file and a rename.
+- `deny.toml` evaluates the graph for the Apple targets chekov actually ships
+  for, and its seven unversioned duplicate-skips are gone. Each of those
+  disarmed duplicate detection for a crate at *every* version, forever; with
+  the hf-hub tree removed the graph unifies on its own.
 - `[limits] wired_limit_mb` default is 187000 (was 200000). The old value
   exceeded macOS's own 75%-of-RAM default on every shipping Apple Silicon Mac,
   so a fresh install refused to `run` until the user hand-wrote a config file.

@@ -1,6 +1,8 @@
-//! Hugging Face hub access behind a mockable seam (§8.2): all metadata goes
-//! through `HttpClient`, so tests inject fakes; only the shard download itself
-//! uses `hf-hub` (network, untested by design).
+//! Hugging Face hub access behind a mockable seam (§8.2).
+//!
+//! All metadata goes through `HttpClient`, so tests inject fakes. Only the
+//! shard download itself touches the network, over blocking `ureq`, and is
+//! untested by design.
 
 use serde::Deserialize;
 
@@ -346,22 +348,49 @@ pub fn link_verified(
     Ok(true)
 }
 
+/// Stream one file to `dest`, via a `.part` sibling so an interrupted transfer
+/// never leaves a short file that `file_matches` would have to catch later.
+///
+/// Network path — exercised only by real pulls, never by tests (prompt §2.4).
+fn fetch_to(url: &str, dest: &std::path::Path) -> Result<(), ChekovError> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ChekovError::io(format!("creating {}", parent.display()), e))?;
+    }
+    let res = ureq::get(url)
+        .call()
+        .map_err(|e| ChekovError::io(format!("requesting {url}"), std::io::Error::other(e)))?;
+    let part = dest.with_extension("part");
+    let mut out = std::fs::File::create(&part)
+        .map_err(|e| ChekovError::io(format!("creating {}", part.display()), e))?;
+    std::io::copy(&mut res.into_body().into_reader(), &mut out)
+        .map_err(|e| ChekovError::io(format!("writing {}", part.display()), e))?;
+    out.sync_all()
+        .map_err(|e| ChekovError::io(format!("flushing {}", part.display()), e))?;
+    std::fs::rename(&part, dest)
+        .map_err(|e| ChekovError::io(format!("renaming {} into place", part.display()), e))
+}
+
+/// The revision-pinned download URL for one file.
+///
+/// Xet-backed repos redirect to a CAS bridge that serves the bytes over
+/// ordinary HTTPS with a normal content-length, so a plain GET works there too
+/// — verified against unsloth/MiniMax-M2.7-GGUF, which is Xet-backed.
+fn resolve_url(repo: &str, revision: &str, path: &str) -> String {
+    format!("https://huggingface.co/{repo}/resolve/{revision}/{path}")
+}
+
 /// Download every planned file into the model directory, revision-pinned.
 ///
 /// Network path — exercised only by real pulls, never by tests (prompt §2.4).
-/// hf-hub's blocking wrapper runs its own internal runtime thread; chekov
-/// itself stays synchronous.
 pub fn download_plan(spec: &DownloadSpec<'_>, plan: &PullPlan) -> Result<(), ChekovError> {
     let failed = |reason: String| ChekovError::DownloadFailed {
         repo: spec.repo.to_owned(),
         reason,
     };
-    let (owner, name) = spec
-        .repo
-        .split_once('/')
-        .ok_or_else(|| failed("repo id is missing the org/ prefix".to_owned()))?;
-    let client = hf_hub::HFClientSync::new().map_err(|e| failed(e.to_string()))?;
-    let repo = client.model(owner, name);
+    if !spec.repo.contains('/') {
+        return Err(failed("repo id is missing the org/ prefix".to_owned()));
+    }
     for file in &plan.files {
         let target = spec.dest.join(&file.path);
         if file_matches(&target, file.size) {
@@ -376,11 +405,7 @@ pub fn download_plan(spec: &DownloadSpec<'_>, plan: &PullPlan) -> Result<(), Che
             continue;
         }
         println!("downloading {} …", file.path);
-        repo.download_file()
-            .filename(file.path.clone())
-            .local_dir(spec.dest.to_path_buf())
-            .revision(spec.revision.to_owned())
-            .send()
+        fetch_to(&resolve_url(spec.repo, spec.revision, &file.path), &target)
             .map_err(|e| failed(format!("{}: {e}", file.path)))?;
     }
     Ok(())
@@ -431,6 +456,24 @@ fn strip_shard_suffix(stem: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use super::resolve_url;
+
+    #[test]
+    fn a_download_url_pins_the_revision_not_main() {
+        let url = resolve_url(
+            "unsloth/MiniMax-M2.7-GGUF",
+            "d2a05ccf69491b03db0cc40b335aec14bdaf7198",
+            "UD-Q5_K_XL/MiniMax-M2.7-UD-Q5_K_XL-00001-of-00005.gguf",
+        );
+        assert_eq!(
+            url,
+            "https://huggingface.co/unsloth/MiniMax-M2.7-GGUF/resolve/\
+             d2a05ccf69491b03db0cc40b335aec14bdaf7198/\
+             UD-Q5_K_XL/MiniMax-M2.7-UD-Q5_K_XL-00001-of-00005.gguf"
+                .replace(' ', ""),
+            "a pull must fetch the pinned revision, never whatever main is now"
+        );
+    }
     use super::{
         HttpClient, JsonRequest, PullTarget, QuantOption, RepoSnapshot, available_quants,
         fetch_snapshot, plan_pull, quant_options, render_quant_table,
