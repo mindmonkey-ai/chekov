@@ -19,6 +19,21 @@ All notable changes to chekov are recorded here. The format follows
   engine, mirroring what `use` already does for models.
 
 ### Fixed
+- README's `[defaults]` block omitted `-np 1`, so anyone following the docs to
+  hand-edit `models.toml` silently reintroduced the shared-KV-slot context
+  split. Two new tests parse README's own TOML fences and compare them against
+  `Defaults::default()` and `FileConfig::default()`, so this class of drift now
+  fails the build instead of shipping.
+- README's KV-cache rule of thumb used the model's layer count and treated q8_0
+  as one byte per element. Modern MoE and sliding-window models cache only a
+  fraction of their blocks (a 4-5× overestimate), and q8_0 is 34 bytes per 32
+  elements. Both corrected, with a pointer to the measured value in the server
+  log.
+- `docs/HOWTOS.md` claimed a 4-bit quant costs 0.5 GB per billion parameters,
+  contradicting its own table on the next line (which implies ~0.6 GB/B).
+  The table was right: llama.cpp promotes `output.weight` and the embeddings,
+  so a "4-bit" Q4_K_M realises about 4.8 bits per weight. Also states that the
+  table is weights-only, matching what `render_quant_table` already says.
 - Confirmation prompts no longer report a phantom decline when there is no
   terminal. `confirm` read EOF from a non-tty stdin and reported the user as
   having declined, with a remediation ("re-run and answer 'y'") that cannot be

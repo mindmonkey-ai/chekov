@@ -162,6 +162,30 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    /// README tells users to hand-edit `models.toml` and shows this block as
+    /// the reference. It once omitted `-np 1`, so anyone following the docs
+    /// silently reintroduced the context split. Nothing caught that; this does.
+    #[test]
+    fn the_readme_registry_block_matches_the_shipped_defaults() {
+        let readme = include_str!("../../README.md");
+        let fence = readme
+            .split("```toml")
+            .skip(1)
+            .filter_map(|rest| rest.split("```").next())
+            .find(|f| f.lines().any(|l| l.trim_start().starts_with("[defaults]")))
+            .expect("README documents the models.toml shape");
+        let documented: super::Registry =
+            toml::from_str(fence).expect("the documented registry must parse as a real Registry");
+        let shipped = super::Defaults::default();
+        assert_eq!(
+            documented.defaults.flags, shipped.flags,
+            "README's [defaults].flags has drifted from the code"
+        );
+        assert_eq!(
+            documented.defaults.ctx_size, shipped.ctx_size,
+            "README's [defaults].ctx_size has drifted from the code"
+        );
+    }
     use std::path::PathBuf;
 
     use super::{ModelEntry, Registry};
