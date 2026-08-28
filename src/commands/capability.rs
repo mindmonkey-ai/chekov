@@ -909,8 +909,15 @@ fn run_agentic(
 ) -> Result<(), ChekovError> {
     use crate::core::bench::{grade, probes, probeset, runner};
     let set = probeset::agentic_v0()?;
+    // Once the engine has refused a forced grammar, it will refuse every
+    // one: record the rest as unavailable rather than firing doomed
+    // requests and calling each refusal a model failure.
+    let mut forced = ForcedState {
+        wire,
+        refusal: None,
+    };
     for case in &set.tool_emit {
-        run_tool_case(sink, wire, case)?;
+        run_tool_case(sink, &mut forced, case)?;
     }
     for case in &set.instruction {
         if sink.is_done("instruction", &case.id) {
@@ -927,12 +934,19 @@ fn run_agentic(
 
 /// One tool case: the unconstrained crossing, and — for call cases — the
 /// grammar-forced one. The gap between the two suites is the §7.2 point.
+/// The forced pass's wire plus the engine's refusal, once it has refused.
+struct ForcedState<'a> {
+    wire: &'a crate::core::bench::runner::ProbeWire<'a>,
+    refusal: Option<String>,
+}
+
 fn run_tool_case(
     sink: &mut TaskSink,
-    wire: &crate::core::bench::runner::ProbeWire,
+    forced: &mut ForcedState,
     case: &crate::core::bench::probeset::ToolCase,
 ) -> Result<(), ChekovError> {
     use crate::core::bench::{grade, probes, probeset, runner};
+    let wire = forced.wire;
     if !sink.is_done("tool_emit", &case.id) {
         let outcome = runner::cross(wire, &probes::tool_probe(case)).map(|artifact| {
             (
@@ -945,19 +959,69 @@ fn run_tool_case(
     if case.expect != probeset::Expect::Call {
         return Ok(());
     }
+    run_forced_case(sink, forced, case)
+}
+
+/// The forced half of one call case.
+///
+/// An `Err` from the crossing is the engine refusing to constrain the model,
+/// not the model answering badly (grading failures arrive as `Ok`) — so it is
+/// recorded unavailable, and every later case is too rather than firing more
+/// doomed requests.
+fn run_forced_case(
+    sink: &mut TaskSink,
+    forced: &mut ForcedState,
+    case: &crate::core::bench::probeset::ToolCase,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::{grade, probes, probeset, runner};
     let forced_id = format!("gg-{}", case.id);
-    if !sink.is_done("grammar_gap", &forced_id) {
-        let schema = probeset::forced_schema(case);
-        let outcome =
-            runner::cross_forced(wire, &probes::forced_probe(case), &schema).map(|artifact| {
-                (
-                    artifact.timings,
-                    grade_row(grade::grade_forced(&artifact.anthropic_body, case)),
-                )
-            });
-        append_probe(sink, ("grammar_gap", &forced_id), outcome)?;
+    if sink.is_done("grammar_gap", &forced_id) {
+        return Ok(());
     }
-    Ok(())
+    if let Some(reason) = forced.refusal.clone() {
+        return append_unavailable(sink, &forced_id, reason);
+    }
+    let schema = probeset::forced_schema(case);
+    match runner::cross_forced(forced.wire, &probes::forced_probe(case), &schema) {
+        Ok(artifact) => {
+            let verdict = grade_row(grade::grade_forced(&artifact.anthropic_body, case));
+            append_probe(
+                sink,
+                ("grammar_gap", &forced_id),
+                Ok((artifact.timings, verdict)),
+            )
+        }
+        Err(e) => {
+            let reason = e.to_string();
+            eprintln!(
+                "chekov bench: the engine refused a forced grammar — grammar_gap is \
+                 N/A for this run ({reason})"
+            );
+            forced.refusal = Some(reason.clone());
+            append_unavailable(sink, &forced_id, reason)
+        }
+    }
+}
+
+/// Record a task the engine would not let us measure.
+fn append_unavailable(
+    sink: &mut TaskSink,
+    task_id: &str,
+    reason: String,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::store;
+    sink.writer.append(store::Task {
+        suite: "grammar_gap".into(),
+        task_id: task_id.into(),
+        measure: store::Measure {
+            prompt_n: 0,
+            decode_samples: vec![],
+            prefill_samples: vec![],
+            warmup_dropped: 0,
+            cache_n: 0,
+        },
+        grade: Some(store::GradeRow::unavailable(reason)),
+    })
 }
 
 /// Strict is the row's verdict; the loose result rides in the reason so the
@@ -973,13 +1037,10 @@ fn instruction_row(
     };
     match strict {
         grade::Grade::Pass => store::GradeRow {
-            pass: true,
             reason: Some(loose_tag),
+            ..store::GradeRow::pass()
         },
-        grade::Grade::Fail { reason } => store::GradeRow {
-            pass: false,
-            reason: Some(format!("{reason}; {loose_tag}")),
-        },
+        grade::Grade::Fail { reason } => store::GradeRow::fail(format!("{reason}; {loose_tag}")),
     }
 }
 
@@ -1119,10 +1180,7 @@ fn failed_probe(
             warmup_dropped: 0,
             cache_n: 0,
         },
-        store::GradeRow {
-            pass: false,
-            reason: Some(e.to_string()),
-        },
+        store::GradeRow::fail(e.to_string()),
     )
 }
 
@@ -1141,14 +1199,8 @@ fn probe_measure(
 fn grade_row(graded: crate::core::bench::grade::Grade) -> crate::core::bench::store::GradeRow {
     use crate::core::bench::{grade, store};
     match graded {
-        grade::Grade::Pass => store::GradeRow {
-            pass: true,
-            reason: None,
-        },
-        grade::Grade::Fail { reason } => store::GradeRow {
-            pass: false,
-            reason: Some(reason),
-        },
+        grade::Grade::Pass => store::GradeRow::pass(),
+        grade::Grade::Fail { reason } => store::GradeRow::fail(reason),
     }
 }
 

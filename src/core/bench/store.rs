@@ -67,6 +67,41 @@ pub struct Measure {
 pub struct GradeRow {
     pub pass: bool,
     pub reason: Option<String>,
+    /// The task could not be measured at all — the engine refused, the
+    /// capability is absent. NEVER a failure: a model is not wrong because
+    /// something outside it would not run. An unavailable axis reports N/A
+    /// with its reason (spec §7.5), never a zero.
+    #[serde(default)]
+    pub unavailable: bool,
+}
+
+impl GradeRow {
+    #[must_use]
+    pub const fn pass() -> Self {
+        Self {
+            pass: true,
+            reason: None,
+            unavailable: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn fail(reason: String) -> Self {
+        Self {
+            pass: false,
+            reason: Some(reason),
+            unavailable: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn unavailable(reason: String) -> Self {
+        Self {
+            pass: false,
+            reason: Some(reason),
+            unavailable: true,
+        }
+    }
 }
 
 /// One task to append: its identity plus what was measured.
@@ -285,7 +320,7 @@ fn suite_summaries(log: &RunLog) -> String {
         .rows
         .iter()
         .filter(|r| ["tool_emit", "grammar_gap", "instruction"].contains(&r.suite.as_str()))
-        .filter(|r| r.grade.as_ref().is_some_and(|g| !g.pass))
+        .filter(|r| r.grade.as_ref().is_some_and(|g| !g.pass && !g.unavailable))
         .map(agentic_fail_line)
         .collect();
     out.push_str(&failures);
@@ -327,10 +362,28 @@ fn tool_emit_line(log: &RunLog) -> Option<String> {
 
 /// The §7.2 anti-self-deception line: forced vs unconstrained ON THE SAME
 /// CASES — a large gap means "works only with a babysitter".
+///
+/// When the forced pass could not run at all, the axis is N/A with the
+/// engine's own reason. Reporting 0/N there would publish a gap the model
+/// never earned.
 fn grammar_gap_line(log: &RunLog) -> Option<String> {
     let forced: Vec<&TaskRow> = rows_of(log, "grammar_gap").collect();
     if forced.is_empty() {
         return None;
+    }
+    if forced
+        .iter()
+        .all(|r| r.grade.as_ref().is_some_and(|g| g.unavailable))
+    {
+        let reason = forced
+            .first()
+            .and_then(|r| r.grade.as_ref())
+            .and_then(|g| g.reason.as_deref())
+            .unwrap_or("reason unrecorded");
+        return Some(format!(
+            "grammar_gap  N/A — the forced pass could not run ({reason}); \
+             no gap is reported because none was measured\n"
+        ));
     }
     let base_ids: Vec<&str> = forced
         .iter()
@@ -502,11 +555,58 @@ mod tests {
                     grade: Some(GradeRow {
                         pass,
                         reason: reason.map(str::to_owned),
+                        unavailable: false,
                     }),
                 })
                 .expect("append");
         }
         writer
+    }
+
+    #[test]
+    fn an_unmeasurable_forced_pass_reports_na_not_a_zero_score() {
+        // The engine refusing to constrain the model is not the model failing.
+        // Reporting 0/2 here would publish a gap nobody measured.
+        let eval = scratch("forced-na");
+        let mut writer = RunWriter::create(&eval, "r8-model", &head()).expect("create");
+        let refused = || GradeRow::unavailable("http status: 400".to_owned());
+        let rows = [
+            ("tool_emit", "te-001", GradeRow::pass()),
+            ("tool_emit", "te-002", GradeRow::pass()),
+            ("grammar_gap", "gg-te-001", refused()),
+            ("grammar_gap", "gg-te-002", refused()),
+        ];
+        for (suite, id, grade) in rows {
+            writer
+                .append(Task {
+                    suite: suite.into(),
+                    task_id: id.into(),
+                    measure: measure(&[20.0, 20.0]),
+                    grade: Some(grade),
+                })
+                .expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("grammar_gap  N/A"),
+            "an unmeasurable axis is N/A: {rendered}"
+        );
+        assert!(
+            rendered.contains("http status: 400"),
+            "with its reason: {rendered}"
+        );
+        assert!(
+            !rendered.contains("(gap"),
+            "no gap may be published: {rendered}"
+        );
+        assert!(
+            !rendered.contains("forced —"),
+            "no forced score may be published: {rendered}"
+        );
+        assert!(
+            !rendered.contains("grammar_gap FAIL"),
+            "unavailable is never listed as a failure: {rendered}"
+        );
     }
 
     #[test]
@@ -669,10 +769,9 @@ mod tests {
                 suite: "fixture".into(),
                 task_id: "greeting".into(),
                 measure: measure(&[20.0, 20.0]),
-                grade: Some(GradeRow {
-                    pass: false,
-                    reason: Some("missing expected substring \"hello\"".into()),
-                }),
+                grade: Some(GradeRow::fail(
+                    "missing expected substring \"hello\"".to_owned(),
+                )),
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
