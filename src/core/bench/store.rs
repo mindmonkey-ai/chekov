@@ -355,9 +355,63 @@ fn passed(rows: &[&TaskRow]) -> usize {
         .count()
 }
 
+fn is_unavailable(row: &TaskRow) -> bool {
+    row.grade.as_ref().is_some_and(|g| g.unavailable)
+}
+
+/// The rows that were actually measured, and how many were not.
+///
+/// An unmeasured task belongs in NEITHER the numerator nor the denominator:
+/// leaving it in the denominator scores the model down for a question it was
+/// never asked. The count rides along so the exclusion is always printed —
+/// a silently smaller denominator is its own dishonesty.
+fn measured<'a>(rows: &[&'a TaskRow]) -> (Vec<&'a TaskRow>, usize) {
+    let kept: Vec<&TaskRow> = rows
+        .iter()
+        .filter(|r| !is_unavailable(r))
+        .copied()
+        .collect();
+    let excluded = rows.len() - kept.len();
+    (kept, excluded)
+}
+
+/// ` (N unavailable, excluded)`, or nothing when everything was measured.
+fn excluded_note(excluded: usize) -> String {
+    if excluded == 0 {
+        String::new()
+    } else {
+        format!(" ({excluded} unavailable, excluded)")
+    }
+}
+
+/// The reason the first unavailable row recorded, for an N/A line.
+fn unavailable_reason(rows: &[&TaskRow]) -> String {
+    rows.iter()
+        .find(|r| is_unavailable(r))
+        .and_then(|r| r.grade.as_ref())
+        .and_then(|g| g.reason.as_deref())
+        .unwrap_or("reason unrecorded")
+        .to_owned()
+}
+
 fn tool_emit_line(log: &RunLog) -> Option<String> {
     let rows: Vec<&TaskRow> = rows_of(log, "tool_emit").collect();
-    (!rows.is_empty()).then(|| format!("tool_emit    {}/{}\n", passed(&rows), rows.len()))
+    if rows.is_empty() {
+        return None;
+    }
+    let (kept, excluded) = measured(&rows);
+    if kept.is_empty() {
+        return Some(format!(
+            "tool_emit    N/A — nothing was measured ({})\n",
+            unavailable_reason(&rows)
+        ));
+    }
+    Some(format!(
+        "tool_emit    {}/{}{}\n",
+        passed(&kept),
+        kept.len(),
+        excluded_note(excluded)
+    ))
 }
 
 /// The §7.2 anti-self-deception line: forced vs unconstrained ON THE SAME
@@ -371,35 +425,42 @@ fn grammar_gap_line(log: &RunLog) -> Option<String> {
     if forced.is_empty() {
         return None;
     }
-    if forced
-        .iter()
-        .all(|r| r.grade.as_ref().is_some_and(|g| g.unavailable))
-    {
-        let reason = forced
-            .first()
-            .and_then(|r| r.grade.as_ref())
-            .and_then(|g| g.reason.as_deref())
-            .unwrap_or("reason unrecorded");
+    let (kept, excluded) = measured(&forced);
+    if kept.is_empty() {
         return Some(format!(
-            "grammar_gap  N/A — the forced pass could not run ({reason}); \
-             no gap is reported because none was measured\n"
+            "grammar_gap  N/A — the forced pass could not run ({}); \
+             no gap is reported because none was measured\n",
+            unavailable_reason(&forced)
         ));
     }
-    let base_ids: Vec<&str> = forced
+    // "The same cases" means the ones actually forced — an unavailable case
+    // has no forced result to compare against, so including its
+    // unconstrained result on one side of the gap invents the difference.
+    let base_ids: Vec<&str> = kept
         .iter()
         .filter_map(|r| r.task_id.strip_prefix("gg-"))
         .collect();
     let unconstrained: Vec<&TaskRow> = rows_of(log, "tool_emit")
         .filter(|r| base_ids.contains(&r.task_id.as_str()))
         .collect();
+    let (paired, _) = measured(&unconstrained);
+    if paired.is_empty() {
+        return Some(format!(
+            "grammar_gap  {}/{} forced — no unconstrained result to compare against{}\n",
+            passed(&kept),
+            kept.len(),
+            excluded_note(excluded)
+        ));
+    }
     let pct = |pass: usize, total: usize| i64::try_from(pass * 100 / total.max(1)).unwrap_or(0);
-    let gap = pct(passed(&forced), forced.len()) - pct(passed(&unconstrained), unconstrained.len());
+    let gap = pct(passed(&kept), kept.len()) - pct(passed(&paired), paired.len());
     Some(format!(
-        "grammar_gap  {}/{} forced — unconstrained on the same cases {}/{} (gap {gap:+}%)\n",
-        passed(&forced),
-        forced.len(),
-        passed(&unconstrained),
-        unconstrained.len(),
+        "grammar_gap  {}/{} forced — unconstrained on the same cases {}/{} (gap {gap:+}%){}\n",
+        passed(&kept),
+        kept.len(),
+        passed(&paired),
+        paired.len(),
+        excluded_note(excluded)
     ))
 }
 
@@ -408,8 +469,15 @@ fn instruction_line(log: &RunLog) -> Option<String> {
     if rows.is_empty() {
         return None;
     }
-    let strict = passed(&rows);
-    let loose = rows
+    let (kept, excluded) = measured(&rows);
+    if kept.is_empty() {
+        return Some(format!(
+            "instruction  N/A — nothing was measured ({})\n",
+            unavailable_reason(&rows)
+        ));
+    }
+    let strict = passed(&kept);
+    let loose = kept
         .iter()
         .filter(|r| {
             r.grade.as_ref().is_some_and(|g| {
@@ -421,10 +489,11 @@ fn instruction_line(log: &RunLog) -> Option<String> {
         })
         .count();
     Some(format!(
-        "instruction  strict {strict}/{}, loose {loose}/{} (chattiness gap {})\n",
-        rows.len(),
-        rows.len(),
+        "instruction  strict {strict}/{}, loose {loose}/{} (chattiness gap {}){}\n",
+        kept.len(),
+        kept.len(),
         loose.saturating_sub(strict),
+        excluded_note(excluded)
     ))
 }
 
@@ -606,6 +675,53 @@ mod tests {
         assert!(
             !rendered.contains("grammar_gap FAIL"),
             "unavailable is never listed as a failure: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_partly_unavailable_axis_scores_only_what_was_measured() {
+        // Reachable through --resume, which mixes previously-recorded
+        // unavailable rows with freshly graded ones. Leaving the unavailable
+        // ones in the denominator scores the model down for questions it was
+        // never asked — the same fabrication as the all-unavailable case.
+        let eval = scratch("mixed-availability");
+        let mut writer = RunWriter::create(&eval, "r9-model", &head()).expect("create");
+        let rows = [
+            ("tool_emit", "te-001", GradeRow::pass()),
+            ("tool_emit", "te-002", GradeRow::pass()),
+            ("grammar_gap", "gg-te-001", GradeRow::pass()),
+            (
+                "grammar_gap",
+                "gg-te-002",
+                GradeRow::unavailable("http status: 400".to_owned()),
+            ),
+        ];
+        for (suite, id, grade) in rows {
+            writer
+                .append(Task {
+                    suite: suite.into(),
+                    task_id: id.into(),
+                    measure: measure(&[20.0, 20.0]),
+                    grade: Some(grade),
+                })
+                .expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("grammar_gap  1/1 forced"),
+            "only the measured case counts: {rendered}"
+        );
+        assert!(
+            rendered.contains("(1 unavailable, excluded)"),
+            "the exclusion is always printed: {rendered}"
+        );
+        assert!(
+            rendered.contains("unconstrained on the same cases 1/1"),
+            "the comparison set is the forced-measured cases only: {rendered}"
+        );
+        assert!(
+            rendered.contains("(gap +0%)"),
+            "1/1 vs 1/1 is no gap, not -50%: {rendered}"
         );
     }
 

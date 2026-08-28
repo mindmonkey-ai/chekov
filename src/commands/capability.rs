@@ -993,11 +993,20 @@ fn run_forced_case(
         }
         Err(e) => {
             let reason = e.to_string();
-            eprintln!(
-                "chekov bench: the engine refused a forced grammar — grammar_gap is \
-                 N/A for this run ({reason})"
-            );
-            forced.refusal = Some(reason.clone());
+            // Latch ONLY on the engine answering with a refusal. A chekov-side
+            // fault (a body we built wrong, a response we could not read) must
+            // not be recorded as an engine limitation — that would turn our
+            // own bug into the engine's exoneration and silently skip the
+            // remaining cases.
+            if matches!(e, ChekovError::EndpointDown { .. }) {
+                eprintln!(
+                    "chekov bench: the engine refused a forced grammar — grammar_gap is \
+                     N/A for this run ({reason})"
+                );
+                forced.refusal = Some(reason.clone());
+            } else {
+                eprintln!("chekov bench: {} could not be measured ({reason})", case.id);
+            }
             append_unavailable(sink, &forced_id, reason)
         }
     }
@@ -1163,8 +1172,12 @@ fn run_fixture(
     Ok(())
 }
 
-/// A crossing failure is a FAILED probe with the error as its reason and no
-/// invented measurement — never an empty reply.
+/// A crossing that never completed is UNAVAILABLE, not a failure — for every
+/// suite, not just the forced one.
+///
+/// A server that died mid-run, a context overflow, a refused request: none of
+/// them are the model answering badly. Only a reply chekov actually received
+/// can be graded, and an ungraded task must not sit in a denominator.
 fn failed_probe(
     e: &ChekovError,
 ) -> (
@@ -1180,7 +1193,7 @@ fn failed_probe(
             warmup_dropped: 0,
             cache_n: 0,
         },
-        store::GradeRow::fail(e.to_string()),
+        store::GradeRow::unavailable(e.to_string()),
     )
 }
 
