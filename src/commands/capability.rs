@@ -29,6 +29,11 @@ pub enum CapAction {
         /// Context lengths to plot; repeatable. Defaults to 32K/128K/256K.
         #[arg(long = "ctx")]
         ctx: Vec<u32>,
+        /// Also write a self-contained SVG. Bare, it lands under
+        /// `reports/`. The path is PRINTED, never opened — launching a GUI
+        /// from a CLI is an unrequested side effect.
+        #[arg(long, num_args = 0..=1)]
+        svg: Option<Option<std::path::PathBuf>>,
     },
     /// Rank what this machine should actually run, with rejections explained.
     Recommend {
@@ -136,7 +141,9 @@ fn render_budget(m: &Machine) -> String {
 impl Command for CapabilityCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
         match &self.action {
-            Some(CapAction::Graph { ctx: ladder }) => return graph(ctx, ladder),
+            Some(CapAction::Graph { ctx: ladder, svg }) => {
+                return graph(ctx, ladder, svg.as_ref());
+            }
             Some(CapAction::Explain { name, ctx: at }) => {
                 return explain(ctx, name.as_deref(), *at);
             }
@@ -170,7 +177,11 @@ impl Command for CapabilityCmd {
     }
 }
 
-fn graph(ctx: &Ctx, ladder: &[u32]) -> Result<ExitCode, ChekovError> {
+fn graph(
+    ctx: &Ctx,
+    ladder: &[u32],
+    svg: Option<&Option<std::path::PathBuf>>,
+) -> Result<ExitCode, ChekovError> {
     let ladder = if ladder.is_empty() {
         vec![32_768, 131_072, 262_144]
     } else {
@@ -185,7 +196,37 @@ fn graph(ctx: &Ctx, ladder: &[u32]) -> Result<ExitCode, ChekovError> {
     })?;
     let f = build_frontier(ctx, &ladder, budget)?;
     println!("{}", frontier::render_ascii(&f));
+    if let Some(requested) = svg {
+        write_svg(ctx, &f, requested.as_deref())?;
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Write the SVG and PRINT its path. Deliberately does not open it: launching
+/// a GUI from a CLI is an unrequested side effect, and a printed path composes
+/// with whatever the user already uses.
+fn write_svg(
+    ctx: &Ctx,
+    f: &frontier::Frontier,
+    requested: Option<&std::path::Path>,
+) -> Result<(), ChekovError> {
+    let path = requested.map_or_else(
+        || {
+            ctx.config.reports_dir().join(format!(
+                "frontier-{}.svg",
+                crate::core::clock::utc_compact_now()
+            ))
+        },
+        std::path::Path::to_path_buf,
+    );
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ChekovError::io(format!("creating {}", parent.display()), e))?;
+    }
+    std::fs::write(&path, frontier::render_svg(f))
+        .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))?;
+    println!("svg: {}", path.display());
+    Ok(())
 }
 
 /// Rows come from the registry; weights come from the files already on disk.
@@ -1259,6 +1300,31 @@ mod tests {
         // A live server bench did not start is never stopped for a sweep.
         assert!(super::server_use_rule(Some("m1"), &two).is_err());
         assert!(super::server_use_rule(Some("other"), &one).is_err());
+    }
+
+    #[test]
+    fn svg_parses_absent_bare_and_with_a_path() {
+        use clap::Parser;
+        let svg_of = |args: &[&str]| {
+            let cli = crate::cli::Cli::try_parse_from(args).expect("parses");
+            match cli.cmd {
+                crate::cli::Cmd::Capability(cap) => match cap.action {
+                    Some(super::CapAction::Graph { svg, .. }) => svg,
+                    other => panic!("expected Graph, got {other:?}"),
+                },
+                _ => panic!("expected capability"),
+            }
+        };
+        assert_eq!(svg_of(&["chekov", "capability", "graph"]), None, "absent");
+        assert_eq!(
+            svg_of(&["chekov", "capability", "graph", "--svg"]),
+            Some(None),
+            "bare — the default report path is chosen at write time"
+        );
+        assert_eq!(
+            svg_of(&["chekov", "capability", "graph", "--svg", "/tmp/f.svg"]),
+            Some(Some(std::path::PathBuf::from("/tmp/f.svg"))),
+        );
     }
 
     #[test]

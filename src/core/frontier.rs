@@ -178,6 +178,219 @@ pub fn render_ascii(f: &Frontier) -> String {
     out
 }
 
+/// Geometry of the rendered grid, in user units.
+const CELL_W: usize = 96;
+const CELL_H: usize = 34;
+const LEFT: usize = 250;
+const TOP: usize = 96;
+
+/// `bytes` as GiB with one decimal, without a lossy float cast.
+fn gib(bytes: u64) -> String {
+    let tenths = bytes * 10 / (1024 * 1024 * 1024);
+    format!("{}.{} GiB", tenths / 10, tenths % 10)
+}
+
+/// XML-escape text that came from the registry or the machine.
+///
+/// A model name is user data; an unescaped `&` produces a file no viewer will
+/// open.
+fn esc(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Fill colours ordered by luminance, so the three states remain distinct in
+/// greyscale. Colour is never the only carrier: each cell also prints its
+/// glyph, and predicted inputs are hatched.
+const fn fill_for(fit: Fit) -> &'static str {
+    match fit {
+        Fit::Fits => "#f2f9f2",
+        Fit::Tight => "#fde9b8",
+        Fit::Exceeds => "#e8a6a6",
+        Fit::Unknown => "#ffffff",
+    }
+}
+
+/// One cell in its place: which row, which context, which budget (§4).
+struct CellAt<'a> {
+    row: &'a Row,
+    ctx: u32,
+    cell: &'a Cell,
+    budget_mib: u64,
+}
+
+/// The cell's own arithmetic, as the reader would check it by hand.
+fn cell_title(at: &CellAt) -> String {
+    let CellAt {
+        row,
+        ctx,
+        cell,
+        budget_mib,
+    } = *at;
+    let part = |v: Option<u64>| v.map_or_else(|| "unknown".to_owned(), gib);
+    let verdict = match fit_for(cell.total_bytes(), budget_mib) {
+        Fit::Fits => "fits",
+        Fit::Tight => "tight (85-100% of budget)",
+        Fit::Exceeds => "exceeds the budget",
+        // Said in full: a blank here reads as a rendering gap rather than a
+        // refusal to guess.
+        Fit::Unknown => "unknown — an unknown input is never a fit",
+    };
+    format!(
+        "{} {} @ {}: weights {} + kv {} ({}) + overhead {} ({}) = {} vs budget {} -> {}",
+        row.name,
+        row.quant,
+        format_ctx(ctx),
+        part(cell.weights_bytes),
+        part(cell.kv_bytes.value),
+        cell.kv_bytes.provenance.label(),
+        part(cell.overhead_bytes.value),
+        cell.overhead_bytes.provenance.label(),
+        part(cell.total_bytes()),
+        gib(budget_mib * 1024 * 1024),
+        verdict,
+    )
+}
+
+/// One cell: base fill, hatch when the inputs are predicted, glyph, tooltip.
+fn svg_cell(row: &Row, index: usize, f: &Frontier) -> String {
+    let cell = &row.cells[index];
+    let ctx = f.ctx_ladder[index];
+    let fit = fit_for(cell.total_bytes(), f.budget.value);
+    let (x, y) = (LEFT + index * CELL_W, 0);
+    let hatched = cell.inputs() != '#';
+    let hatch = if hatched {
+        format!(
+            "<rect x=\"{x}\" y=\"{y}\" width=\"{}\" height=\"{}\" fill=\"url(#predicted)\"/>",
+            CELL_W - 4,
+            CELL_H - 4
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<g><title>{}</title>\
+         <rect x=\"{x}\" y=\"{y}\" width=\"{}\" height=\"{}\" fill=\"{}\" stroke=\"#666\"/>\
+         {hatch}\
+         <text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"14\">{} {}</text></g>",
+        esc(&cell_title(&CellAt {
+            row,
+            ctx,
+            cell,
+            budget_mib: f.budget.value,
+        })),
+        CELL_W - 4,
+        CELL_H - 4,
+        fill_for(fit),
+        x + (CELL_W - 4) / 2,
+        y + 22,
+        esc(&fit.glyph().to_string()),
+        esc(&cell.inputs().to_string()),
+    )
+}
+
+/// A self-contained SVG of the same frontier the terminal grid shows.
+///
+/// Hand-emitted: no dependency, no CDN, no script. The caller prints the path
+/// and never opens it — launching a GUI from a CLI is an unrequested side
+/// effect, and a printed path composes with the user's own tooling.
+#[must_use]
+pub fn render_svg(f: &Frontier) -> String {
+    let width = LEFT + f.ctx_ladder.len() * CELL_W + 30;
+    let height = TOP + f.rows.len() * CELL_H + 150;
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
+         viewBox=\"0 0 {width} {height}\" font-family=\"ui-monospace, Menlo, monospace\">\n\
+         <rect width=\"{width}\" height=\"{height}\" fill=\"#ffffff\"/>\n\
+         <defs><pattern id=\"predicted\" width=\"6\" height=\"6\" patternUnits=\"userSpaceOnUse\" \
+         patternTransform=\"rotate(45)\">\
+         <line x1=\"0\" y1=\"0\" x2=\"0\" y2=\"6\" stroke=\"#000000\" stroke-opacity=\"0.35\" \
+         stroke-width=\"2\"/></pattern></defs>\n\
+         <text x=\"20\" y=\"32\" font-size=\"18\">chekov capability frontier</text>\n"
+    );
+    out.push_str(&svg_header(f));
+    out.push_str(&svg_axis(f));
+    for (r, row) in f.rows.iter().enumerate() {
+        out.push_str(&svg_row(row, r, f));
+    }
+    out.push_str(&svg_legend(f, height));
+    out.push_str("</svg>\n");
+    out
+}
+
+/// The budget line, and the same loud warning the terminal prints when the
+/// ceiling every verdict is measured against is itself a guess.
+fn svg_header(f: &Frontier) -> String {
+    let mut out = format!(
+        "<text x=\"20\" y=\"56\" font-size=\"13\">GPU budget {} MiB ({}) — {}</text>\n",
+        f.budget.value,
+        gib(f.budget.value * 1024 * 1024),
+        esc(f.budget.provenance.label()),
+    );
+    if f.budget.provenance == Provenance::Predicted {
+        out.push_str(
+            "<text x=\"20\" y=\"76\" font-size=\"13\" fill=\"#a33\">CEILING PREDICTED — every \
+             verdict below is measured against a guess</text>\n",
+        );
+    }
+    out
+}
+
+fn svg_axis(f: &Frontier) -> String {
+    let mut out = String::new();
+    for (i, ctx) in f.ctx_ladder.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"12\">{}</text>",
+            LEFT + i * CELL_W + (CELL_W - 4) / 2,
+            TOP - 8,
+            esc(&format_ctx(*ctx)),
+        );
+    }
+    out
+}
+
+fn svg_row(row: &Row, index: usize, f: &Frontier) -> String {
+    let y = TOP + index * CELL_H;
+    let mut out = format!(
+        "<g transform=\"translate(0,{y})\">\
+         <text x=\"20\" y=\"22\" font-size=\"13\">{}</text>\
+         <text x=\"{}\" y=\"22\" font-size=\"12\" fill=\"#555\">{}</text>",
+        esc(&row.name),
+        LEFT - 130,
+        esc(&row.quant),
+    );
+    for i in 0..row.cells.len().min(f.ctx_ladder.len()) {
+        out.push_str(&svg_cell(row, i, f));
+    }
+    out.push_str("</g>\n");
+    out
+}
+
+/// The legend comes from the SAME function the terminal renderer calls, so
+/// the two views can never disagree about what a glyph means.
+fn svg_legend(f: &Frontier, height: usize) -> String {
+    let base = TOP + f.rows.len() * CELL_H + 34;
+    let mut out = String::new();
+    for (i, line) in legend(f.budget).lines().enumerate() {
+        let _ = writeln!(
+            out,
+            "<text x=\"20\" y=\"{}\" font-size=\"12\">{}</text>",
+            base + i * 18,
+            esc(line.trim()),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "<text x=\"20\" y=\"{}\" font-size=\"11\" fill=\"#555\">hatched cells have predicted \
+         inputs; solid cells are measured. Hover a cell for its arithmetic.</text>",
+        height - 20
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Cell, Fit, fit_for};
@@ -240,6 +453,86 @@ mod tests {
         assert!(
             out.contains("inputs   #"),
             "a two-char cell is unreadable without it: {out}"
+        );
+    }
+
+    #[test]
+    fn the_svg_is_self_contained_and_never_reaches_out() {
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(svg.starts_with("<svg"), "{svg}");
+        assert!(svg.trim_end().ends_with("</svg>"));
+        assert!(svg.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+        // A report that phones home, runs script, or breaks without a network
+        // is not a report you can put in a bug thread.
+        assert!(!svg.contains("<script"), "no script: {svg}");
+        assert!(!svg.contains("<image"), "no external image: {svg}");
+        assert!(
+            !svg.contains("href="),
+            "no external reference of any kind: {svg}"
+        );
+    }
+
+    #[test]
+    fn predicted_inputs_are_hatched_so_the_distinction_survives_greyscale() {
+        // Colour alone fails greyscale printing and colour-blind viewers, and
+        // measured-vs-predicted is the whole point of the second character.
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(
+            svg.contains("<pattern id=\"predicted\""),
+            "the hatch must be defined: {svg}"
+        );
+        assert!(
+            svg.contains("url(#predicted)"),
+            "and applied to the predicted cells: {svg}"
+        );
+    }
+
+    #[test]
+    fn every_cell_carries_its_arithmetic_as_a_tooltip() {
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(
+            svg.contains("<title>"),
+            "a cell the reader cannot audit is a claim, not a measurement: {svg}"
+        );
+        assert!(
+            svg.contains("weights") && svg.contains("+ kv") && svg.contains("vs budget"),
+            "the tooltip shows the sum, not just the verdict: {svg}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_cell_says_unknown_and_claims_no_fit() {
+        // The second ctx column has no KV number.
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(svg.contains("unknown"), "{svg}");
+    }
+
+    #[test]
+    fn the_svg_legend_is_the_ascii_legend() {
+        // One legend function, so the two views cannot disagree about what a
+        // glyph means.
+        let predicted = super::render_svg(&frontier(Provenance::Predicted));
+        assert!(
+            predicted.contains("fits against a predicted ceiling"),
+            "{predicted}"
+        );
+        assert!(predicted.contains("CEILING PREDICTED"), "{predicted}");
+        let measured = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(measured.contains("fits (&lt;85% of budget)"), "{measured}");
+        assert!(!measured.contains("CEILING PREDICTED"), "{measured}");
+    }
+
+    #[test]
+    fn text_from_the_registry_is_xml_escaped() {
+        // A model name is user data; an unescaped & or < produces a file no
+        // viewer will open.
+        let mut f = frontier(Provenance::EngineReported);
+        f.rows[0].name = "a&b<c>\"d\"".into();
+        let svg = super::render_svg(&f);
+        assert!(svg.contains("a&amp;b&lt;c&gt;"), "{svg}");
+        assert!(
+            !svg.contains("a&b<c>"),
+            "the raw text must not survive: {svg}"
         );
     }
 

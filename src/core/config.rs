@@ -187,6 +187,12 @@ impl Config {
         self.root.join("eval")
     }
 
+    /// Rendered reports (`capability graph --svg`).
+    #[must_use]
+    pub fn reports_dir(&self) -> PathBuf {
+        self.root.join("reports")
+    }
+
     /// `http://host:port` — the base every probe and integration derives from.
     #[must_use]
     pub fn base_url(&self) -> String {
