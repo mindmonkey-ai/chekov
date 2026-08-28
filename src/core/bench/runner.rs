@@ -119,6 +119,10 @@ pub struct Timings {
     pub prompt_per_second: f64,
     pub predicted_n: u64,
     pub predicted_per_second: f64,
+    /// Prompt tokens served from the KV cache instead of being processed —
+    /// the reason a warm rerun's `prompt_n` can shrink. Absent means zero
+    /// cached, not a missing measurement.
+    pub cache_n: u64,
 }
 
 /// One measured probe: what the agent would receive, and what it cost.
@@ -214,6 +218,7 @@ fn read_timings(upstream: &str) -> Result<Timings, ChekovError> {
             prompt_per_second: pps,
             predicted_n,
             predicted_per_second: gps,
+            cache_n: count("cache_n").unwrap_or(0),
         }),
         _ => Err(ChekovError::BenchNoTimings),
     }
@@ -356,6 +361,7 @@ mod tests {
             "choices": [{ "message": { "content": "hello there" }, "finish_reason": "stop" }],
             "usage": { "prompt_tokens": 900, "completion_tokens": 100 },
             "timings": {
+                "cache_n": 512,
                 "prompt_n": 900, "prompt_ms": 2000.0, "prompt_per_second": 450.0,
                 "predicted_n": 100, "predicted_ms": 4608.3, "predicted_per_second": 21.7
             }
@@ -393,6 +399,7 @@ mod tests {
         // Timings are the server's own measurement, read before translation.
         assert!((art.timings.predicted_per_second - 21.7).abs() < 1e-9);
         assert_eq!(art.timings.prompt_n, 900);
+        assert_eq!(art.timings.cache_n, 512, "prefix-cache reuse is recorded");
         // The artifact is the ANTHROPIC body — the bytes an agent would parse.
         let graded: serde_json::Value =
             serde_json::from_str(&art.anthropic_body).expect("artifact is json");
@@ -415,6 +422,24 @@ mod tests {
         assert_eq!(sent["temperature"], 0, "greedy: {sent}");
         assert_eq!(sent["top_k"], 1, "greedy: {sent}");
         assert_eq!(sent["seed"], 42, "seeded: {sent}");
+    }
+
+    #[test]
+    fn a_missing_cache_n_is_zero_cached_not_a_missing_measurement() {
+        let body = serde_json::json!({
+            "choices": [{ "message": { "content": "hi" }, "finish_reason": "stop" }],
+            "timings": {
+                "prompt_n": 10, "prompt_per_second": 100.0,
+                "predicted_n": 5, "predicted_per_second": 20.0
+            }
+        })
+        .to_string();
+        let http = CannedUpstream::new(body);
+        let facade = ClaudeFacade::new("m");
+        let up = fake_upstream();
+        let art =
+            super::cross(&wire(&http, &facade, &up), &anthropic_request("hi")).expect("crosses");
+        assert_eq!(art.timings.cache_n, 0);
     }
 
     #[test]

@@ -755,6 +755,7 @@ fn run_throughput(
                 decode_samples: result.decode_samples,
                 prefill_samples: result.prefill_samples,
                 warmup_dropped: u32::try_from(warmup).unwrap_or(0),
+                cache_n: result.cache_n,
             },
             grade: None,
         })?;
@@ -814,6 +815,7 @@ fn failed_probe(
             decode_samples: vec![],
             prefill_samples: vec![],
             warmup_dropped: 0,
+            cache_n: 0,
         },
         store::GradeRow {
             pass: false,
@@ -830,6 +832,7 @@ fn probe_measure(
         decode_samples: vec![timings.predicted_per_second],
         prefill_samples: vec![timings.prompt_per_second],
         warmup_dropped: 0,
+        cache_n: timings.cache_n,
     }
 }
 

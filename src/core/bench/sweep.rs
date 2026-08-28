@@ -29,6 +29,8 @@ pub struct DepthResult {
     pub depth: u32,
     /// Measured prompt depth (`timings.prompt_n`) — the honest x-axis.
     pub prompt_n: u64,
+    /// Max prompt tokens served from cache across the repetitions.
+    pub cache_n: u64,
     pub decode_samples: Vec<f64>,
     pub prefill_samples: Vec<f64>,
     pub decode: Option<Summary>,
@@ -55,15 +57,18 @@ pub fn measure_depth(
     let mut decode_samples = Vec::new();
     let mut prefill_samples = Vec::new();
     let mut prompt_n = 0_u64;
+    let mut cache_n = 0_u64;
     for _ in 0..plan.repetitions {
         let artifact = exec(&probes::throughput_probe(depth, plan.max_tokens))?;
         decode_samples.push(artifact.timings.predicted_per_second);
         prefill_samples.push(artifact.timings.prompt_per_second);
         prompt_n = prompt_n.max(artifact.timings.prompt_n);
+        cache_n = cache_n.max(artifact.timings.cache_n);
     }
     Ok(DepthResult {
         depth,
         prompt_n,
+        cache_n,
         decode: stats::summarize(&decode_samples),
         prefill: stats::summarize(&prefill_samples),
         decode_samples,
@@ -94,6 +99,7 @@ mod tests {
                 prompt_per_second: 400.0,
                 predicted_n: 128,
                 predicted_per_second: decode_tps,
+                cache_n: 64,
             },
         }
     }
@@ -123,6 +129,7 @@ mod tests {
             results[0].prompt_n, 1000,
             "the honest depth is the measured one"
         );
+        assert_eq!(results[0].cache_n, 64, "prefix-cache reuse rides along");
     }
 
     #[test]
