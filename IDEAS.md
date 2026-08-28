@@ -111,21 +111,44 @@ template itself emitted, so sampler init throws before a single token is
 generated. `/completion` (no generation prompt, no prefill) accepts every
 schema shape including oneOf+const, so the schema converter is not at fault.
 
-Two candidate mechanisms, neither validated end to end:
-(a) **raw GBNF via the `grammar` field.** Proven to return 200 AND to produce a
-    correct forced call (`{"name":"grep","arguments":{...}}` for te-002) — raw
-    grammars are USER-type and skip the prefill. Two open problems: the reply
-    arrives wrapped in an UNTERMINATED `<think>` prefix (the template's prefill
-    echoed into content), which the translator's strip rightly refuses to treat
-    as an answer; and it means hand-rolling JSON-Schema→GBNF, which is
-    re-implementing llama.cpp's converter unless kept to the narrow
-    `{name, arguments}` shape the probe set actually uses.
-(b) **per-request `"reasoning_format":"deepseek"`.** Returns 200 on the same
-    schema that 400s, because that flag gates whether the `<think>` alternative
-    enters the grammar. NOT validated: at `max_tokens=30` the whole budget went
-    to `reasoning_content` and schema-constrained JSON was never observed, and
-    changing the parse format makes the forced arm no longer apples-to-apples
-    with the unconstrained one.
+Candidate mechanisms, and where each stands:
+
+(a) **raw GBNF via the `grammar` field — REJECTED, do not build this.** It does
+    return 200 and did produce a correct forced call for te-002 (raw grammars
+    are USER-type and skip the prefill), which makes it look attractive. It is
+    strictly worse than the current N/A. The reply comes back as
+    `<think>\n{...}`: the template's `<think>` is prompt-emitted, so no grammar
+    rule can consume it, and because the grammar forbids `</think>` the span
+    never closes. `strip_thinking` refuses an unterminated span BY DESIGN, so
+    grading sees no text and every forced case becomes a SILENT failure —
+    trading loud engine errors for quiet fabricated model failures, the exact
+    trade this axis exists to prevent. Making it correct would mean hardcoding
+    each model family's reasoning-tag convention into the grammar root, and
+    would forbid reasoning in the forced arm while the unconstrained arm
+    reasons freely — a confound injected into the very number designed to
+    detect self-deception.
+
+(b) **per-request `"reasoning_format":"deepseek"` — plausible, NOT validated.**
+    Returns 200 on the same schema that 400s, because that flag gates whether
+    the `<think>` alternative enters the grammar (`chat.cpp:1187`
+    `extract_reasoning`). Unproven: at `max_tokens=30` the whole budget went to
+    `reasoning_content` and schema-constrained JSON was never observed. It also
+    changes how the response is PARSED, so the forced arm would stop being
+    apples-to-apples with the unconstrained one. Validate before believing.
+
+(c) **Patch llama.cpp upstream — worth a PR, but sequence nothing behind it.**
+    The narrow fix is in `chat.cpp`'s specialized handlers: build the prefix
+    from `data.generation_prompt` rather than the hardcoded `GEN_PREFIX`, or
+    admit the `<think>` alternative whenever `supports_reasoning` regardless of
+    `extract_reasoning`. chekov must never depend on it: chekov tracks
+    tip-of-master with no pin, users run whatever they built, and an upstream
+    merge does not retroactively repair anyone's binary.
+
+Open question for the human: §7.5 says an N/A axis withholds the composite,
+but §7.5's weight table gives `grammar_gap` ZERO weight — it is a diagnostic
+control, not a scored axis. Withholding on it would make the composite
+permanently unobtainable on any llama.cpp build with a thinking template.
+Decide before a composite is implemented.
 
 Note a false-pass hazard for whoever builds this: an EMPTY schema, and
 `response_format: {"type":"json_object"}`, both return 200 with UNCONSTRAINED
