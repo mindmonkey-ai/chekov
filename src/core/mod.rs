@@ -3,6 +3,7 @@ pub mod clock;
 pub mod config;
 pub mod engine;
 pub mod frontier;
+pub mod gguf;
 pub mod hub;
 pub mod launch;
 pub mod machine;

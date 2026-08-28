@@ -30,6 +30,14 @@ pub enum CapAction {
         #[arg(long = "ctx")]
         ctx: Vec<u32>,
     },
+    /// Read one model's `GGUF` header and print its fit arithmetic line by line.
+    Explain {
+        /// Registered model name (defaults to the active model).
+        name: Option<String>,
+        /// Context length to size against; defaults to the model's `ctx_size`.
+        #[arg(long)]
+        ctx: Option<u32>,
+    },
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -81,8 +89,12 @@ fn render_budget(m: &Machine) -> String {
 
 impl Command for CapabilityCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
-        if let Some(CapAction::Graph { ctx: ladder }) = &self.action {
-            return graph(ctx, ladder);
+        match &self.action {
+            Some(CapAction::Graph { ctx: ladder }) => return graph(ctx, ladder),
+            Some(CapAction::Explain { name, ctx: at }) => {
+                return explain(ctx, name.as_deref(), *at);
+            }
+            _ => {}
         }
         let m = machine::probe(&ctx.config.engine_dir());
         if self.json {
@@ -124,11 +136,29 @@ fn build_frontier(
     let mut rows: Vec<frontier::Row> = Vec::new();
     for (name, entry) in &reg.models {
         let weights = weights_on_disk(ctx, entry);
+        // Real geometry when the header can be read; the coarse reserve only
+        // when it cannot — and the cell says which, in its second character.
+        let geometry = reg
+            .effective(name)
+            .ok()
+            .map(|eff| crate::core::server::shard_path(&ctx.config, &eff))
+            .filter(|p| p.exists())
+            .and_then(|p| crate::core::gguf::read_geometry(&p).ok());
+        let q8 = entry.extra_flags.iter().any(|f| f == "q8_0")
+            || reg.defaults.flags.iter().any(|f| f == "q8_0");
         let cells = ladder
             .iter()
             .map(|&c| frontier::Cell {
                 weights_bytes: weights,
-                kv_bytes: Probed::new(Some(kv_reserve(c)), Provenance::Predicted),
+                kv_bytes: geometry.as_ref().map_or_else(
+                    || Probed::new(Some(kv_reserve(c)), Provenance::Predicted),
+                    |g| {
+                        crate::core::gguf::kv_bytes(g, c, q8).map_or_else(
+                            || Probed::new(None, Provenance::Predicted),
+                            |b| Probed::new(Some(b), Provenance::Measured),
+                        )
+                    },
+                ),
                 overhead_bytes: Probed::new(Some(3 * 1024 * 1024 * 1024), Provenance::Predicted),
             })
             .collect();
@@ -147,16 +177,36 @@ fn build_frontier(
 }
 
 /// Bytes actually on disk for a model directory, or `None` when it is absent.
+///
+/// Walks one level of subdirectories: a repo like `unsloth/MiniMax-M2.7-GGUF`
+/// keeps its shards under a quant folder (`UD-Q5_K_XL/…`), so a top-level-only
+/// scan reports a fully downloaded 158 GiB model as absent.
 fn weights_on_disk(ctx: &Ctx, entry: &crate::core::registry::ModelEntry) -> Option<u64> {
     let dir = ctx.config.root.join(&entry.path);
-    let mut total = 0_u64;
-    for e in std::fs::read_dir(dir).ok()? {
-        let e = e.ok()?;
-        if e.path().extension().is_some_and(|x| x == "gguf") {
-            total += e.metadata().ok()?.len();
-        }
-    }
+    let total = gguf_bytes_in(&dir) + subdir_gguf_bytes(&dir);
     (total > 0).then_some(total)
+}
+
+fn gguf_bytes_in(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "gguf"))
+        .filter_map(|e| e.metadata().ok().map(|m| m.len()))
+        .sum()
+}
+
+fn subdir_gguf_bytes(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .map(|e| gguf_bytes_in(&e.path()))
+        .sum()
 }
 
 /// A deliberately coarse KV reserve, labelled Predicted at the call site.
@@ -181,6 +231,102 @@ pub fn render_json(m: &Machine) -> String {
         "macos": m.macos,
     })
     .to_string()
+}
+
+/// Print the fit arithmetic for one model, sourced from its real GGUF header.
+///
+/// Local file read only — no network, and no seam change.
+fn explain(ctx: &Ctx, name: Option<&str>, at: Option<u32>) -> Result<ExitCode, ChekovError> {
+    let reg = ctx.registry()?;
+    let name = match name {
+        Some(n) => n.to_owned(),
+        None => reg.active_name()?.to_owned(),
+    };
+    let eff = reg.effective(&name)?;
+    let ctx_len = at.unwrap_or(eff.ctx_size);
+    let shard = crate::core::server::shard_path(&ctx.config, &eff);
+    let geometry = crate::core::gguf::read_geometry(&shard)?;
+    let weights = weights_on_disk(ctx, &eff.entry);
+    let q8 = eff.flags.iter().any(|f| f == "q8_0");
+    println!(
+        "{}",
+        render_explain(&Explained {
+            name: &name,
+            geometry: &geometry,
+            ctx_len,
+            weights,
+            q8_cache: q8,
+        })
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Everything `render_explain` needs, bundled so the renderer stays within the
+/// 3-argument gate (§4).
+pub struct Explained<'a> {
+    pub name: &'a str,
+    pub geometry: &'a crate::core::gguf::Geometry,
+    pub ctx_len: u32,
+    pub weights: Option<u64>,
+    pub q8_cache: bool,
+}
+
+/// The layer-count ladder, which is where the 4x over-estimate hides.
+fn render_geometry(g: &crate::core::gguf::Geometry) -> String {
+    use crate::core::gguf;
+    use std::fmt::Write;
+    let unknown = || "?".to_owned();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "  block_count             {}",
+        g.block_count.map_or_else(unknown, |v| v.to_string())
+    );
+    let _ = writeln!(
+        out,
+        "  nextn_predict_layers    {}",
+        g.nextn_predict_layers.unwrap_or(0)
+    );
+    let _ = writeln!(
+        out,
+        "  full_attention_interval {}",
+        g.full_attention_interval
+            .map_or_else(|| "-".to_owned(), |v| v.to_string())
+    );
+    let _ = writeln!(
+        out,
+        "  kv_layers               {}   (NOT block_count)",
+        gguf::kv_layers(g).map_or_else(unknown, |v| v.to_string())
+    );
+    out
+}
+
+/// The arithmetic, shown rather than asserted. Pure so tests pin it.
+#[must_use]
+pub fn render_explain(e: &Explained) -> String {
+    use crate::core::gguf;
+    use std::fmt::Write;
+    let g = e.geometry;
+    let unknown = || "?".to_owned();
+    let show = |v: Option<u64>| v.map_or_else(unknown, |b| b.to_string());
+    let mut out = format!("{}  (arch {})\n", e.name, g.arch);
+    out.push_str(&render_geometry(g));
+    let _ = writeln!(out, "  ctx (padded to 256)     {}", gguf::pad256(e.ctx_len));
+    let _ = writeln!(
+        out,
+        "  kv cache type           {}",
+        if e.q8_cache {
+            "q8_0 (17/16 B per element)"
+        } else {
+            "f16 (2 B per element)"
+        }
+    );
+    let kv = gguf::kv_bytes(g, e.ctx_len, e.q8_cache);
+    let _ = writeln!(out, "  kv_bytes                {}", show(kv));
+    let _ = writeln!(out, "  weights (on disk)       {}", show(e.weights));
+    let total = e.weights.zip(kv).map(|(w, k)| w + k);
+    let _ = writeln!(out, "  total (weights + kv)    {}", show(total));
+    out
 }
 
 #[cfg(test)]
