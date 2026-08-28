@@ -23,6 +23,8 @@ pub struct Geometry {
     pub key_length: Option<u32>,
     pub value_length: Option<u32>,
     pub key_length_mla: Option<u32>,
+    /// `tokenizer.chat_template` — what decides the tool-call parser.
+    pub chat_template: Option<String>,
 }
 
 /// Cursor over the header bytes, refusing every out-of-range read.
@@ -134,10 +136,12 @@ pub fn parse_geometry(buf: &[u8]) -> Option<Geometry> {
 /// Keys are namespaced by architecture (`qwen3moe.block_count`), so match on
 /// the suffix rather than hard-coding every architecture's prefix.
 fn absorb(g: &mut Geometry, key: &str, value: Value) {
-    if key == "general.architecture"
-        && let Value::Str(s) = value
-    {
-        g.arch = s;
+    if let Value::Str(s) = value {
+        match key {
+            "general.architecture" => g.arch = s,
+            "tokenizer.chat_template" => g.chat_template = Some(s),
+            _ => {}
+        }
         return;
     }
     let Value::U32(v) = value else {

@@ -30,6 +30,15 @@ pub enum CapAction {
         #[arg(long = "ctx")]
         ctx: Vec<u32>,
     },
+    /// Rank what this machine should actually run, with rejections explained.
+    Recommend {
+        /// Context length to size against; defaults to the registry default.
+        #[arg(long)]
+        ctx: Option<u32>,
+        /// `agent` weighs tool-call support; `chat` ignores it.
+        #[arg(long, default_value = "agent")]
+        role: String,
+    },
     /// Read one model's `GGUF` header and print its fit arithmetic line by line.
     Explain {
         /// Registered model name (defaults to the active model).
@@ -93,6 +102,9 @@ impl Command for CapabilityCmd {
             Some(CapAction::Graph { ctx: ladder }) => return graph(ctx, ladder),
             Some(CapAction::Explain { name, ctx: at }) => {
                 return explain(ctx, name.as_deref(), *at);
+            }
+            Some(CapAction::Recommend { ctx: at, role }) => {
+                return recommend(ctx, *at, role);
             }
             _ => {}
         }
@@ -327,6 +339,128 @@ pub fn render_explain(e: &Explained) -> String {
     let total = e.weights.zip(kv).map(|(w, k)| w + k);
     let _ = writeln!(out, "  total (weights + kv)    {}", show(total));
     out
+}
+
+/// Rank the registered models for this machine, printing why each was rejected.
+fn recommend(ctx: &Ctx, at: Option<u32>, role: &str) -> Result<ExitCode, ChekovError> {
+    use crate::core::recommend::{Role, rank};
+    let role = match role {
+        "chat" => Role::Chat,
+        _ => Role::Agent,
+    };
+    let budget = machine::live_gpu_budget(&ctx.config.engine_dir()).ok_or_else(|| {
+        ChekovError::SetupIncomplete {
+            remaining: "the GPU budget is unknown — run `chekov setup`".to_owned(),
+        }
+    })?;
+    let reg = ctx.registry()?;
+    let ctx_len = at.unwrap_or(reg.defaults.ctx_size);
+    let input = CandidateInput {
+        ctx,
+        reg: &reg,
+        ctx_len,
+    };
+    let candidates = reg
+        .models
+        .iter()
+        .map(|(name, entry)| candidate_for(&input, name, entry))
+        .collect();
+    let ranked = rank(candidates, budget.value, role);
+    println!("{}", render_recommend(&ranked, budget, ctx_len));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Build one candidate from the registry plus whatever the disk can tell us.
+struct CandidateInput<'a> {
+    ctx: &'a Ctx,
+    reg: &'a crate::core::registry::Registry,
+    ctx_len: u32,
+}
+
+fn candidate_for(
+    input: &CandidateInput,
+    name: &str,
+    entry: &crate::core::registry::ModelEntry,
+) -> crate::core::recommend::Candidate {
+    let (ctx, reg, ctx_len) = (input.ctx, input.reg, input.ctx_len);
+    let weights = weights_on_disk(ctx, entry);
+    let geometry = reg
+        .effective(name)
+        .ok()
+        .map(|eff| crate::core::server::shard_path(&ctx.config, &eff))
+        .filter(|p| p.exists())
+        .and_then(|p| crate::core::gguf::read_geometry(&p).ok());
+    let q8 = reg.defaults.flags.iter().any(|f| f == "q8_0");
+    let kv = geometry
+        .as_ref()
+        .and_then(|g| crate::core::gguf::kv_bytes(g, ctx_len, q8));
+    // Classify from the model's own embedded template, not from a guess.
+    let parser = geometry
+        .as_ref()
+        .and_then(|g| g.chat_template.as_deref())
+        .map_or(
+            crate::core::toolparser::ToolParser::AutoparserFallthrough,
+            crate::core::toolparser::classify,
+        );
+    crate::core::recommend::Candidate {
+        name: name.to_owned(),
+        quant: entry.quant.clone(),
+        total_bytes: weights.zip(kv).map(|(w, k)| w + k),
+        parser,
+    }
+}
+
+/// The ranked list. Rejections are printed with their reason, never dropped.
+#[must_use]
+pub fn render_recommend(
+    ranked: &[crate::core::recommend::Ranked],
+    budget: Probed<u64>,
+    ctx_len: u32,
+) -> String {
+    use crate::core::recommend::Verdict;
+    use std::fmt::Write;
+    let mut out = format!(
+        "  at ctx {ctx_len}, budget {} MiB ({})\n\n",
+        budget.value,
+        budget.provenance.label()
+    );
+    let mut rank = 0;
+    for r in ranked {
+        match &r.verdict {
+            Verdict::Ranked { notes } => {
+                rank += 1;
+                let _ = writeln!(
+                    out,
+                    "  {rank}. {:22} {:>12}   {:7}  tools: {}",
+                    r.candidate.name,
+                    r.candidate.quant,
+                    fit_word(r.fit),
+                    r.candidate.parser.label()
+                );
+                for n in notes {
+                    let _ = writeln!(out, "       note: {n}");
+                }
+            }
+            Verdict::Rejected { reason } => {
+                let _ = writeln!(
+                    out,
+                    "   -  {:22} {:>12}   rejected: {reason}",
+                    r.candidate.name, r.candidate.quant
+                );
+            }
+        }
+    }
+    out
+}
+
+const fn fit_word(fit: crate::core::frontier::Fit) -> &'static str {
+    use crate::core::frontier::Fit;
+    match fit {
+        Fit::Fits => "fits",
+        Fit::Tight => "tight",
+        Fit::Exceeds => "exceeds",
+        Fit::Unknown => "unknown",
+    }
 }
 
 #[cfg(test)]
