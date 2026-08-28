@@ -70,8 +70,22 @@ pub fn agentic_v0() -> Result<ProbeSet, ChekovError> {
         )));
     }
     validate_tool_cases(&set)?;
+    validate_checks(&set)?;
     validate_ids(&set)?;
     Ok(set)
+}
+
+/// Every instruction check must be in the grader's vocabulary — an unknown
+/// name grading as a silent pass would be an invented result.
+fn validate_checks(set: &ProbeSet) -> Result<(), ChekovError> {
+    for case in &set.instruction {
+        for check in &case.checks {
+            if !crate::core::bench::grade::known_check(check) {
+                return Err(invalid(format!("{}: unknown check '{check}'", case.id)));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// sha256 of the TOML text — the agentic component of `prompt_set_hash`.
