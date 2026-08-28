@@ -17,6 +17,30 @@ pub use stream::ClaudeStream;
 /// unbounded upstream, which lets a runaway generation fill the context.
 const DEFAULT_MAX_TOKENS: u64 = 4096;
 
+/// Reasoning models served by llama.cpp (e.g. Ornith-1.5) emit their thinking
+/// block *inside* `content` rather than in `reasoning_content`, and it sits
+/// ahead of the real answer — which is exactly what `--reasoning-format none`
+/// preserves and what doctor's think-tag retention check requires at the
+/// `OpenAI` door. Anthropic's grammar has no room for thinking in a text
+/// block, so both translation paths strip the span.
+pub(crate) const THINK_OPEN: &str = "<think>";
+pub(crate) const THINK_CLOSE: &str = "</think>";
+
+/// The answer with its leading thinking span removed.
+///
+/// `None` when the span never closes: the model spent its budget thinking and
+/// never produced an answer, and reporting reasoning as the answer would be
+/// inventing one. Shared with the streaming translator so a client sees the
+/// same text either way.
+pub(crate) fn strip_thinking(text: &str) -> Option<String> {
+    let Some(open) = text.find(THINK_OPEN) else {
+        return Some(text.to_owned());
+    };
+    let close = text[open..].find(THINK_CLOSE)?;
+    let after = open + close + THINK_CLOSE.len();
+    Some(format!("{}{}", &text[..open], &text[after..]))
+}
+
 pub struct ClaudeFacade {
     /// Upstream model id substituted for whatever Claude Code asks for — the
     /// agent's picker is a fixed list of Anthropic names, none of which the
@@ -388,6 +412,7 @@ pub fn to_anthropic_response(res: &Value, model: &str) -> Value {
     if let Some(text) = message
         .and_then(|m| m.get("content"))
         .and_then(Value::as_str)
+        .and_then(strip_thinking)
         .filter(|s| !s.is_empty())
     {
         content.push(json!({ "type": "text", "text": text }));
@@ -610,6 +635,49 @@ mod tests {
         assert_eq!(out["stop_reason"], "end_turn");
         assert_eq!(out["usage"]["input_tokens"], 11);
         assert_eq!(out["usage"]["output_tokens"], 3);
+    }
+
+    #[test]
+    fn a_non_streaming_reply_drops_its_thinking_span_like_the_stream_does() {
+        // Ornith-1.5 and its lineage emit thinking INSIDE `content` (that is
+        // what `--reasoning-format none` preserves, and doctor's think-tag
+        // retention check requires). The streaming translator strips the span;
+        // this path must agree, or a non-streaming client sees reasoning the
+        // streaming one never shows it.
+        let upstream = json!({
+            "choices": [{
+                "message": { "content": "<think>\nweighing it up\n</think>The answer is 42." },
+                "finish_reason": "stop",
+            }],
+        });
+        let out = to_anthropic_response(&upstream, "local");
+        assert_eq!(out["content"][0]["text"], "The answer is 42.");
+    }
+
+    #[test]
+    fn a_reply_that_is_still_thinking_yields_no_text_rather_than_raw_reasoning() {
+        // Truncated mid-thought: the model never produced an answer. Emitting
+        // the reasoning as the answer would be inventing one.
+        let upstream = json!({
+            "choices": [{
+                "message": { "content": "<think>\nstill weighing it up" },
+                "finish_reason": "length",
+            }],
+        });
+        let out = to_anthropic_response(&upstream, "local");
+        assert!(
+            out["content"].as_array().is_some_and(Vec::is_empty),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_reply_without_thinking_is_untouched() {
+        let upstream = json!({
+            "choices": [{ "message": { "content": "plain answer" }, "finish_reason": "stop" }],
+        });
+        let out = to_anthropic_response(&upstream, "local");
+        assert_eq!(out["content"][0]["text"], "plain answer");
     }
 
     #[test]

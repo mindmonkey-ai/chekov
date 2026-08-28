@@ -11,7 +11,54 @@ All notable changes to chekov are recorded here. The format follows
   with `source = "directory"`) are mirrored into the session config dir so
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
+### Fixed
+- **The non-streaming translator now strips the thinking span, as the
+  streaming one always has.** `to_anthropic_response` passed `<think>…</think>`
+  through verbatim while `ClaudeStream` dropped it, so the two halves of the
+  same translator disagreed about what the agent receives; any non-streaming
+  Anthropic client saw reasoning the streaming one never shows it. Claude Code
+  streams, so it was unaffected — this was a latent asymmetry, found by the
+  bench's own first agentic run, where instruction adherence scored strict 1/12
+  and every failure was `fenced_rust_only` against a reply beginning `<think>`.
+  With the fix the same model scores **strict 11/12** on the same cases: the
+  suite had been measuring the leak, not the model. A span that never closes
+  yields no text rather than raw reasoning — the model spent its budget
+  thinking and never produced an answer, and reporting the reasoning as the
+  answer would be inventing one. This does not contradict
+  `--reasoning-format none` or doctor's think-tag retention check: retention is
+  required at the `OpenAI` door, segregation happens at the Anthropic one.
+- **An unmeasurable bench axis reports `N/A`, never a zero.** The first agentic
+  run published `grammar_gap 0/7 forced — unconstrained 6/7 (gap -85%)` when
+  all seven were engine refusals (HTTP 400) and the model was never asked.
+  Grade rows gain an `unavailable` state: such a task is never listed as a
+  failure, an axis whose every task is unavailable renders as `N/A` with the
+  engine's own reason, and the run stops after the first refusal instead of
+  firing six more doomed requests.
+- `hub::post_json` keeps the server's explanation on a non-2xx instead of
+  discarding the body — the proxy's own upstream call already did this, so the
+  bench was losing `Failed to initialize samplers` behind a bare
+  `http status: 400`.
+- An agentic-only run no longer prints `insufficient depths to fit a curve`,
+  which claimed a failed fit for a suite that never ran.
+
 ### Added
+- `chekov capability bench --suite agentic` — the corpus-free §7.2 probe
+  suites, seed set v0. `tool_emit` (7 call + 2 abstention + 1
+  missing-function cases) crosses the translator's real tool mapping and
+  grades the translated `tool_use` block BFCL-style (name + arguments as
+  parsed JSON); `grammar_gap` re-runs the call cases with the case's own
+  `oneOf` schema forced via `response_format` on the wire, and the summary
+  prints forced-vs-unconstrained ON THE SAME CASES — the anti-self-deception
+  device: a large gap means "works only with a babysitter"; `instruction`
+  (12 IFEval-style cases) reports strict and loose separately with the
+  chattiness gap. Failures are listed individually, passes counted, and the
+  probe-set TOML's hash rides in `prompt_set_hash`, so an edited case makes
+  old runs incomparable by construction. `--suite` defaults to `throughput`
+  (a stated deviation from the spec's `agentic` default, held until the set
+  reaches the spec's 30/40 counts). Deferred with their reasons recorded:
+  `diff_fidelity`/`tool_loop`/`long_ctx_trace`/`hallucination` (need the
+  §8/§9 corpora), `think_leak` (waits on the `--reasoning-format none`
+  question).
 - `chekov capability bench --models a,b [--dry-run] [--yes]` — the §7.3
   per-candidate lifecycle. Bench launches each candidate itself behind `run`'s
   own preflight gates, checks the argv against the binary's own `--help`

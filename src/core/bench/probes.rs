@@ -36,6 +36,96 @@ pub fn prompt_set_hash(plan: &crate::core::bench::sweep::SweepPlan, seed: u32) -
     crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
 }
 
+/// The suite-aware prompt-set hash. A throughput-only run keeps the original
+/// value, so runs recorded before `--suite` existed stay comparable.
+#[must_use]
+pub fn suite_prompt_hash(
+    suite: crate::core::bench::lifecycle::Suite,
+    plan: &crate::core::bench::sweep::SweepPlan,
+    seed: u32,
+) -> String {
+    use crate::core::bench::lifecycle::Suite;
+    let throughput = prompt_set_hash(plan, seed);
+    let agentic = crate::core::bench::probeset::content_hash();
+    match suite {
+        Suite::Throughput => throughput,
+        Suite::Agentic => {
+            let canonical = format!("agentic|{agentic}|seed={seed}");
+            crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
+        }
+        Suite::All => {
+            let canonical = format!("all|{throughput}|{agentic}|seed={seed}");
+            crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
+        }
+    }
+}
+
+/// A `tool_emit` case: the palette rides as real Anthropic `tools`, so the
+/// call crosses the translator's tool mapping exactly as an agent's would.
+#[must_use]
+pub fn tool_probe(case: &crate::core::bench::probeset::ToolCase) -> HttpRequest {
+    let tools: Vec<serde_json::Value> = case
+        .tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": parse_schema(&tool.input_schema),
+            })
+        })
+        .collect();
+    anthropic_post(&serde_json::json!({
+        "model": "claude-sonnet-4",
+        "max_tokens": 256,
+        "tools": tools,
+        "messages": [{"role": "user", "content": case.prompt}],
+    }))
+}
+
+/// The forced half: no `tools` param (the grammar replaces the tool-call
+/// machinery); the palette is shown in a system prompt instead, and the
+/// reply shape is constrained by `response_format` on the wire.
+#[must_use]
+pub fn forced_probe(case: &crate::core::bench::probeset::ToolCase) -> HttpRequest {
+    let palette: Vec<serde_json::Value> = case
+        .tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": parse_schema(&tool.input_schema),
+            })
+        })
+        .collect();
+    let system = format!(
+        "Invoke exactly one of these tools by replying with a JSON object \
+         {{\"name\": ..., \"arguments\": {{...}}}} and nothing else. Tools: {}",
+        serde_json::Value::Array(palette)
+    );
+    anthropic_post(&serde_json::json!({
+        "model": "claude-sonnet-4",
+        "max_tokens": 256,
+        "system": system,
+        "messages": [{"role": "user", "content": case.prompt}],
+    }))
+}
+
+/// An instruction case: the prompt alone — the constraints live in its text.
+#[must_use]
+pub fn instruction_probe(case: &crate::core::bench::probeset::InstructionCase) -> HttpRequest {
+    anthropic_post(&serde_json::json!({
+        "model": "claude-sonnet-4",
+        "max_tokens": 512,
+        "messages": [{"role": "user", "content": case.prompt}],
+    }))
+}
+
+fn parse_schema(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({"type": "object"}))
+}
+
 /// A graded probe from a fixture, in the same dialect as every other probe.
 #[must_use]
 pub fn fixture_probe(probe: &FixtureProbe) -> HttpRequest {

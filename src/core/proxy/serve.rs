@@ -217,8 +217,9 @@ pub fn get_bearer(upstream: &Upstream, path: &str) -> Result<String, ChekovError
 ///
 /// ureq renders a non-2xx as `http status: 400` and drops the body, but the
 /// body is the only thing that says WHY — llama-server puts the real cause
-/// (context overflow, a bad sampler value) in `error.message` there.
-fn upstream_reason(status: u16, body: &str) -> String {
+/// (context overflow, a bad sampler value) in `error.message` there. Shared
+/// with `hub::post_json`, which reaches the same server on the bench path.
+pub(crate) fn upstream_reason(status: u16, body: &str) -> String {
     /// Error strings are logged and shown to the user; a runaway body must not
     /// become a 20 KB log line.
     const MAX: usize = 400;
