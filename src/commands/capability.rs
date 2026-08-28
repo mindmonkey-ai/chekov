@@ -54,6 +54,19 @@ pub enum CapAction {
         #[arg(long)]
         ctx: Option<u32>,
     },
+    /// Measure the running server through chekov's own translator; store the run.
+    Bench {
+        /// Graded probe set (TOML). There is no compiled-in fixture yet:
+        /// fixture-v1 is release-gated on a three-model measurement campaign.
+        #[arg(long)]
+        fixture: Option<std::path::PathBuf>,
+    },
+    /// Compare two stored bench runs (same engine only).
+    Compare {
+        /// Run records written by `capability bench`.
+        a: std::path::PathBuf,
+        b: std::path::PathBuf,
+    },
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -126,6 +139,8 @@ impl Command for CapabilityCmd {
                     },
                 );
             }
+            Some(CapAction::Bench { fixture }) => return bench(ctx, fixture.as_deref()),
+            Some(CapAction::Compare { a, b }) => return compare(ctx, a, b),
             _ => {}
         }
         let m = machine::probe(&ctx.config.engine_dir());
@@ -555,6 +570,172 @@ fn discovered(
     Ok(out)
 }
 
+/// The context a bench needs beyond `Ctx`, resolved and guarded up front.
+struct BenchSetup {
+    eff: crate::core::registry::Effective,
+    pid: i32,
+}
+
+/// Resolve the active model and refuse to bench a server that is not
+/// running it — recording one model's numbers under another's name is the
+/// flag-hygiene failure the spec names.
+fn bench_setup(ctx: &Ctx) -> Result<BenchSetup, ChekovError> {
+    let reg = ctx.registry()?;
+    let name = reg.active_name()?.to_owned();
+    let eff = reg.effective(&name)?;
+    let pid = crate::core::server::live_pid(&ctx.config).ok_or(ChekovError::ServerNotRunning)?;
+    if let Some(running) = crate::core::server::read_run_state(&ctx.config)
+        && running != name
+    {
+        return Err(ChekovError::BenchWrongModel {
+            running,
+            resolved: name,
+        });
+    }
+    Ok(BenchSetup { eff, pid })
+}
+
+/// Wait for `/health` (watching the pid) then assert the loaded `/props`
+/// context; returns what the server actually loaded.
+fn ensure_ready(
+    ctx: &Ctx,
+    upstream: &crate::core::proxy::serve::Upstream,
+    setup: &BenchSetup,
+) -> Result<u32, ChekovError> {
+    use crate::core::bench::runner;
+    let ready = runner::ReadyTarget {
+        base_url: upstream.base_url.clone(),
+        pid: setup.pid,
+    };
+    runner::wait_ready(ctx.http.as_ref(), &ready, (&ctx.config.file.bench).into())?;
+    runner::assert_props_ctx(
+        &|| crate::core::proxy::serve::get_bearer(upstream, "/props"),
+        setup.eff.ctx_size,
+    )
+}
+
+fn bench(ctx: &Ctx, fixture_path: Option<&std::path::Path>) -> Result<ExitCode, ChekovError> {
+    use crate::core::bench::{runner, store, sweep};
+    use crate::core::proxy::claude::ClaudeFacade;
+    use crate::core::proxy::serve::Upstream;
+    let setup = bench_setup(ctx)?;
+    let cfg = &ctx.config;
+    let upstream = Upstream {
+        base_url: cfg.base_url(),
+        api_key: cfg.file.server.api_key.clone(),
+    };
+    let ctx_loaded = ensure_ready(ctx, &upstream, &setup)?;
+    let facade = ClaudeFacade::new(&setup.eff.name);
+    let wire = runner::ProbeWire {
+        http: ctx.http.as_ref(),
+        facade: &facade,
+        upstream: &upstream,
+    };
+    let results = sweep::run_sweep(&(&cfg.file.bench).into(), &mut |req| {
+        runner::cross(&wire, req)
+    })?;
+    let graded = match fixture_path {
+        Some(path) => grade_fixture(&wire, path)?,
+        None => Vec::new(),
+    };
+    let outcome = BenchOutcome {
+        ctx_loaded,
+        results,
+        graded,
+    };
+    let record = build_record(ctx, &setup, outcome);
+    let path = store::save(&cfg.bench_dir(), &record)?;
+    print!("{}", store::render_run(&record));
+    println!("stored: {}", path.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Cross and grade every fixture probe. A crossing failure records a FAIL
+/// with its reason — a broken exchange must never look like an empty reply.
+fn grade_fixture(
+    wire: &crate::core::bench::runner::ProbeWire,
+    path: &std::path::Path,
+) -> Result<Vec<crate::core::bench::store::ProbeRecord>, ChekovError> {
+    use crate::core::bench::{fixture, grade, probes, runner, store};
+    let loaded = fixture::load(path)?;
+    let mut out = Vec::new();
+    for probe in &loaded.probes {
+        let outcome = runner::cross(wire, &probes::fixture_probe(probe))
+            .map(|artifact| grade::grade(&artifact.anthropic_body, probe));
+        let (pass, reason) = match outcome {
+            Ok(grade::Grade::Pass) => (true, None),
+            Ok(grade::Grade::Fail { reason }) => (false, Some(reason)),
+            Err(e) => (false, Some(e.to_string())),
+        };
+        out.push(store::ProbeRecord {
+            id: probe.id.clone(),
+            pass,
+            reason,
+        });
+    }
+    Ok(out)
+}
+
+/// What one bench measured, bundled for the record builder (§4).
+struct BenchOutcome {
+    ctx_loaded: u32,
+    results: Vec<crate::core::bench::sweep::DepthResult>,
+    graded: Vec<crate::core::bench::store::ProbeRecord>,
+}
+
+fn build_record(
+    ctx: &Ctx,
+    setup: &BenchSetup,
+    outcome: BenchOutcome,
+) -> crate::core::bench::store::RunRecord {
+    use crate::core::bench::store;
+    let cfg = &ctx.config;
+    let machine = machine::probe(&cfg.engine_dir());
+    store::RunRecord {
+        schema_version: store::SCHEMA_VERSION,
+        created_utc: crate::core::clock::utc_compact_now(),
+        model: setup.eff.name.clone(),
+        ctx: outcome.ctx_loaded,
+        launch_args: crate::core::server::launch_args(cfg, &setup.eff),
+        engine_build_commit: crate::core::engine::recorded_commit(&cfg.logs_dir())
+            .or_else(|| crate::core::engine::current_commit(&cfg.engine_dir())),
+        machine: store::MachineRecord {
+            chip: machine.chip,
+            memsize_bytes: machine.memsize_bytes,
+            gpu_budget_mib: machine.budget.map(|b| b.value),
+            budget_provenance: machine.budget.map(|b| b.provenance.label().to_owned()),
+        },
+        depths: outcome
+            .results
+            .iter()
+            .map(store::DepthRecord::from)
+            .collect(),
+        fixture: outcome.graded,
+    }
+}
+
+fn compare(ctx: &Ctx, a: &std::path::Path, b: &std::path::Path) -> Result<ExitCode, ChekovError> {
+    use crate::core::bench::{compare as bench_compare, store};
+    let run_a = store::load(a)?;
+    let run_b = store::load(b)?;
+    let rows = bench_compare::compare_runs(
+        &run_a,
+        &run_b,
+        f64::from(ctx.config.file.bench.significance_pct),
+    )?;
+    print!(
+        "{}",
+        bench_compare::render_comparison(
+            &bench_compare::RunPair {
+                a: &run_a,
+                b: &run_b
+            },
+            &rows
+        )
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Machine, render_json, render_scan};
@@ -569,6 +750,45 @@ mod tests {
             perf_threads: Some(24),
             budget,
             macos: Some("27.0".into()),
+        }
+    }
+
+    #[test]
+    fn bench_and_compare_parse() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "chekov",
+            "capability",
+            "bench",
+            "--fixture",
+            "probes.toml",
+        ])
+        .expect("bench parses");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Bench { fixture }) => {
+                    assert_eq!(
+                        fixture.as_deref(),
+                        Some(std::path::Path::new("probes.toml"))
+                    );
+                }
+                other => panic!("expected Bench, got {other:?}"),
+            },
+            _ => panic!("expected capability"),
+        }
+        let cli = crate::cli::Cli::try_parse_from([
+            "chekov",
+            "capability",
+            "compare",
+            "a.json",
+            "b.json",
+        ])
+        .expect("compare parses");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => {
+                assert!(matches!(cap.action, Some(super::CapAction::Compare { .. })));
+            }
+            _ => panic!("expected capability"),
         }
     }
 

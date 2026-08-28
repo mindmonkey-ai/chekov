@@ -97,7 +97,16 @@ machine where the engine reports 228065 MiB — chekov understates its own budge
 Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 `MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)`.
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
-Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slices 5-6 OPEN**
+Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27 (bench + compare; fixture-v1 content stays release-gated on the three-model measurement campaign; the "--metric tok-s grid upgrades to measured" line is deferred — see below); slice 6 OPEN**
+
+## Feed measured bench medians into `capability graph` (2026-08-27)
+Slice 5's spec line "the `--metric tok-s` grid upgrades from predicted to
+measured" is deliberately deferred from the harness change: wiring stored
+`logs/bench/` medians into the slice-2 grid touches every graph rendering
+surface and needs a staleness rule (a measurement from an older
+engine.build_commit must not silently pose as current). Do it as its own
+change once a few real runs exist.
+Proposed 2026-08-27 — status: OPEN
 
 ## Tool-parser gate: report, do not refuse (2026-08-27)
 Slice 4 of the capability spec makes "falls through to llama.cpp's generic PEG

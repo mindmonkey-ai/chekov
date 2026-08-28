@@ -179,6 +179,13 @@ pub enum ChekovError {
     BenchEngineMismatch { a: String, b: String },
 
     #[error(
+        "the server is running '{running}' but the resolved model is '{resolved}' \
+         — bench refuses to record one model's numbers under another's name; \
+         `chekov restart` and re-run"
+    )]
+    BenchWrongModel { running: String, resolved: String },
+
+    #[error(
         "degenerate output detected: {reason} — this matches the known GGUF \
          corruption class; re-pull the model shards with `chekov pull` and re-run \
          `chekov doctor`"
