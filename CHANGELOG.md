@@ -12,22 +12,33 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
-- `chekov capability bench [--fixture <path>]` — slice 5 of the capability
-  spec, completed. Measures the running server THROUGH chekov's own
-  Anthropic↔OpenAI translator: `/health`+pid readiness (a server that dies
-  while loading fails as "died", not as a timeout), a `/props` assertion that
-  the loaded `n_ctx` matches the config's intent, a depth sweep whose samples
-  are stored raw under `logs/bench/` (summaries are recomputed on read, so a
-  stored median can never drift), and optional graded probes from a
-  user-supplied TOML fixture. There is deliberately no compiled-in fixture:
-  fixture-v1 is release-gated on a three-model measurement campaign.
-- `chekov capability compare <a.json> <b.json>` — refuses runs from different
-  engine builds (naming `engine.build_commit`, and refusing an unrecorded one,
-  which cannot be attested), compares only depths present in both runs, and
-  prints `no significant difference` as a first-class outcome rather than
-  forcing a winner.
+- `chekov capability bench [--fixture <path>] [--resume <run-id>]` — slice 5's
+  harness. Measures the running server THROUGH chekov's own Anthropic↔OpenAI
+  translator: `/health`+pid readiness (a server that dies while loading fails
+  as "died", not as a timeout), a `/props` assertion that the loaded per-slot
+  `n_ctx` matches the config's intent, and a depth sweep with sampling pinned
+  on the wire (`temperature 0, top_k 1`, seeded). Every run lands in
+  `eval/<run_id>/` as `stamp.json` — a 17-field configuration stamp plus the
+  exact launch argv — and `results.jsonl`, one flushed append per task, so a
+  crash loses at most one task and `--resume` skips what a run already holds
+  (resuming under a changed stamp is refused). Raw samples are stored;
+  summaries are recomputed on read, so a stored median can never drift.
+  Optional graded probes come from a user-supplied TOML fixture; there is
+  deliberately no compiled-in fixture — fixture-v1 is release-gated on a
+  three-model measurement campaign.
+- `chekov capability compare <run-a> <run-b>` — refuses on the FIRST differing
+  stamp field, because llama.cpp does not guarantee bit-identical results
+  across configurations (GPU reduction kernels pick different accumulation
+  orders; float addition is not associative). The subject fields
+  (`weights_revision`, `quant`) are exempt — they are what is being compared —
+  and differing task sets (`prompt_set_hash`, `corpus_id`) always refuse.
+  `no significant difference` is a first-class printed outcome, never resolved
+  into a winner.
 - `[bench]` config section: sweep depths, repetitions, probe `max_tokens`,
-  the significance threshold, and the readiness poll budget.
+  the significance threshold, the readiness poll budget, and the sampling
+  seed.
+- Hand-rolled SHA-256 (`core::hash`, NIST-vector-verified) for the machine
+  identity and prompt-set hashes — house style, no new dependency.
 - `core::stats` — the statistical honesty slice 5's bench rests on. Median with
   p10/p90, never mean ± stddev, because decode rate is right-skewed by thermal
   events and a mean flatters a run that hit one stall. The first repetition is
