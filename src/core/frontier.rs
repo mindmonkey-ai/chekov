@@ -231,7 +231,10 @@ fn axis_line(ladder: &[u32], name_width: usize) -> String {
     line
 }
 
-fn format_ctx(ctx: u32) -> String {
+/// `32K` for a multiple of 1024, else the bare number — one spelling for the
+/// axis, the tooltips, and the footnotes.
+#[must_use]
+pub fn format_ctx(ctx: u32) -> String {
     if ctx.is_multiple_of(1024) {
         format!("{}K", ctx / 1024)
     } else {

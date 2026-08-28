@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::bench::store::{RunLog, TaskRow};
-use crate::core::frontier::Speed;
+use crate::core::frontier::{Frontier, Row, Speed, format_ctx};
 use crate::core::stats;
 
 /// What a cell asks for: an exact match on all four, or nothing.
@@ -115,6 +115,73 @@ pub fn load_all(eval_dir: &Path) -> Loaded {
         }
     }
     loaded
+}
+
+/// What `attach_row` matches against.
+struct Source<'a> {
+    speeds: &'a [MeasuredSpeed],
+    machine_id: &'a str,
+}
+
+/// Put each cell's run in its cell, and say what was chosen or excluded.
+///
+/// Without a machine identity nothing can be matched — a run from an unknown
+/// machine is not evidence about this one — and the grid says so rather than
+/// showing a silent `??` everywhere. Without a known engine build the
+/// staleness check cannot run, and that is said too (§5.4 rule 8).
+pub fn attach(f: &mut Frontier, loaded: Loaded, machine_id: Option<&str>) {
+    f.notes.extend(loaded.notes);
+    if f.engine_commit.is_none() {
+        f.notes.push(
+            "the engine commit is unknown, so measured cells cannot be checked against the \
+             current build — run `chekov update --engine`"
+                .to_owned(),
+        );
+    }
+    let Some(machine_id) = machine_id else {
+        f.notes.push(
+            "the machine identity is incomplete (model, memory, chip, or GPU cores unknown), \
+             so no stored run can be matched to this machine — run `chekov setup`"
+                .to_owned(),
+        );
+        return;
+    };
+    let source = Source {
+        speeds: &loaded.speeds,
+        machine_id,
+    };
+    for row in &mut f.rows {
+        let notes = attach_row(row, &f.ctx_ladder, &source);
+        f.notes.extend(notes);
+    }
+}
+
+/// One row's cells, each given the latest matching run; a choice among
+/// several runs is returned as a note, so it is printed, never silent.
+fn attach_row(row: &mut Row, ladder: &[u32], source: &Source) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (cell, &ctx) in row.cells.iter_mut().zip(ladder) {
+        let key = SpeedKey {
+            model: &row.name,
+            quant: &row.quant,
+            ctx,
+            machine_id: source.machine_id,
+        };
+        let Some((chosen, count)) = pick(source.speeds, &key) else {
+            continue;
+        };
+        cell.speed = Some(chosen.speed.clone());
+        if count > 1 {
+            notes.push(format!(
+                "{} {} @ {}: {count} stored runs; the latest, {}, is shown",
+                row.name,
+                row.quant,
+                format_ctx(ctx),
+                chosen.speed.run_id
+            ));
+        }
+    }
+    notes
 }
 
 #[cfg(test)]
@@ -326,6 +393,92 @@ mod tests {
                 && loaded.notes[0].contains("excluded"),
             "{}",
             loaded.notes[0]
+        );
+    }
+
+    fn grid() -> crate::core::frontier::Frontier {
+        use crate::core::frontier::{Cell, Frontier, Metric, Row};
+        use crate::core::machine::{Probed, Provenance};
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let cell = || Cell {
+            weights_bytes: Some(35 * GIB),
+            kv_bytes: Probed::new(Some(GIB), Provenance::Measured),
+            overhead_bytes: Probed::new(Some(3 * GIB), Provenance::Predicted),
+            speed: None,
+        };
+        Frontier {
+            budget: Probed::new(228_065, Provenance::EngineReported),
+            ctx_ladder: vec![131_072, 262_144],
+            rows: vec![Row {
+                name: "ornith-1.5-35b-a3b".into(),
+                quant: "Q8_0".into(),
+                cells: vec![cell(), cell()],
+            }],
+            metric: Metric::TokS,
+            engine_commit: Some("dda1b0d67".into()),
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn attach_marks_only_the_exact_cell_and_prints_a_choice_among_runs() {
+        let older = measured(
+            "20260828T034237Z-ornith",
+            stamp("8d41f0c2a917", "Q8_0", 262_144),
+        );
+        let newer = measured(
+            "20260828T034340Z-ornith",
+            stamp("8d41f0c2a917", "Q8_0", 262_144),
+        );
+        let loaded = super::Loaded {
+            speeds: vec![older, newer.clone()],
+            notes: vec!["eval/broken could not be read: bad json — excluded".into()],
+        };
+        let mut f = grid();
+        super::attach(&mut f, loaded, Some("8d41f0c2a917"));
+        assert!(f.rows[0].cells[0].speed.is_none(), "131K has no run");
+        assert_eq!(f.rows[0].cells[1].speed.as_ref(), Some(&newer.speed));
+        assert_eq!(f.notes.len(), 2, "{:?}", f.notes);
+        assert!(f.notes[0].contains("eval/broken"), "{:?}", f.notes);
+        assert!(
+            f.notes[1].contains("ornith-1.5-35b-a3b Q8_0 @ 256K: 2 stored runs")
+                && f.notes[1].contains("20260828T034340Z-ornith"),
+            "{:?}",
+            f.notes
+        );
+    }
+
+    #[test]
+    fn attach_without_a_machine_identity_matches_nothing_and_says_so() {
+        let here = measured(
+            "20260828T034237Z-ornith",
+            stamp("8d41f0c2a917", "Q8_0", 262_144),
+        );
+        let loaded = super::Loaded {
+            speeds: vec![here],
+            notes: Vec::new(),
+        };
+        let mut f = grid();
+        super::attach(&mut f, loaded, None);
+        assert!(f.rows[0].cells.iter().all(|c| c.speed.is_none()));
+        assert_eq!(f.notes.len(), 1, "{:?}", f.notes);
+        assert!(
+            f.notes[0].contains("machine identity") && f.notes[0].contains("chekov setup"),
+            "{:?}",
+            f.notes
+        );
+    }
+
+    #[test]
+    fn attach_without_a_known_engine_build_says_the_staleness_check_is_off() {
+        let mut f = grid();
+        f.engine_commit = None;
+        super::attach(&mut f, super::Loaded::default(), Some("8d41f0c2a917"));
+        assert_eq!(f.notes.len(), 1, "{:?}", f.notes);
+        assert!(
+            f.notes[0].contains("engine commit is unknown") && f.notes[0].contains("--engine"),
+            "{:?}",
+            f.notes
         );
     }
 
