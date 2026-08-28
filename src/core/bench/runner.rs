@@ -173,6 +173,23 @@ fn cross_inner(
     req: &HttpRequest,
     forced: Option<&Value>,
 ) -> Result<ProbeArtifact, ChekovError> {
+    let (path, body) = forward_of(wire, req)?;
+    let body = adjust_body(&body, wire.pins, forced)?;
+    let upstream_body = wire.http.post_json(&JsonRequest {
+        url: format!("{}{}", wire.upstream.base_url, path),
+        body,
+        bearer: Some(wire.upstream.api_key.clone()),
+    })?;
+    let timings = read_timings(&upstream_body)?;
+    let anthropic_body = wire.facade.translate_response(&upstream_body)?;
+    Ok(ProbeArtifact {
+        anthropic_body,
+        timings,
+    })
+}
+
+/// Route through the facade; the upstream path and the translated body.
+fn forward_of(wire: &ProbeWire, req: &HttpRequest) -> Result<(String, String), ChekovError> {
     let forward = match wire.facade.route(req)? {
         Action::Forward(f) => f,
         Action::Reply(_) => {
@@ -186,18 +203,185 @@ fn cross_inner(
     let body = String::from_utf8(forward.body).map_err(|e| ChekovError::ProxyBadRequest {
         reason: format!("forwarded body is not UTF-8: {e}"),
     })?;
-    let body = adjust_body(&body, wire.pins, forced)?;
-    let upstream_body = wire.http.post_json(&JsonRequest {
-        url: format!("{}{}", wire.upstream.base_url, forward.path),
+    Ok((forward.path, body))
+}
+
+/// Which door a probe took. Claude Code streams; the buffered door is the one
+/// `doctor` and the first bench runs used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    #[default]
+    Buffered,
+    Streamed,
+}
+
+/// The streaming crossing — the door Claude Code actually takes.
+///
+/// Same route and pins as `cross`, with `stream: true` on the Anthropic
+/// request (so the translator asks upstream for a stream with usage, as it
+/// does for Claude Code); the SSE body is pumped through a fresh
+/// `stream_translator()` exactly as `serve::relay` does, and the agent-side
+/// events are reassembled into the message the agent would hold at
+/// `message_stop`. An error frame is the failure, before any missing timings
+/// can be blamed. Exercises translation, not the socket — §7.1's honest
+/// scope limit.
+pub fn cross_streaming(wire: &ProbeWire, req: &HttpRequest) -> Result<ProbeArtifact, ChekovError> {
+    let (path, body) = forward_of(wire, &with_stream_flag(req)?)?;
+    let body = adjust_body(&body, wire.pins, None)?;
+    let sse = wire.http.post_json(&JsonRequest {
+        url: format!("{}{}", wire.upstream.base_url, path),
         body,
         bearer: Some(wire.upstream.api_key.clone()),
     })?;
-    let timings = read_timings(&upstream_body)?;
-    let anthropic_body = wire.facade.translate_response(&upstream_body)?;
+    let mut translator = wire.facade.stream_translator();
+    let mut events = Vec::new();
+    for data in data_lines(&sse) {
+        events.extend(translator.on_chunk(data));
+    }
+    events.extend(translator.finish());
+    let anthropic_body = assemble(&events)?;
     Ok(ProbeArtifact {
         anthropic_body,
-        timings,
+        timings: stream_timings(&sse)?,
     })
+}
+
+/// The probe's Anthropic body with `stream: true`, as Claude Code sends it.
+fn with_stream_flag(req: &HttpRequest) -> Result<HttpRequest, ChekovError> {
+    let mut parsed: Value =
+        serde_json::from_slice(&req.body).map_err(|e| ChekovError::ProxyBadRequest {
+            reason: format!("probe body is not JSON: {e}"),
+        })?;
+    let object = parsed
+        .as_object_mut()
+        .ok_or_else(|| ChekovError::ProxyBadRequest {
+            reason: "probe body is not a JSON object".to_owned(),
+        })?;
+    object.insert("stream".to_owned(), Value::Bool(true));
+    Ok(HttpRequest {
+        method: req.method.clone(),
+        path: req.path.clone(),
+        body: parsed.to_string().into_bytes(),
+    })
+}
+
+/// The `data:` payloads of an SSE body — the same split `serve::relay` makes,
+/// so what the bench feeds the translator is what the proxy would.
+fn data_lines(sse: &str) -> impl Iterator<Item = &str> {
+    sse.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+}
+
+/// llama-server attaches `timings` to the last frame it streams; the latest
+/// frame carrying one is the measurement. None at all is loud, as buffered.
+fn stream_timings(sse: &str) -> Result<Timings, ChekovError> {
+    let last = data_lines(sse)
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .filter(|frame| frame.get("timings").is_some())
+        .last()
+        .ok_or(ChekovError::BenchNoTimings)?;
+    read_timings(&last.to_string())
+}
+
+/// The agent-side SSE events folded back into one Anthropic message: what an
+/// SDK client holds after `message_stop`. An `error` event is a turn that was
+/// never answered — it fails the crossing, and can never read as `end_turn`.
+fn assemble(events: &[crate::core::proxy::SseEvent]) -> Result<String, ChekovError> {
+    let mut assembly = Assembly::default();
+    for event in events {
+        let payload: Value =
+            serde_json::from_str(&event.data).map_err(|e| ChekovError::ProxyBadRequest {
+                reason: format!("translator emitted a non-JSON `{}` event: {e}", event.event),
+            })?;
+        match event.event.as_str() {
+            "message_start" => assembly.message = payload["message"].clone(),
+            "content_block_start" => assembly.open(&payload),
+            "content_block_delta" => assembly.delta(&payload),
+            "content_block_stop" => assembly.close(&payload),
+            "message_delta" => assembly.terminal(&payload),
+            "error" => {
+                return Err(ChekovError::BenchStreamFailed {
+                    reason: payload["error"]["message"]
+                        .as_str()
+                        .unwrap_or("unspecified")
+                        .to_owned(),
+                });
+            }
+            _ => {}
+        }
+    }
+    assembly.message["content"] = Value::Array(assembly.blocks);
+    Ok(assembly.message.to_string())
+}
+
+/// The message under construction: its envelope, its content blocks, and the
+/// still-unparsed tool arguments per block.
+#[derive(Default)]
+struct Assembly {
+    message: Value,
+    blocks: Vec<Value>,
+    partial_json: Vec<String>,
+}
+
+impl Assembly {
+    fn index(payload: &Value) -> usize {
+        usize::try_from(payload["index"].as_u64().unwrap_or(0)).unwrap_or(0)
+    }
+
+    fn open(&mut self, payload: &Value) {
+        let index = Self::index(payload);
+        self.blocks.resize(index + 1, Value::Null);
+        self.partial_json.resize(index + 1, String::new());
+        self.blocks[index] = payload["content_block"].clone();
+    }
+
+    fn delta(&mut self, payload: &Value) {
+        let index = Self::index(payload);
+        let Some(block) = self.blocks.get_mut(index) else {
+            return;
+        };
+        let delta = &payload["delta"];
+        let appended = |field: &str| delta[field].as_str().unwrap_or_default().to_owned();
+        match delta["type"].as_str() {
+            Some("text_delta") => push_str(&mut block["text"], &appended("text")),
+            Some("thinking_delta") => push_str(&mut block["thinking"], &appended("thinking")),
+            Some("input_json_delta") => {
+                self.partial_json[index].push_str(&appended("partial_json"));
+            }
+            _ => {}
+        }
+    }
+
+    /// A closed `tool_use` block parses its accumulated arguments; the
+    /// buffered translator makes the same `{}` of an unparseable string.
+    fn close(&mut self, payload: &Value) {
+        let index = Self::index(payload);
+        let Some(block) = self.blocks.get_mut(index) else {
+            return;
+        };
+        if block["type"] == "tool_use" {
+            let raw = self.partial_json.get(index).map_or("", String::as_str);
+            block["input"] = serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({}));
+        }
+    }
+
+    fn terminal(&mut self, payload: &Value) {
+        if let Some(stop) = payload["delta"].get("stop_reason") {
+            self.message["stop_reason"] = stop.clone();
+        }
+        if let Some(usage) = payload.get("usage") {
+            self.message["usage"] = usage.clone();
+        }
+    }
+}
+
+/// Append to a JSON string field, creating it when absent.
+fn push_str(field: &mut Value, text: &str) {
+    let mut current = field.as_str().unwrap_or_default().to_owned();
+    current.push_str(text);
+    *field = Value::String(current);
 }
 
 /// Overwrite the forwarded body's sampling with the pinned values — and,
@@ -419,6 +603,154 @@ mod tests {
             upstream: up,
             pins: super::SamplingPins { seed: 42 },
         }
+    }
+
+    /// An SSE body as llama-server writes it: `data:` frames, a comment line,
+    /// blank separators, and the `[DONE]` sentinel — everything `serve::relay`
+    /// has to skip or stop on.
+    fn sse(frames: &[serde_json::Value]) -> String {
+        let mut out = String::from(": llama-server\n\n");
+        for frame in frames {
+            out.push_str("data: ");
+            out.push_str(&frame.to_string());
+            out.push_str("\n\n");
+        }
+        out.push_str("data: [DONE]\n\n");
+        out
+    }
+
+    fn text_frame(text: &str) -> serde_json::Value {
+        serde_json::json!({ "id": "c1", "choices": [{ "delta": { "content": text } }] })
+    }
+
+    /// The last frame llama-server sends: empty delta, finish reason, usage,
+    /// and — with `include_usage` — the timings object.
+    fn final_frame() -> serde_json::Value {
+        serde_json::json!({
+            "id": "c1",
+            "choices": [{ "delta": {}, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 900, "completion_tokens": 100 },
+            "timings": {
+                "cache_n": 512,
+                "prompt_n": 900, "prompt_ms": 2000.0, "prompt_per_second": 450.0,
+                "predicted_n": 100, "predicted_ms": 4608.3, "predicted_per_second": 21.7
+            }
+        })
+    }
+
+    fn parsed(artifact: &super::ProbeArtifact) -> serde_json::Value {
+        serde_json::from_str(&artifact.anthropic_body).expect("the artifact is json")
+    }
+
+    #[test]
+    fn a_streamed_crossing_asks_upstream_to_stream_and_grades_the_assembled_message() {
+        let http = CannedUpstream::new(sse(&[
+            text_frame("hel"),
+            text_frame("lo there"),
+            final_frame(),
+        ]));
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let artifact = super::cross_streaming(&wire(&http, &facade, &up), &anthropic_request("hi"))
+            .expect("a well-formed stream crosses");
+
+        // The wire asks for a stream with usage, exactly as Claude Code's
+        // request does after translation — and the pins still hold.
+        let sent: serde_json::Value =
+            serde_json::from_str(&http.sent_body.borrow().clone().expect("posted")).expect("json");
+        assert_eq!(sent["stream"], true, "{sent}");
+        assert_eq!(sent["stream_options"]["include_usage"], true, "{sent}");
+        assert_eq!(sent["temperature"], 0, "{sent}");
+        assert_eq!(sent["seed"], 42, "{sent}");
+
+        // The artifact is the message the agent would have assembled.
+        let body = parsed(&artifact);
+        assert_eq!(body["type"], "message", "{body}");
+        assert_eq!(body["content"][0]["type"], "text", "{body}");
+        assert_eq!(body["content"][0]["text"], "hello there", "{body}");
+        assert_eq!(body["stop_reason"], "end_turn", "{body}");
+        assert_eq!(body["usage"]["output_tokens"], 100, "{body}");
+        assert!((artifact.timings.predicted_per_second - 21.7).abs() < 1e-9);
+        assert_eq!(artifact.timings.cache_n, 512);
+    }
+
+    #[test]
+    fn a_streamed_tool_call_is_reassembled_from_its_json_deltas() {
+        let http = CannedUpstream::new(sse(&[
+            serde_json::json!({ "id": "c1", "choices": [{ "delta": { "tool_calls": [
+                { "index": 0, "id": "call_1", "function": { "name": "get_weather", "arguments": "" } }
+            ] } }] }),
+            serde_json::json!({ "id": "c1", "choices": [{ "delta": { "tool_calls": [
+                { "index": 0, "function": { "arguments": "{\"city\":" } }
+            ] } }] }),
+            serde_json::json!({ "id": "c1", "choices": [{ "delta": { "tool_calls": [
+                { "index": 0, "function": { "arguments": " \"Paris\"}" } }
+            ] } }] }),
+            serde_json::json!({
+                "id": "c1",
+                "choices": [{ "delta": {}, "finish_reason": "tool_calls" }],
+                "usage": { "prompt_tokens": 9, "completion_tokens": 12 },
+                "timings": final_frame()["timings"]
+            }),
+        ]));
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let artifact = super::cross_streaming(
+            &wire(&http, &facade, &up),
+            &anthropic_request("weather in paris"),
+        )
+        .expect("crosses");
+        let body = parsed(&artifact);
+        assert_eq!(body["content"][0]["type"], "tool_use", "{body}");
+        assert_eq!(body["content"][0]["name"], "get_weather", "{body}");
+        assert_eq!(body["content"][0]["id"], "call_1", "{body}");
+        assert_eq!(
+            body["content"][0]["input"],
+            serde_json::json!({ "city": "Paris" }),
+            "{body}"
+        );
+        assert_eq!(body["stop_reason"], "tool_use", "{body}");
+    }
+
+    #[test]
+    fn an_upstream_error_frame_is_unavailable_never_a_fake_end_turn() {
+        // A context overflow mid-turn is the daily one: llama-server keeps the
+        // 200 and sends an `error` frame. That turn was never answered.
+        let http = CannedUpstream::new(sse(&[
+            text_frame("partial"),
+            serde_json::json!({ "error": { "message": "context overflow", "code": 400 } }),
+        ]));
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let err = super::cross_streaming(&wire(&http, &facade, &up), &anthropic_request("hi"))
+            .expect_err("an error frame is not a graded reply");
+        assert!(
+            matches!(err, ChekovError::BenchStreamFailed { .. }),
+            "typed as a mid-stream failure: {err}"
+        );
+        assert!(err.to_string().contains("context overflow"), "{err}");
+    }
+
+    #[test]
+    fn a_stream_without_timings_is_loud_rather_than_a_number() {
+        let http = CannedUpstream::new(sse(&[
+            text_frame("hello"),
+            serde_json::json!({ "id": "c1", "choices": [{ "delta": {}, "finish_reason": "stop" }] }),
+        ]));
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let err = super::cross_streaming(&wire(&http, &facade, &up), &anthropic_request("hi"))
+            .expect_err("no timings, no measurement");
+        assert!(matches!(err, ChekovError::BenchNoTimings), "{err}");
+    }
+
+    #[test]
+    fn transport_names_are_the_stored_spelling() {
+        assert_eq!(
+            serde_json::to_string(&super::Transport::Streamed).expect("json"),
+            "\"streamed\""
+        );
+        assert_eq!(super::Transport::default(), super::Transport::Buffered);
     }
 
     #[test]
