@@ -11,6 +11,36 @@ All notable changes to chekov are recorded here. The format follows
   with `source = "directory"`) are mirrored into the session config dir so
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
+### Fixed
+- **The non-streaming translator now strips the thinking span, as the
+  streaming one always has.** `to_anthropic_response` passed `<think>…</think>`
+  through verbatim while `ClaudeStream` dropped it, so the two halves of the
+  same translator disagreed about what the agent receives; any non-streaming
+  Anthropic client saw reasoning the streaming one never shows it. Claude Code
+  streams, so it was unaffected — this was a latent asymmetry, found by the
+  bench's own first agentic run, where instruction adherence scored strict 1/12
+  and every failure was `fenced_rust_only` against a reply beginning `<think>`.
+  With the fix the same model scores **strict 11/12** on the same cases: the
+  suite had been measuring the leak, not the model. A span that never closes
+  yields no text rather than raw reasoning — the model spent its budget
+  thinking and never produced an answer, and reporting the reasoning as the
+  answer would be inventing one. This does not contradict
+  `--reasoning-format none` or doctor's think-tag retention check: retention is
+  required at the `OpenAI` door, segregation happens at the Anthropic one.
+- **An unmeasurable bench axis reports `N/A`, never a zero.** The first agentic
+  run published `grammar_gap 0/7 forced — unconstrained 6/7 (gap -85%)` when
+  all seven were engine refusals (HTTP 400) and the model was never asked.
+  Grade rows gain an `unavailable` state: such a task is never listed as a
+  failure, an axis whose every task is unavailable renders as `N/A` with the
+  engine's own reason, and the run stops after the first refusal instead of
+  firing six more doomed requests.
+- `hub::post_json` keeps the server's explanation on a non-2xx instead of
+  discarding the body — the proxy's own upstream call already did this, so the
+  bench was losing `Failed to initialize samplers` behind a bare
+  `http status: 400`.
+- An agentic-only run no longer prints `insufficient depths to fit a curve`,
+  which claimed a failed fit for a suite that never ran.
+
 ### Added
 - `chekov capability bench --suite agentic` — the corpus-free §7.2 probe
   suites, seed set v0. `tool_emit` (7 call + 2 abstention + 1
