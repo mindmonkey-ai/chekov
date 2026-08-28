@@ -12,6 +12,13 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
+- `chekov capability recommend [--ctx N] [--role agent|chat]` — ranks the
+  registered models for this machine. Rejected candidates are printed with
+  their reason, never silently dropped. A model whose template has no dedicated
+  llama.cpp tool parser is **downranked with a note under `--role agent`, not
+  refused** — the refusal the spec called for would have rejected
+  `minimax-m2.7`, which falls through and works. Under `--role chat` the tool
+  parser is ignored entirely and the largest fitting model wins.
 - `core::toolparser` — replays llama.cpp's `common_chat_try_specialized_template`
   substring cascade so chekov can tell which tool-call parser a chat template
   resolves to, or that it falls through to the generic autoparser. Verified

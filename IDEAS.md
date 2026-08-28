@@ -97,7 +97,7 @@ machine where the engine reports 228065 MiB — chekov understates its own budge
 Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 `MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)`.
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
-Proposed 2026-08-25 — status: **slices 1-3 (scan, graph, GGUF sizing + explain) SHIPPED; slices 4-6 OPEN**
+Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 PARTIAL (toolparser + recommend over the registry; catalog/live-HF still open); slices 5-6 OPEN**
 
 ## Tool-parser gate: report, do not refuse (2026-08-27)
 Slice 4 of the capability spec makes "falls through to llama.cpp's generic PEG
@@ -109,6 +109,6 @@ would reject `unsloth/MiniMax-M2.7-GGUF` — the author's own daily driver, mark
 token that llama.cpp's only MiniMax arm (M3) requires, so it falls through and
 still works. Fallthrough means "no dedicated parser", not "cannot call tools".
 `core::toolparser` therefore classifies and reports; it does not refuse.
-Whether `recommend --role agent` should DOWNRANK fallthrough candidates (rather
-than reject them) is the open question.
-Proposed 2026-08-27 — status: OPEN
+RESOLVED 2026-08-27 by the human: `recommend --role agent` DOWNRANKS a
+fallthrough candidate with a printed note rather than rejecting it. Implemented.
+Proposed 2026-08-27 — status: RESOLVED
