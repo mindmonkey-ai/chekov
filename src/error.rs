@@ -154,6 +154,12 @@ pub enum ChekovError {
     PropsCtxMismatch { server: u32, config: u32 },
 
     #[error(
+        "the upstream response carries no timings object — chekov never invents \
+         a measurement; rebuild the engine (`chekov update --engine`) and retry"
+    )]
+    BenchNoTimings,
+
+    #[error(
         "degenerate output detected: {reason} — this matches the known GGUF \
          corruption class; re-pull the model shards with `chekov pull` and re-run \
          `chekov doctor`"

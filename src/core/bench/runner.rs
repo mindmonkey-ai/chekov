@@ -8,7 +8,10 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::core::config::BenchSection;
-use crate::core::hub::HttpClient;
+use crate::core::hub::{HttpClient, JsonRequest};
+use crate::core::proxy::http::HttpRequest;
+use crate::core::proxy::serve::Upstream;
+use crate::core::proxy::{Action, AgentFacade};
 use crate::error::ChekovError;
 
 /// What readiness watches: the health endpoint and the process behind it.
@@ -86,6 +89,85 @@ pub fn assert_props_ctx(fetch: &PropsFetch, expected: u32) -> Result<u32, Chekov
             server: n_ctx,
             config: expected,
         })
+    }
+}
+
+/// llama-server's own measurement of one exchange, from its `timings` object.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Timings {
+    pub prompt_n: u64,
+    pub prompt_per_second: f64,
+    pub predicted_n: u64,
+    pub predicted_per_second: f64,
+}
+
+/// One measured probe: what the agent would receive, and what it cost.
+#[derive(Debug)]
+pub struct ProbeArtifact {
+    /// The Anthropic-shaped body — the same bytes an agent would parse.
+    pub anthropic_body: String,
+    pub timings: Timings,
+}
+
+/// Everything one crossing needs, bundled (§4).
+pub struct ProbeWire<'a> {
+    pub http: &'a dyn HttpClient,
+    pub facade: &'a dyn AgentFacade,
+    pub upstream: &'a Upstream,
+}
+
+/// Route → POST upstream → capture `timings` → translate.
+///
+/// Timings are read from the upstream `OpenAI` body BEFORE translation (the
+/// translator rightly drops them); the artifact handed to grading is the
+/// Anthropic body, per `tests/bench_probe_crosses_the_translator.rs`.
+pub fn cross(wire: &ProbeWire, req: &HttpRequest) -> Result<ProbeArtifact, ChekovError> {
+    let forward = match wire.facade.route(req)? {
+        Action::Forward(f) => f,
+        Action::Reply(_) => {
+            return Err(ChekovError::ProxyBadRequest {
+                reason: "a bench probe must forward upstream; this request was \
+                         answered locally"
+                    .to_owned(),
+            });
+        }
+    };
+    let body = String::from_utf8(forward.body).map_err(|e| ChekovError::ProxyBadRequest {
+        reason: format!("forwarded body is not UTF-8: {e}"),
+    })?;
+    let upstream_body = wire.http.post_json(&JsonRequest {
+        url: format!("{}{}", wire.upstream.base_url, forward.path),
+        body,
+        bearer: Some(wire.upstream.api_key.clone()),
+    })?;
+    let timings = read_timings(&upstream_body)?;
+    let anthropic_body = wire.facade.translate_response(&upstream_body)?;
+    Ok(ProbeArtifact {
+        anthropic_body,
+        timings,
+    })
+}
+
+/// The four numbers the sweep records. All-or-nothing: a partial timings
+/// object must not become a partial measurement.
+fn read_timings(upstream: &str) -> Result<Timings, ChekovError> {
+    let parsed: Value = serde_json::from_str(upstream).map_err(|_| ChekovError::BenchNoTimings)?;
+    let timings = parsed.get("timings").ok_or(ChekovError::BenchNoTimings)?;
+    let float = |key: &str| timings.get(key).and_then(Value::as_f64);
+    let count = |key: &str| timings.get(key).and_then(Value::as_u64);
+    match (
+        count("prompt_n"),
+        float("prompt_per_second"),
+        count("predicted_n"),
+        float("predicted_per_second"),
+    ) {
+        (Some(prompt_n), Some(pps), Some(predicted_n), Some(gps)) => Ok(Timings {
+            prompt_n,
+            prompt_per_second: pps,
+            predicted_n,
+            predicted_per_second: gps,
+        }),
+        _ => Err(ChekovError::BenchNoTimings),
     }
 }
 
@@ -173,6 +255,131 @@ mod tests {
         };
         let err = wait_ready(&http, &target, instant_policy(3)).expect_err("budget spent");
         assert!(matches!(err, ChekovError::EndpointDown { .. }));
+    }
+
+    use crate::core::proxy::claude::ClaudeFacade;
+    use crate::core::proxy::http::HttpRequest;
+    use crate::core::proxy::serve::Upstream;
+
+    /// Upstream answering every POST with one canned `OpenAI` body.
+    struct CannedUpstream {
+        body: String,
+        bearer_seen: RefCell<Option<String>>,
+    }
+
+    impl HttpClient for CannedUpstream {
+        fn get(&self, _url: &str) -> Result<String, ChekovError> {
+            unreachable!("a probe crossing never GETs")
+        }
+
+        fn post_json(&self, req: &JsonRequest) -> Result<String, ChekovError> {
+            *self.bearer_seen.borrow_mut() = req.bearer.clone();
+            Ok(self.body.clone())
+        }
+    }
+
+    fn anthropic_request(prompt: &str) -> HttpRequest {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4",
+            "max_tokens": 64,
+            "messages": [{ "role": "user", "content": prompt }],
+        });
+        HttpRequest {
+            method: "POST".into(),
+            path: "/v1/messages".into(),
+            body: body.to_string().into_bytes(),
+        }
+    }
+
+    fn openai_with_timings() -> String {
+        serde_json::json!({
+            "choices": [{ "message": { "content": "hello there" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 900, "completion_tokens": 100 },
+            "timings": {
+                "prompt_n": 900, "prompt_ms": 2000.0, "prompt_per_second": 450.0,
+                "predicted_n": 100, "predicted_ms": 4608.3, "predicted_per_second": 21.7
+            }
+        })
+        .to_string()
+    }
+
+    fn fake_upstream() -> Upstream {
+        Upstream {
+            base_url: "http://fake".into(),
+            api_key: "sekrit".into(),
+        }
+    }
+
+    #[test]
+    fn cross_returns_the_anthropic_body_and_the_upstream_timings() {
+        let http = CannedUpstream {
+            body: openai_with_timings(),
+            bearer_seen: RefCell::new(None),
+        };
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let wire = super::ProbeWire {
+            http: &http,
+            facade: &facade,
+            upstream: &up,
+        };
+        let art = super::cross(&wire, &anthropic_request("say hi")).expect("crossing succeeds");
+        // Timings are the server's own measurement, read before translation.
+        assert!((art.timings.predicted_per_second - 21.7).abs() < 1e-9);
+        assert_eq!(art.timings.prompt_n, 900);
+        // The artifact is the ANTHROPIC body — the bytes an agent would parse.
+        let graded: serde_json::Value =
+            serde_json::from_str(&art.anthropic_body).expect("artifact is json");
+        assert_eq!(graded["content"][0]["text"], "hello there");
+        assert!(
+            graded.get("choices").is_none(),
+            "translator was bypassed: {graded}"
+        );
+        assert_eq!(http.bearer_seen.borrow().as_deref(), Some("sekrit"));
+    }
+
+    #[test]
+    fn a_response_without_timings_fails_rather_than_inventing_a_number() {
+        let no_timings = serde_json::json!({
+            "choices": [{ "message": { "content": "hi" }, "finish_reason": "stop" }]
+        })
+        .to_string();
+        let http = CannedUpstream {
+            body: no_timings,
+            bearer_seen: RefCell::new(None),
+        };
+        let facade = ClaudeFacade::new("m");
+        let up = fake_upstream();
+        let wire = super::ProbeWire {
+            http: &http,
+            facade: &facade,
+            upstream: &up,
+        };
+        let err = super::cross(&wire, &anthropic_request("hi")).expect_err("no measurement");
+        assert!(matches!(err, ChekovError::BenchNoTimings));
+    }
+
+    #[test]
+    fn a_locally_answered_request_cannot_be_a_probe() {
+        // GET /v1/models is answered by the facade without touching the server —
+        // "measuring" it would time chekov, not the model.
+        let http = CannedUpstream {
+            body: String::new(),
+            bearer_seen: RefCell::new(None),
+        };
+        let facade = ClaudeFacade::new("m");
+        let up = fake_upstream();
+        let wire = super::ProbeWire {
+            http: &http,
+            facade: &facade,
+            upstream: &up,
+        };
+        let req = HttpRequest {
+            method: "GET".into(),
+            path: "/v1/models".into(),
+            body: vec![],
+        };
+        assert!(super::cross(&wire, &req).is_err());
     }
 
     fn props(n_ctx: u64) -> String {
