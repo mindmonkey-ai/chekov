@@ -82,6 +82,29 @@ pub const fn effective_wired_mb(raw: u64, memsize_bytes: u64) -> (u64, bool) {
     }
 }
 
+/// What a wired-limit gate should do for this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WiredVerdict {
+    /// The live limit already satisfies the requirement.
+    Satisfied,
+    /// Raising `iogpu.wired_limit_mb` can satisfy the requirement.
+    Low,
+    /// The requirement exceeds physical RAM — no sysctl can ever satisfy it.
+    Unreachable,
+}
+
+/// Pure verdict over injected numbers, so the branch is testable offline.
+#[must_use]
+pub const fn wired_verdict(required_mb: u64, actual_mb: u64, ram_mb: u64) -> WiredVerdict {
+    if actual_mb >= required_mb {
+        WiredVerdict::Satisfied
+    } else if required_mb > ram_mb {
+        WiredVerdict::Unreachable
+    } else {
+        WiredVerdict::Low
+    }
+}
+
 /// Read the live GPU wired limit (macOS), resolving the 0-means-default
 /// sentinel. `None` when unreadable — callers decide warning vs hard stop.
 #[must_use]
@@ -103,6 +126,20 @@ pub fn wired_limit_mb() -> Option<(u64, bool)> {
     Some(effective_wired_mb(raw, memsize))
 }
 
+/// Physical RAM in MB (`hw.memsize` is bytes). `None` when unreadable.
+#[must_use]
+pub fn physical_ram_mb() -> Option<u64> {
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let bytes = parse_sysctl_mb(&String::from_utf8_lossy(&out.stdout))?;
+    Some(bytes / (1024 * 1024))
+}
+
 /// True when something is already listening on `host:port`.
 #[must_use]
 pub fn port_in_use(host: &str, port: u16) -> bool {
@@ -116,6 +153,30 @@ pub fn port_in_use(host: &str, port: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{WiredVerdict, wired_verdict};
+
+    #[test]
+    fn a_requirement_above_physical_ram_is_unreachable_not_merely_low() {
+        // 32 GB Mac, chekov's built-in 200000 MB requirement: no sysctl can help.
+        assert_eq!(
+            wired_verdict(200_000, 24_576, 32_768),
+            WiredVerdict::Unreachable
+        );
+    }
+
+    #[test]
+    fn a_requirement_the_machine_could_hold_is_merely_low() {
+        // 256 GB Mac at the 75% system default: raising the sysctl would work.
+        assert_eq!(wired_verdict(200_000, 196_608, 262_144), WiredVerdict::Low);
+    }
+
+    #[test]
+    fn a_satisfied_limit_is_satisfied() {
+        assert_eq!(
+            wired_verdict(187_000, 196_608, 262_144),
+            WiredVerdict::Satisfied
+        );
+    }
     use super::{anthropic_content, chat_content, degenerate_reason, parse_sysctl_mb};
     use crate::core::config::DoctorSection;
 

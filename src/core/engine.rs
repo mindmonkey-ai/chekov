@@ -68,7 +68,13 @@ pub fn setup_steps(engine_dir: &Path) -> Vec<EngineStep> {
         .to_vec(),
         cwd: None,
     };
-    let mut build_args = ["--build", &build, "--config", "Release", "-j"]
+    // Bare `-j` reaches make with no number: unbounded jobs and no jobserver.
+    // One job per logical core is what a reader already assumes it means.
+    let jobs = format!(
+        "-j{}",
+        std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
+    );
+    let mut build_args = ["--build", &build, "--config", "Release", &jobs]
         .map(String::from)
         .to_vec();
     for target in BUILD_TARGETS {
@@ -123,6 +129,28 @@ fn execute(step: &EngineStep) -> Result<(), ChekovError> {
     }
 }
 
+/// Path of the marker recording which engine commit was last built.
+fn commit_marker(logs_dir: &Path) -> PathBuf {
+    logs_dir.join("chekov.engine")
+}
+
+/// Record the engine commit that was just built successfully.
+pub fn record_commit(logs_dir: &Path, commit: &str) -> Result<(), ChekovError> {
+    std::fs::create_dir_all(logs_dir)
+        .map_err(|e| ChekovError::io(format!("creating {}", logs_dir.display()), e))?;
+    let path = commit_marker(logs_dir);
+    std::fs::write(&path, format!("{commit}\n"))
+        .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))
+}
+
+/// The engine commit chekov last built, if one was recorded.
+#[must_use]
+pub fn recorded_commit(logs_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(commit_marker(logs_dir)).ok()?;
+    let commit = text.trim();
+    (!commit.is_empty()).then(|| commit.to_owned())
+}
+
 /// Current HEAD commit of the engine checkout, short form.
 #[must_use]
 pub fn current_commit(engine_dir: &Path) -> Option<String> {
@@ -160,6 +188,50 @@ mod tests {
         assert!(
             rendered.iter().any(|s| s.contains("llama-gguf-split")),
             "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn a_recorded_engine_commit_survives_a_round_trip() {
+        let logs = scratch("engine-marker");
+        assert_eq!(
+            super::recorded_commit(&logs),
+            None,
+            "an unrecorded engine must read as unknown, never as a guess"
+        );
+        super::record_commit(&logs, "abc1234").expect("record");
+        assert_eq!(
+            super::recorded_commit(&logs).as_deref(),
+            Some("abc1234"),
+            "the built commit must be readable back so `status` can show what \
+             is actually installed"
+        );
+    }
+
+    #[test]
+    fn the_build_bounds_its_job_count() {
+        let steps = setup_steps(&scratch("jobs").join("llama.cpp"));
+        let build = steps
+            .iter()
+            .map(super::EngineStep::render)
+            .find(|r| r.contains("--build"))
+            .expect("a build step");
+        // A bare `-j` reaches make with no number, which means unbounded jobs
+        // and a disabled jobserver — unbounded clang forks on a box holding a
+        // 158 GiB model resident is the exact pressure this tool exists to avoid.
+        assert!(
+            !build.contains("-j ") && !build.ends_with("-j"),
+            "-j must carry an explicit job count: {build}"
+        );
+        assert!(
+            build.contains(&format!(
+                "-j{}",
+                std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
+            )) || build.contains(&format!(
+                "-j {}",
+                std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
+            )),
+            "job count should track available parallelism: {build}"
         );
     }
 

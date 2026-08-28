@@ -26,7 +26,7 @@ pub struct CheckResult {
     pub status: CheckStatus,
 }
 
-/// Run all five checks against the server (via the HTTP seam — tests inject
+/// Run all five checks — four against the server (via the HTTP seam — tests inject
 /// canned responses).
 pub fn run_checks(http: &dyn HttpClient, cfg: &Config, eff: &Effective) -> Vec<CheckResult> {
     let (openai, content) = check_openai(http, cfg, eff);
@@ -39,7 +39,7 @@ pub fn run_checks(http: &dyn HttpClient, cfg: &Config, eff: &Effective) -> Vec<C
         ("Anthropic door (/v1/messages)", anthropic),
         ("think-tag retention", think),
         ("NaN canary (degenerate output)", canary),
-        ("context floor (hermes)", ctx_floor),
+        ("context floor (config, not the server)", ctx_floor),
     ]
     .map(|(name, status)| CheckResult { name, status })
     .to_vec()
@@ -136,6 +136,10 @@ fn check_canary(http: &dyn HttpClient, cfg: &Config, eff: &Effective) -> CheckSt
     }
 }
 
+/// Compares `models.toml` against `config.toml` — nothing else. It is the one
+/// row that can pass while the server is down, so its name and its detail both
+/// say what it actually compared; a bare PASS beside four FAILs reads as
+/// evidence the server is healthy, which this check cannot know.
 fn check_ctx(cfg: &Config, eff: &Effective) -> CheckStatus {
     let floor = cfg.file.limits.hermes_ctx_floor;
     if eff.entry.hermes_ok {
@@ -263,6 +267,26 @@ mod tests {
             },
         );
         (cfg, reg.effective("m").expect("registered"))
+    }
+
+    #[test]
+    fn the_config_only_check_does_not_present_itself_as_a_server_check() {
+        let (cfg, eff) = fixture(true, None);
+        // Every door is down: no canned responses at all.
+        let http = SeqHttp::new(&[]);
+        let results = run_checks(&http, &cfg, &eff);
+        let ctx = results.last().expect("the ctx row is last");
+        assert!(
+            matches!(ctx.status, CheckStatus::Pass),
+            "it compares two config files, so it still passes offline"
+        );
+        assert!(
+            ctx.name.contains("config") || ctx.name.contains("registry"),
+            "with the server down this row reports PASS beside four FAILs — its \
+             name must say it only compares configuration, or it reads as \
+             evidence the server is healthy: {:?}",
+            ctx.name
+        );
     }
 
     #[test]

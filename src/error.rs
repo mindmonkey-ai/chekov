@@ -82,6 +82,43 @@ pub enum ChekovError {
     WiredLimitLow { actual_mb: u64, required_mb: u64 },
 
     #[error(
+        "a llama-server is already running with '{running}' but this launch would \
+         advertise '{requested}' to the agent — every token would come from \
+         '{running}' at its context, not '{requested}'; \
+         run `chekov restart {requested}` to swap, or re-run without --model \
+         to use the running one"
+    )]
+    ServerModelMismatch { running: String, requested: String },
+
+    #[error(
+        "a llama-server is running but chekov has no record of which model it \
+         loaded — its identity and context cannot be verified; \
+         run `chekov stop` then `chekov run <name>`, or `chekov restart <name>`, \
+         so the session is served by a known model"
+    )]
+    ServerModelUnknown,
+
+    #[error(
+        "~/.hermes/config.yaml indents its `providers:` entries with {indent} \
+         spaces; chekov's merge only understands 2, and guessing would corrupt \
+         a config it is contractually forbidden to clobber — add the `chekov:` \
+         provider by hand, or reformat the file to 2-space indentation and retry"
+    )]
+    HermesShapeUnsupported { indent: usize },
+
+    #[error(
+        "this model requires {required_mb} MB of wired GPU memory but this Mac has \
+         only {ram_mb} MB of RAM — no sysctl can satisfy that; \
+         lower `[limits] wired_limit_mb` in {config_path} to match a model this \
+         machine can hold, or pull a smaller quant"
+    )]
+    WiredLimitUnreachable {
+        required_mb: u64,
+        ram_mb: u64,
+        config_path: std::path::PathBuf,
+    },
+
+    #[error(
         "a chekov-managed llama-server is already running (pid {pid}) — \
          `chekov stop` it or use `chekov restart [name]` to swap in one motion"
     )]
@@ -129,6 +166,13 @@ pub enum ChekovError {
 
     #[error("{action} was not confirmed — re-run and answer 'y' to proceed")]
     ConfirmationDeclined { action: String },
+
+    #[error(
+        "'{action}' needs an interactive terminal by design — chekov never \
+         pre-approves a change like this, and stdin here is not a tty so there \
+         is no answer to read; run it from a terminal"
+    )]
+    ConfirmationRequiresTerminal { action: String },
 
     #[error(
         "refusing to write hermes config: {reason} — re-run \
@@ -210,6 +254,26 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("chekov pull"), "no remediation in: {msg}");
         assert!(msg.contains("/x/shard.gguf"), "no path in: {msg}");
+    }
+
+    #[test]
+    fn an_unreachable_wired_limit_names_the_config_file_not_an_impossible_sysctl() {
+        let msg = ChekovError::WiredLimitUnreachable {
+            required_mb: 200_000,
+            ram_mb: 32_768,
+            config_path: "/r/config.toml".into(),
+        }
+        .to_string();
+        assert!(
+            !msg.contains("sudo sysctl"),
+            "must not hand the user a sudo command the machine can never satisfy: {msg}"
+        );
+        assert!(msg.contains("/r/config.toml"), "no config path in: {msg}");
+        assert!(msg.contains("wired_limit_mb"), "no tunable named in: {msg}");
+        assert!(
+            msg.contains("32768") || msg.contains("32,768"),
+            "no RAM in: {msg}"
+        );
     }
 
     #[test]

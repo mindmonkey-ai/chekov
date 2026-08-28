@@ -1,6 +1,8 @@
-//! Hugging Face hub access behind a mockable seam (§8.2): all metadata goes
-//! through `HttpClient`, so tests inject fakes; only the shard download itself
-//! uses `hf-hub` (network, untested by design).
+//! Hugging Face hub access behind a mockable seam (§8.2).
+//!
+//! All metadata goes through `HttpClient`, so tests inject fakes. Only the
+//! shard download itself touches the network, over blocking `ureq`, and is
+//! untested by design.
 
 use serde::Deserialize;
 
@@ -273,6 +275,9 @@ fn verdict_for(bytes: Option<u64>, wired_mb: Option<u64>) -> String {
 /// ambiguous spec like `Q5_K_XL` can never select `UD-Q5_K_XL` files.
 fn derived_quant(path: &str) -> Option<String> {
     let stem = path.strip_suffix(".gguf")?;
+    if !is_weights(path) {
+        return None;
+    }
     if let Some((dir, _)) = path.split_once('/') {
         return quant_like(dir).then(|| dir.to_owned());
     }
@@ -282,6 +287,23 @@ fn derived_quant(path: &str) -> Option<String> {
         .map(|(i, _)| &stem[i + 1..])
         .find(|cand| quant_like(cand))
         .map(ToOwned::to_owned)
+}
+
+/// True for a file that is actually model weights.
+///
+/// A vision projector is named `mmproj-F16.gguf`, so the tag heuristic below
+/// reads `F16` out of it and offers a 1 GiB "quant" of a 100 GiB model — the
+/// cheapest-looking row in the table, and not a runnable model at all.
+/// `docs/HOWTOS.md` already tells readers `mmproj` "is **not** the model";
+/// this teaches the code the same thing.
+fn is_weights(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let dir = path.split('/').next().unwrap_or("");
+    // Vision projectors, calibration data, multi-token-prediction layers and
+    // draft models all ship as .gguf beside real quants. Summing them inflates
+    // a quant's size; offering them as one hands the user a non-model.
+    let junk_prefix = ["mmproj", "imatrix", "mtp-", "dspark-"];
+    !junk_prefix.iter().any(|p| name.starts_with(p)) && !name.contains("-mmproj-") && dir != "MTP"
 }
 
 /// Heuristic for quant-tag tokens: `UD-Q5_K_XL`, `IQ4_XS`, `Q8_0`, `BF16`…
@@ -346,22 +368,49 @@ pub fn link_verified(
     Ok(true)
 }
 
+/// Stream one file to `dest`, via a `.part` sibling so an interrupted transfer
+/// never leaves a short file that `file_matches` would have to catch later.
+///
+/// Network path — exercised only by real pulls, never by tests (prompt §2.4).
+fn fetch_to(url: &str, dest: &std::path::Path) -> Result<(), ChekovError> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ChekovError::io(format!("creating {}", parent.display()), e))?;
+    }
+    let res = ureq::get(url)
+        .call()
+        .map_err(|e| ChekovError::io(format!("requesting {url}"), std::io::Error::other(e)))?;
+    let part = dest.with_extension("part");
+    let mut out = std::fs::File::create(&part)
+        .map_err(|e| ChekovError::io(format!("creating {}", part.display()), e))?;
+    std::io::copy(&mut res.into_body().into_reader(), &mut out)
+        .map_err(|e| ChekovError::io(format!("writing {}", part.display()), e))?;
+    out.sync_all()
+        .map_err(|e| ChekovError::io(format!("flushing {}", part.display()), e))?;
+    std::fs::rename(&part, dest)
+        .map_err(|e| ChekovError::io(format!("renaming {} into place", part.display()), e))
+}
+
+/// The revision-pinned download URL for one file.
+///
+/// Xet-backed repos redirect to a CAS bridge that serves the bytes over
+/// ordinary HTTPS with a normal content-length, so a plain GET works there too
+/// — verified against unsloth/MiniMax-M2.7-GGUF, which is Xet-backed.
+fn resolve_url(repo: &str, revision: &str, path: &str) -> String {
+    format!("https://huggingface.co/{repo}/resolve/{revision}/{path}")
+}
+
 /// Download every planned file into the model directory, revision-pinned.
 ///
 /// Network path — exercised only by real pulls, never by tests (prompt §2.4).
-/// hf-hub's blocking wrapper runs its own internal runtime thread; chekov
-/// itself stays synchronous.
 pub fn download_plan(spec: &DownloadSpec<'_>, plan: &PullPlan) -> Result<(), ChekovError> {
     let failed = |reason: String| ChekovError::DownloadFailed {
         repo: spec.repo.to_owned(),
         reason,
     };
-    let (owner, name) = spec
-        .repo
-        .split_once('/')
-        .ok_or_else(|| failed("repo id is missing the org/ prefix".to_owned()))?;
-    let client = hf_hub::HFClientSync::new().map_err(|e| failed(e.to_string()))?;
-    let repo = client.model(owner, name);
+    if !spec.repo.contains('/') {
+        return Err(failed("repo id is missing the org/ prefix".to_owned()));
+    }
     for file in &plan.files {
         let target = spec.dest.join(&file.path);
         if file_matches(&target, file.size) {
@@ -376,11 +425,7 @@ pub fn download_plan(spec: &DownloadSpec<'_>, plan: &PullPlan) -> Result<(), Che
             continue;
         }
         println!("downloading {} …", file.path);
-        repo.download_file()
-            .filename(file.path.clone())
-            .local_dir(spec.dest.to_path_buf())
-            .revision(spec.revision.to_owned())
-            .send()
+        fetch_to(&resolve_url(spec.repo, spec.revision, &file.path), &target)
             .map_err(|e| failed(format!("{}: {e}", file.path)))?;
     }
     Ok(())
@@ -431,6 +476,24 @@ fn strip_shard_suffix(stem: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use super::resolve_url;
+
+    #[test]
+    fn a_download_url_pins_the_revision_not_main() {
+        let url = resolve_url(
+            "unsloth/MiniMax-M2.7-GGUF",
+            "d2a05ccf69491b03db0cc40b335aec14bdaf7198",
+            "UD-Q5_K_XL/MiniMax-M2.7-UD-Q5_K_XL-00001-of-00005.gguf",
+        );
+        assert_eq!(
+            url,
+            "https://huggingface.co/unsloth/MiniMax-M2.7-GGUF/resolve/\
+             d2a05ccf69491b03db0cc40b335aec14bdaf7198/\
+             UD-Q5_K_XL/MiniMax-M2.7-UD-Q5_K_XL-00001-of-00005.gguf"
+                .replace(' ', ""),
+            "a pull must fetch the pinned revision, never whatever main is now"
+        );
+    }
     use super::{
         HttpClient, JsonRequest, PullTarget, QuantOption, RepoSnapshot, available_quants,
         fetch_snapshot, plan_pull, quant_options, render_quant_table,
@@ -584,6 +647,53 @@ mod tests {
         assert!(quants.contains(&"UD-Q5_K_XL".to_owned()), "{quants:?}");
         assert!(quants.contains(&"UD-Q4_K_XL".to_owned()), "{quants:?}");
         assert!(quants.contains(&"Q8_0".to_owned()), "{quants:?}");
+    }
+
+    #[test]
+    fn calibration_and_draft_artifacts_are_not_weights() {
+        // Every one of these lives beside real quants in popular repos and
+        // would otherwise be summed into a quant's size, or offered as one.
+        for junk in [
+            "imatrix_unsloth.gguf",
+            "imatrix.gguf",
+            "MTP/GLM-5.3-Flash-MTP-Q8_0.gguf",
+            "mtp-Q4_K_M.gguf",
+            "dspark-draft-Q4_0.gguf",
+            "mmproj-F16.gguf",
+        ] {
+            assert_eq!(
+                super::derived_quant(junk),
+                None,
+                "{junk} is not model weights"
+            );
+        }
+        // …while a real shard in a quant folder still resolves.
+        assert_eq!(
+            super::derived_quant("UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL-00001-of-00006.gguf")
+                .as_deref(),
+            Some("UD-Q4_K_XL")
+        );
+    }
+
+    #[test]
+    fn a_vision_projector_is_not_offered_as_a_quant() {
+        // Verified live against unsloth/GLM-5.3-Flash-GGUF, whose real quants
+        // are 86-186 GiB: `mmproj-F16.gguf` was listed as an `F16` of 1.1 GiB
+        // and sorted to the TOP of the fit table, so it read as the cheapest
+        // option. Pulling it registered a projector as a runnable model.
+        assert_eq!(super::derived_quant("mmproj-F16.gguf"), None);
+        assert_eq!(super::derived_quant("mmproj-BF16.gguf"), None);
+        assert_eq!(super::derived_quant("GLM-5.3-Flash-mmproj-F16.gguf"), None);
+        // Real weights must still resolve, including the genuine BF16 folder
+        // whose total the projector was being summed into.
+        assert_eq!(
+            super::derived_quant("Qwen3.8-27B-UD-Q4_K_M.gguf").as_deref(),
+            Some("UD-Q4_K_M")
+        );
+        assert_eq!(
+            super::derived_quant("BF16/Qwen3.8-27B-BF16-00001-of-00002.gguf").as_deref(),
+            Some("BF16")
+        );
     }
 
     #[test]

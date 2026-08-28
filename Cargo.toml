@@ -40,7 +40,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 # serde_json is not in the prompt's crate list; justified here (§2.1): the
 # HF hub API and llama-server /v1 endpoints speak JSON, and hand-rolling a
-# JSON parser would violate §E.5. It is already in the tree via hf-hub.
+# JSON parser would violate §E.5.
 serde_json = "1"
 # §C.3: typed errors with remediation text in every Display message.
 thiserror = "2"
@@ -48,9 +48,6 @@ thiserror = "2"
 anyhow = "1"
 # Blocking HTTP — this tool has no need for an async runtime (prompt §2.1).
 ureq = "3.4"
-# Revision-aware Hugging Face downloads. default-features off to keep only
-# the blocking backend (no tokio); rustls for TLS per §C.11.
-hf-hub = { version = "1", default-features = false, features = ["blocking", "rustls-tls"] }
 # Home-directory resolution for the default CHEKOV root.
 directories = "6"
 # Signals + pid liveness for server lifecycle (SIGTERM/SIGKILL escalation).

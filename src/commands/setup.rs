@@ -22,6 +22,13 @@ impl Command for SetupCmd {
             std::fs::create_dir_all(&dir)
                 .map_err(|e| ChekovError::io(format!("creating {}", dir.display()), e))?;
         }
+        // Record what was actually built, so `status` can name the engine and a
+        // broken upgrade has a commit to go back to.
+        if !self.dry_run
+            && let Some(commit) = engine::current_commit(&cfg.engine_dir())
+        {
+            engine::record_commit(&cfg.logs_dir(), &commit)?;
+        }
         let required = cfg.file.limits.wired_limit_mb;
         let actual = checks::wired_limit_mb();
         if self.dry_run {

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::error::ChekovError;
 
 /// On-disk `config.toml` shape. Missing file → all defaults.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct FileConfig {
     pub server: ServerSection,
@@ -17,7 +17,7 @@ pub struct FileConfig {
     pub doctor: DoctorSection,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ServerSection {
     pub host: String,
@@ -35,7 +35,7 @@ impl Default for ServerSection {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LimitsSection {
     /// Minimum `iogpu.wired_limit_mb` required before `run` will start.
@@ -47,13 +47,13 @@ pub struct LimitsSection {
 impl Default for LimitsSection {
     fn default() -> Self {
         Self {
-            wired_limit_mb: 200_000,
+            wired_limit_mb: 187_000,
             hermes_ctx_floor: 65_536,
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DoctorSection {
     /// Token budget for the NaN-canary generation.
@@ -154,7 +154,42 @@ pub fn resolve_root(env_home: Option<&str>, user_home: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Config, resolve_root};
+    use super::{Config, LimitsSection, resolve_root};
+    use crate::core::checks::{WiredVerdict, effective_wired_mb, wired_verdict};
+
+    /// The README's config block is the only place a user learns these values.
+    /// Nothing previously stopped it drifting from the code — which is exactly
+    /// how it came to document a `wired_limit_mb` the code did not use.
+    #[test]
+    fn the_readme_config_block_matches_the_shipped_defaults() {
+        let readme = include_str!("../../README.md");
+        let fence = readme
+            .split("```toml")
+            .skip(1)
+            .filter_map(|rest| rest.split("```").next())
+            .find(|f| f.contains("wired_limit_mb"))
+            .expect("README documents the config.toml shape");
+        let documented: super::FileConfig =
+            toml::from_str(fence).expect("the documented config must parse as a real FileConfig");
+        assert_eq!(
+            documented,
+            super::FileConfig::default(),
+            "README's config block has drifted from the code defaults"
+        );
+    }
+
+    #[test]
+    fn the_shipped_default_is_satisfiable_on_a_stock_mac() {
+        // A 256 GB Mac with `iogpu.wired_limit_mb` unset: macOS's own default
+        // is 75% of RAM. A fresh `cargo install` must not refuse there.
+        let (actual_mb, is_system_default) = effective_wired_mb(0, 274_877_906_944);
+        assert!(is_system_default, "0 means the macOS default, not zero");
+        assert_eq!(
+            wired_verdict(LimitsSection::default().wired_limit_mb, actual_mb, 262_144),
+            WiredVerdict::Satisfied,
+            "the built-in requirement must be met by a stock machine at {actual_mb} MB"
+        );
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("chekov-test-{name}"));

@@ -11,7 +11,7 @@ abstracted behind a registry so adding one is a single `pull`, ollama-style.
 Integrates with zsh, Hermes Agent, and Claude Code.
 
 - Package name: `chekov-mac` (crates.io `chekov` is taken); binary: `chekov`
-- No async runtime; blocking `ureq` + `hf-hub` for downloads
+- No async runtime; blocking `ureq` for the HF API, downloads, and llama-server
 - Every failure is loud and names its remediation command; nothing degrades
   silently (no auto-shrunk ctx, no model fallback, no skipped checks)
 
@@ -100,7 +100,11 @@ The registry stores the absolute path; everything else works unchanged.
 | `use <name>` | Set the active model. Never auto-restarts — prints the restart hint. |
 | `rm <name> [--yes]` | Remove a model and its files. Confirmation required; refuses the active or currently running model. |
 | `show [name]` | Fully resolved server invocation + license provenance — zero mystery about what will run. |
-| `doctor` | Five checks (below). Skipped is reported as SKIP, never PASS. |
+| `doctor` | Five checks (below) — four probe the server, one compares configuration. Skipped is reported as SKIP, never PASS. |
+| `capability recommend [--ctx N] [--role agent\|chat] [--refresh] [--limit N]` | Ranks the registered models for this machine. Gates first — anything that exceeds the budget, or cannot be sized, is listed with its reason rather than dropped. Then sorts: under `--role agent` a model whose chat template has no dedicated llama.cpp tool parser is **downranked with a note, not refused**; under `--role chat` the tool parser is ignored. `--refresh` is the **only** networked path — without it chekov ranks registered models only and never reaches out. |
+| `capability explain [name] [--ctx N]` | Read one model's GGUF header and print its fit arithmetic line by line: block count, the MTP/interval layer ladder, padded context, cache type, KV bytes, weights on disk. Local file read; no network. |
+| `capability graph [--ctx N]...` | Grid of registered models against context lengths. Each cell is two characters: the fit verdict, then whether its inputs were measured or predicted. A predicted GPU ceiling is announced in the header and changes the legend, because every verdict below it is then measured against a guess. |
+| `capability [--json]` | What this Mac is and what it can hold: chip, GPU cores, performance threads, macOS, and the GPU budget **with its provenance**. The budget is read from the engine (`llama-server --list-devices`) when it is built, from `iogpu.wired_limit_mb` when set, and only otherwise from the 75%-of-RAM formula — which measures 31457 MiB low on a 256 GiB M3 Ultra, so the source is always printed. |
 | `setup [--dry-run]` | Engine clone/pull + cmake Metal build; creates `models/`/`logs/`; wired-limit verification (see Installation). Idempotent. |
 | `update --engine\|--model\|--all [--dry-run]` | Engine: git pull + rebuild, reports old→new commit. Model: re-resolve the active repo; new revisions land in a new `@rev` dir, license is diffed and **any change stops for explicit confirmation (STOP-4)** before an atomic registry repoint. Old revisions are never auto-deleted. |
 | `integrate hermes [--yes]` | Surgical merge into `~/.hermes/config.yaml` (details below). |
@@ -150,9 +154,15 @@ chekov runs any GGUF repo on Hugging Face. A workable way to choose:
    `UD-Q5_K_XL`, `Q8_0`, …) with a file size. The tag is what goes after the
    colon in the pull spec.
 3. **Size it against your memory.** Rule of thumb: `weights + KV cache + ~3 GiB`
-   must fit under `[limits] wired_limit_mb` (default: 75% of RAM). KV cache at
-   q8_0 is roughly `ctx × layers × kv_heads × head_dim × 2 bytes`; for a
-   100k context on a mid-size model budget 10–20 GiB. Pick the largest quant
+   must fit under `[limits] wired_limit_mb` (default: 187000 MB). KV cache at
+   q8_0 is roughly `ctx × cached_layers × kv_heads × head_dim × 2 × 1.0625
+   bytes` — q8_0 is 34 bytes per 32 elements, not one byte, and
+   `cached_layers` is **not** the model's layer count on modern architectures:
+   MoE and sliding-window models cache only a fraction of their blocks, so
+   using `block_count` overestimates by 4-5×. When in doubt, launch once and
+   read `llama_kv_cache: size = …` from the server log — measured beats
+   predicted. For a 100k context on a mid-size model budget 10–20 GiB. Pick the
+   largest quant
    that leaves that headroom — `chekov run` refuses to start rather than let
    macOS page a model, so an over-ambitious pick fails loudly, not slowly.
 4. **Note the vendor's sampling advice.** Model cards usually list
@@ -194,6 +204,13 @@ extra_flags = ["--reasoning-format", "none",   # keep <think> blocks in the outp
 ```
 
 `extra_flags` are appended after `[defaults].flags`, never replacing them.
+
+`-np 1` pins llama-server to a single KV slot. Without it, `--parallel` is auto
+and `--ctx-size` becomes a pool shared across slots, so concurrent agent
+requests exhaust it mid-generation with "Context size has been exceeded" — and
+`chekov status` still reports the full number. Keep the pin unless you know you
+want the shared pool; the trade is that background agent traffic serialises
+behind the foreground turn.
 Then activate and verify:
 
 ```sh
@@ -357,7 +374,8 @@ active = "minimax-m2.7"          # top-level keys must precede [tables]
 [defaults]
 ctx_size = 98304
 flags = ["--jinja", "--flash-attn", "on",
-         "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"]
+         "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
+         "-np", "1"]        # one KV slot: see below
 
 [models."minimax-m2.7"]
 repo = "unsloth/MiniMax-M2.7-GGUF"
@@ -388,7 +406,7 @@ port = 8080               # default
 api_key = "chekov-local"  # default; passed to llama-server --api-key
 
 [limits]
-wired_limit_mb = 180000   # required GPU wired memory before `run` proceeds
+wired_limit_mb = 187000   # required GPU wired memory before `run` proceeds
 hermes_ctx_floor = 65536  # hard floor when a model is hermes_ok
 
 [doctor]

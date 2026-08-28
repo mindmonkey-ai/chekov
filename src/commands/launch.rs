@@ -188,7 +188,10 @@ impl LaunchCmd {
     /// MCP servers, hooks, plugins, and permissions forward — and mirroring
     /// local-directory plugins so `enabledPlugins` resolves in the session.
     fn write_settings(&self, ctx: &Ctx, session: &Session) -> Result<(), ChekovError> {
-        std::fs::create_dir_all(&session.dir)
+        // 0700: this directory holds settings.json and .claude.json, both of
+        // which carry the server API key.
+        std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+            .create(&session.dir)
             .map_err(|e| ChekovError::io(format!("creating {}", session.dir.display()), e))?;
         let source = self.agent.read_user_settings();
         let text = render_settings_json(
@@ -201,8 +204,7 @@ impl LaunchCmd {
             source.as_ref(),
         );
         let path = session.dir.join("settings.json");
-        std::fs::write(&path, text)
-            .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))?;
+        write_private(&path, &text)?;
         Self::inject_claude_json(session, source.as_ref())?;
         sync_local_plugins(&session.dir, source.as_ref())
     }
@@ -227,8 +229,7 @@ impl LaunchCmd {
         let mut text = serde_json::to_string_pretty(&injected)
             .map_err(|e| ChekovError::io(format!("serializing {}", path.display()), e.into()))?;
         text.push('\n');
-        std::fs::write(&path, text)
-            .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))
+        write_private(&path, &text)
     }
 
     /// Serve the proxy in a scoped thread while the agent runs as a child.
@@ -267,8 +268,12 @@ impl LaunchCmd {
 /// Start the model server when it is not already running.
 fn ensure_server_up(ctx: &Ctx, eff: &Effective) -> Result<(), ChekovError> {
     if server::live_pid(&ctx.config).is_some() {
-        return Ok(());
+        return verify_serves(ctx, &eff.name);
     }
+    // Same four refusal gates `run` applies — launch must not be a back door
+    // around them (§C.2). The ServerAlreadyRunning arm is unreachable here:
+    // the live_pid check above already returned.
+    super::run::preflight(ctx, eff)?;
     eprintln!(
         "chekov launch: local server not running — starting '{}'",
         eff.name
@@ -279,11 +284,162 @@ fn ensure_server_up(ctx: &Ctx, eff: &Effective) -> Result<(), ChekovError> {
     Ok(())
 }
 
+/// Write a file that carries the server API key. Created 0600 rather than
+/// chmod'd afterwards — a chmod leaves a window in which any local process can
+/// read the credential.
+fn write_private(path: &Path, text: &str) -> Result<(), ChekovError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))?;
+    file.write_all(text.as_bytes())
+        .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))
+}
+
+/// A live server must be serving the model this launch is about to advertise.
+/// Adopting an unverified upstream would make the agent's declared model and
+/// context window a fiction (§C.2 — nothing degrades silently).
+fn verify_serves(ctx: &Ctx, requested: &str) -> Result<(), ChekovError> {
+    match server::read_run_state(&ctx.config) {
+        Some(running) if running == requested => Ok(()),
+        Some(running) => Err(ChekovError::ServerModelMismatch {
+            running,
+            requested: requested.to_owned(),
+        }),
+        None => Err(ChekovError::ServerModelUnknown),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{Banner, render_banner, render_summary};
+    use super::{Banner, ensure_server_up, render_banner, render_summary};
+    use crate::commands::Ctx;
+    use crate::core::config::Config;
+    use crate::core::hub::{HttpClient, JsonRequest};
+    use crate::core::registry::{Effective, ModelEntry};
+    use crate::error::ChekovError;
+
+    struct NoHttp;
+
+    impl HttpClient for NoHttp {
+        fn get(&self, _url: &str) -> Result<String, ChekovError> {
+            unreachable!("launch preflight never fetches")
+        }
+        fn post_json(&self, _req: &JsonRequest) -> Result<String, ChekovError> {
+            unreachable!("launch preflight never posts")
+        }
+    }
+
+    fn scratch_ctx(tag: &str) -> Ctx {
+        let root = std::env::temp_dir().join(tag);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("scratch");
+        Ctx {
+            config: Config::load(&root).expect("defaults"),
+            http: Box::new(NoHttp),
+        }
+    }
+
+    fn any_effective() -> Effective {
+        Effective {
+            name: "test-model".to_owned(),
+            ctx_size: 4096,
+            flags: Vec::new(),
+            entry: ModelEntry {
+                repo: "org/repo-GGUF".to_owned(),
+                quant: "Q4_K_M".to_owned(),
+                revision: "0123456789ab".to_owned(),
+                path: "models/test-model@0123456789ab".to_owned(),
+                first_shard: "Q4_K_M/test-model-Q4_K_M.gguf".to_owned(),
+                hermes_ok: false,
+                ctx_size: None,
+                extra_flags: Vec::new(),
+            },
+        }
+    }
+
+    /// Put a live server in front of `ensure_server_up`: a pidfile naming this
+    /// test process (so `process_alive` reports true) and a run-state marker.
+    fn with_running_server(ctx: &Ctx, running_model: Option<&str>) {
+        let logs = ctx.config.logs_dir();
+        std::fs::create_dir_all(&logs).expect("logs dir");
+        std::fs::write(ctx.config.pidfile(), format!("{}\n", std::process::id())).expect("pidfile");
+        if let Some(name) = running_model {
+            std::fs::write(logs.join("chekov.model"), format!("{name}\n")).expect("run state");
+        }
+    }
+
+    #[test]
+    fn files_carrying_the_api_key_are_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join("chekov-test-launch-perms");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("scratch");
+        let path = root.join("settings.json");
+        super::write_private(&path, "{\"ANTHROPIC_AUTH_TOKEN\":\"secret\"}\n").expect("write");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "settings.json carries the server api key and is written into a \
+             shared temp-ish tree; any local process could read it at {mode:o}"
+        );
+    }
+
+    #[test]
+    fn adopting_a_server_serving_a_different_model_is_refused() {
+        let ctx = scratch_ctx("chekov-test-launch-mismatch");
+        with_running_server(&ctx, Some("other-model"));
+        let err = ensure_server_up(&ctx, &any_effective())
+            .expect_err("launch must not advertise a model the server is not serving");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("other-model"),
+            "must name what is running: {msg}"
+        );
+        assert!(
+            msg.contains("test-model"),
+            "must name what was requested: {msg}"
+        );
+        assert!(
+            msg.contains("chekov restart"),
+            "every refusal names its remediation command: {msg}"
+        );
+    }
+
+    #[test]
+    fn adopting_a_server_of_unknown_identity_is_refused() {
+        let ctx = scratch_ctx("chekov-test-launch-unknown");
+        with_running_server(&ctx, None);
+        let err = ensure_server_up(&ctx, &any_effective())
+            .expect_err("an upstream chekov cannot identify must not be adopted silently");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no record") || msg.contains("cannot be verified"),
+            "must state that the running model is unknown: {msg}"
+        );
+        assert!(
+            msg.contains("chekov restart") || msg.contains("chekov stop"),
+            "every refusal names its remediation command: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_server_up_refuses_with_a_named_error_when_the_engine_is_not_built() {
+        let ctx = scratch_ctx("chekov-test-launch-preflight");
+        let err = ensure_server_up(&ctx, &any_effective())
+            .expect_err("launch must refuse when llama-server is missing");
+        assert!(
+            matches!(err, ChekovError::SetupIncomplete { .. }),
+            "launch must fail the same refusal gate `run` does, got: {err:?}"
+        );
+    }
 
     #[test]
     fn summary_names_the_config_dir_mechanism() {

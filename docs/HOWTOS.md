@@ -97,9 +97,11 @@ A large language model (LLM) is a neural network. Its "size" is measured in
 
 ### Parameters → file size (the 4-bit rule of thumb)
 
-At 4 bits per parameter, a model takes roughly **0.5 GB per billion
-parameters**. This is the single most useful mental model for predicting file
-sizes:
+A 4-bit quant costs roughly **0.6 GB per billion parameters** on disk — not
+0.5. The nominal bit-width is never what you get: llama.cpp promotes some
+tensors (notably `output.weight`, and the token embeddings) to a larger type,
+so a "4-bit" Q4_K_M measures about 4.8 bits per weight in practice. The table
+below is built from realised sizes, so trust it over the nominal arithmetic:
 
 | Parameters | FP16 (~16-bit) | Q8_0 (~8-bit) | Q4_K_M (~4-bit) |
 |-----------:|--------------:|--------------:|----------------:|
@@ -111,6 +113,11 @@ sizes:
 | 32B        | ~64 GB        | ~34 GB        | ~19 GB          |
 | 70B        | ~140 GB       | ~75 GB        | ~42 GB          |
 | 405B       | ~810 GB       | ~430 GB       | ~240 GB         |
+
+**These are weights only.** The KV cache and compute buffers come on top, and
+both grow with context — `chekov`'s own quant table says the same thing in its
+header, because a weights-only number is the most common way to plan a download
+that then refuses to start.
 
 **Why this matters:** your hardware limits which models you can run. A model
 must fit in VRAM (+ some RAM) to run at a good speed. This guide's rest is

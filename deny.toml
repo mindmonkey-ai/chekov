@@ -2,6 +2,16 @@
 # Not wired into `make lint` — the bootstrap prompt (§6) fixes lint to
 # fmt + clippy; CI adds deny/audit per §C.13.
 
+# chekov is macOS / Apple Silicon only (AGENTS.md), so evaluate the graph for
+# the target it actually ships for. Without this, Windows-only crates that are
+# never compiled still count as duplicates and force skips that weaken the gate
+# for every platform.
+[graph]
+targets = [
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+]
+
 [advisories]
 yanked = "deny"
 
@@ -24,18 +34,12 @@ allow = [
 
 [bans]
 multiple-versions = "deny"
-# Explicit skips only (crate + reason) — never silently. Every entry below is
-# a transitive duplicate inside the hf-hub → reqwest/tokio/windows tree that
-# this crate cannot unify from its own manifest; revisit on each hf-hub bump.
-skip = [
-    { name = "base64" },
-    { name = "cfg-if" },
-    { name = "core-foundation" },
-    { name = "getrandom" },
-    { name = "syn" },
-    { name = "wasi" },
-    { name = "windows-sys" },
-]
+# No skips. Every entry here used to be a transitive duplicate forced by the
+# hf-hub → reqwest/tokio tree; with that gone the tree unifies on its own.
+# Each was also unversioned, which disarmed duplicate detection for that crate
+# at every version, forever — so an empty list is the stronger gate as well as
+# the honest one.
+skip = []
 
 [sources]
 unknown-registry = "deny"

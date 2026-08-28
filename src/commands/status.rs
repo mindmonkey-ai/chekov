@@ -41,8 +41,30 @@ fn model_facts(reg: &crate::core::registry::Registry, model: &str) -> (String, S
     (revision, ctx_size)
 }
 
+/// The GPU budget, resolved through the same function `chekov capability`
+/// prints so the gate and the report can never disagree.
+fn wired_row(ctx: &Ctx, required: u64) -> String {
+    crate::core::machine::live_gpu_budget(&ctx.config.engine_dir()).map_or_else(
+        || format!("unreadable (need {required} MB)"),
+        |b| {
+            format!(
+                "{} MiB ({}) (need {required} MB)",
+                b.value,
+                b.provenance.label()
+            )
+        },
+    )
+}
+
+/// The engine commit chekov last built. Never guessed: an unrecorded engine
+/// says so and names the command that records one.
+fn engine_row(ctx: &Ctx) -> String {
+    crate::core::engine::recorded_commit(&ctx.config.logs_dir())
+        .unwrap_or_else(|| "unrecorded — run `chekov setup` or `chekov update --engine`".to_owned())
+}
+
 fn status_rows(ctx: &Ctx) -> Result<Vec<Vec<String>>, ChekovError> {
-    use crate::core::{checks, server};
+    use crate::core::server;
     let reg = ctx.registry()?;
     let pid = server::live_pid(&ctx.config);
     let model = server::read_run_state(&ctx.config)
@@ -50,13 +72,7 @@ fn status_rows(ctx: &Ctx) -> Result<Vec<Vec<String>>, ChekovError> {
         .unwrap_or_else(|| "none".to_owned());
     let (revision, ctx_size) = model_facts(&reg, &model);
     let required = ctx.config.file.limits.wired_limit_mb;
-    let wired = checks::wired_limit_mb().map_or_else(
-        || format!("unreadable (need {required} MB)"),
-        |(actual, is_default)| {
-            let origin = if is_default { " (system default)" } else { "" };
-            format!("{actual} MB{origin} (need {required} MB)")
-        },
-    );
+    let wired = wired_row(ctx, required);
     Ok(vec![
         vec![
             "running".into(),
@@ -75,6 +91,7 @@ fn status_rows(ctx: &Ctx) -> Result<Vec<Vec<String>>, ChekovError> {
             },
         ],
         vec!["wired limit".into(), wired],
+        vec!["engine".into(), engine_row(ctx)],
         vec![
             "log tail".into(),
             ctx.config.server_log().display().to_string(),

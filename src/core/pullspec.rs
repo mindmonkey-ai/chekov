@@ -10,6 +10,12 @@ const HF_URL_PREFIX: &str = "https://huggingface.co/";
 pub struct RepoId(String);
 
 impl RepoId {
+    /// A validated `org/name`, for callers that have a bare repo id and no
+    /// quant — discovery, which never carries a pull spec.
+    pub fn try_new(raw: &str) -> Result<Self, ChekovError> {
+        Self::parse(raw, raw)
+    }
+
     fn parse(raw: &str, spec: &str) -> Result<Self, ChekovError> {
         let invalid = || ChekovError::InvalidPullSpec {
             spec: spec.to_owned(),

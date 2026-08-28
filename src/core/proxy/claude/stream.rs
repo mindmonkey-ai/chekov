@@ -88,6 +88,34 @@ impl ClaudeStream {
     }
 
     /// Close the open block, if any.
+    /// An upstream failure arriving mid-stream. Close whatever block is open,
+    /// emit a real `error` event, and mark the stream finished so `finish()`
+    /// cannot paper a clean `end_turn` envelope over a turn that failed
+    /// (§C.2 — nothing degrades silently).
+    fn abort(&mut self, err: &Value) -> Vec<SseEvent> {
+        let mut events = self.start(None);
+        events.extend(self.close_block());
+        self.finished = true;
+        let upstream = err
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("llama-server failed mid-stream");
+        events.push(SseEvent::new(
+            "error",
+            json!({
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": format!(
+                        "{upstream} — run `chekov status`, then check logs/llama-server.log"
+                    ),
+                },
+            })
+            .to_string(),
+        ));
+        events
+    }
+
     fn close_block(&mut self) -> Option<SseEvent> {
         if self.open == Open::None {
             return None;
@@ -235,14 +263,30 @@ impl ClaudeStream {
     }
 }
 
+/// Parse one upstream frame, logging (never swallowing silently) a payload
+/// that is not JSON. A malformed frame is still not an error event — only an
+/// upstream `error` object is.
+fn parse_frame(data: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(data).ok().or_else(|| {
+        eprintln!(
+            "chekov proxy: unparseable upstream frame: {}",
+            data.chars().take(120).collect::<String>()
+        );
+        None
+    })
+}
+
 impl StreamTranslator for ClaudeStream {
     fn on_chunk(&mut self, data: &str) -> Vec<SseEvent> {
         if data.trim() == "[DONE]" {
             return Vec::new();
         }
-        let Ok(chunk) = serde_json::from_str::<Value>(data) else {
+        let Some(chunk) = parse_frame(data) else {
             return Vec::new();
         };
+        if let Some(err) = chunk.get("error") {
+            return self.abort(err);
+        }
         let mut events = self.start(chunk.get("id").and_then(Value::as_str));
         self.absorb_terminal(&chunk);
         let delta = chunk
@@ -271,6 +315,10 @@ impl StreamTranslator for ClaudeStream {
             events.extend(self.on_tool_calls(calls));
         }
         events
+    }
+
+    fn on_upstream_error(&mut self, reason: &str) -> Vec<SseEvent> {
+        self.abort(&json!({ "type": "api_error", "message": reason }))
     }
 
     fn finish(&mut self) -> Vec<SseEvent> {
@@ -328,6 +376,77 @@ mod tests {
 
     fn text_chunk(text: &str) -> Value {
         json!({ "id": "c1", "choices": [{ "delta": { "content": text } }] })
+    }
+
+    /// llama-server signals a mid-stream failure (context overflow being the
+    /// daily one) as a `data:` frame carrying an `error` object.
+    fn error_chunk(message: &str) -> Value {
+        json!({ "error": { "type": "server_error", "message": message } })
+    }
+
+    #[test]
+    fn a_dropped_connection_reports_a_failed_turn_not_a_clean_one() {
+        let mut stream = ClaudeStream::new("local");
+        let mut events = stream.on_chunk(&text_chunk("partial").to_string());
+        events.extend(stream.on_upstream_error("reading upstream SSE: connection reset"));
+        events.extend(stream.finish());
+        let names: Vec<_> = events.iter().map(|e| e.event.clone()).collect();
+        assert!(
+            names.iter().any(|n| n == "error"),
+            "a mid-stream disconnect must reach the client as an error: {names:?}"
+        );
+        let payloads: Vec<Value> = events
+            .iter()
+            .map(|e| serde_json::from_str(&e.data).expect("event data is json"))
+            .collect();
+        assert!(
+            !payloads.iter().any(|p| p
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(Value::as_str)
+                == Some("end_turn")),
+            "a dropped connection must never be reported as a clean end_turn: {names:?}"
+        );
+    }
+
+    #[test]
+    fn an_upstream_error_frame_becomes_an_error_event() {
+        let (names, payloads) = run(&[
+            text_chunk("partial"),
+            error_chunk("the request exceeds the available context size"),
+        ]);
+        assert!(
+            names.iter().any(|n| n == "error"),
+            "upstream failure must reach the client as an error event: {names:?}"
+        );
+        let err = payloads
+            .iter()
+            .find(|p| p.get("type").and_then(Value::as_str) == Some("error"))
+            .expect("an error payload");
+        let text = err.to_string();
+        assert!(
+            text.contains("context"),
+            "the upstream explanation must survive: {text}"
+        );
+    }
+
+    #[test]
+    fn an_error_frame_suppresses_the_terminal_end_turn() {
+        let (names, payloads) = run(&[
+            text_chunk("partial"),
+            error_chunk("the request exceeds the available context size"),
+        ]);
+        let ends_normally = payloads.iter().any(|p| {
+            p.get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(Value::as_str)
+                == Some("end_turn")
+        });
+        assert!(
+            !ends_normally,
+            "a failed turn must never be reported as a clean end_turn — \
+             the user would read a truncated answer as complete: {names:?}"
+        );
     }
 
     #[test]
