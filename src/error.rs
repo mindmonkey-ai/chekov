@@ -172,13 +172,6 @@ pub enum ChekovError {
     },
 
     #[error(
-        "these runs were measured on different engines — engine.build_commit is \
-         '{a}' vs '{b}' — a cross-engine comparison attributes the engine's \
-         change to the model; re-bench on one engine and compare those runs"
-    )]
-    BenchEngineMismatch { a: String, b: String },
-
-    #[error(
         "bench stamp mismatch on '{field}' ({a} vs {b}) — llama.cpp does not \
          guarantee bit-identical results across configurations (GPU reduction \
          kernels pick different accumulation orders and float addition is not \

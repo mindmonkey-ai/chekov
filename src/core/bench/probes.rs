@@ -5,6 +5,10 @@
 use super::fixture::FixtureProbe;
 use crate::core::proxy::http::HttpRequest;
 
+/// The decode-exercising instruction every throughput probe carries. A const
+/// so `prompt_set_hash` covers the exact text a run measured with.
+const THROUGHPUT_PROMPT: &str = "Count upward from one, one number per line, and do not stop.";
+
 /// A probe whose prompt approximates `depth_tokens` and whose reply exercises
 /// decode for up to `max_tokens`.
 ///
@@ -17,11 +21,19 @@ pub fn throughput_probe(depth_tokens: u32, max_tokens: u32) -> HttpRequest {
         "model": "claude-sonnet-4",
         "max_tokens": max_tokens,
         "system": filler,
-        "messages": [{
-            "role": "user",
-            "content": "Count upward from one, one number per line, and do not stop."
-        }],
+        "messages": [{ "role": "user", "content": THROUGHPUT_PROMPT }],
     }))
+}
+
+/// Hash of everything that defines the task set: a run measured under a
+/// different set must never compare as the same one (spec §7.4 stamp field).
+#[must_use]
+pub fn prompt_set_hash(plan: &crate::core::bench::sweep::SweepPlan, seed: u32) -> String {
+    let canonical = format!(
+        "throughput-v1|depths={:?}|max_tokens={}|repetitions={}|seed={seed}|prompt={THROUGHPUT_PROMPT}",
+        plan.depths, plan.max_tokens, plan.repetitions
+    );
+    crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
 }
 
 /// A graded probe from a fixture, in the same dialect as every other probe.
@@ -58,6 +70,30 @@ mod tests {
             deep.body.len(),
             shallow.body.len()
         );
+    }
+
+    #[test]
+    fn the_prompt_set_hash_pins_the_task_set() {
+        use crate::core::bench::sweep::SweepPlan;
+        let plan = SweepPlan {
+            depths: vec![1024, 4096],
+            repetitions: 5,
+            max_tokens: 128,
+        };
+        let base = super::prompt_set_hash(&plan, 42);
+        assert_eq!(base, super::prompt_set_hash(&plan, 42), "stable");
+        let mut deeper = SweepPlan {
+            depths: vec![1024, 8192],
+            repetitions: 5,
+            max_tokens: 128,
+        };
+        assert_ne!(
+            base,
+            super::prompt_set_hash(&deeper, 42),
+            "depths change it"
+        );
+        deeper.depths = vec![1024, 4096];
+        assert_ne!(base, super::prompt_set_hash(&deeper, 7), "seed changes it");
     }
 
     #[test]

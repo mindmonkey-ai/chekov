@@ -45,7 +45,9 @@ pub fn run_sweep(plan: &SweepPlan, exec: &mut ProbeExec) -> Result<Vec<DepthResu
         .collect()
 }
 
-fn measure_depth(
+/// One depth's repetitions. Public so the CLI can append each depth's row to
+/// the run log as it completes (`--resume` loses at most one task).
+pub fn measure_depth(
     plan: &SweepPlan,
     depth: u32,
     exec: &mut ProbeExec,

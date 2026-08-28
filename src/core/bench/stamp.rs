@@ -74,6 +74,24 @@ pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
         .map(|(name, _)| *name)
 }
 
+/// The refusal for the first differing field, values included — or `None`
+/// when the stamps match.
+#[must_use]
+pub fn mismatch_error(a: &Stamp, b: &Stamp) -> Option<crate::error::ChekovError> {
+    let field = first_mismatch(a, b)?;
+    let show = |s: &Stamp| {
+        serde_json::to_value(s)
+            .ok()
+            .and_then(|v| v.get(field).map(std::string::ToString::to_string))
+            .unwrap_or_else(|| "?".to_owned())
+    };
+    Some(crate::error::ChekovError::BenchStampMismatch {
+        field: field.to_owned(),
+        a: show(a),
+        b: show(b),
+    })
+}
+
 /// One flag's value out of a launch argv. `--flag value` yields the value; a
 /// bare switch yields "on"; an absent flag yields "engine-default".
 #[must_use]
@@ -85,6 +103,16 @@ pub fn flag_value(args: &[String], flag: &str) -> String {
         Some(next) if !next.starts_with('-') => next.clone(),
         _ => "on".to_owned(),
     }
+}
+
+/// The first of several spellings (short and long form) that the argv sets.
+#[must_use]
+pub fn flag_value_either(args: &[String], names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| flag_value(args, name))
+        .find(|value| value != "engine-default")
+        .unwrap_or_else(|| "engine-default".to_owned())
 }
 
 #[cfg(test)]

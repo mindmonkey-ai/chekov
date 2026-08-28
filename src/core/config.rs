@@ -91,6 +91,9 @@ pub struct BenchSection {
     /// ~2-minute load of a ~158 GiB model with headroom.
     pub ready_max_polls: u32,
     pub ready_interval_ms: u64,
+    /// Sampling seed pinned onto every probe (greedy removes sampler
+    /// nondeterminism; the seed pins what remains).
+    pub seed: u32,
 }
 
 impl Default for BenchSection {
@@ -102,6 +105,7 @@ impl Default for BenchSection {
             significance_pct: 5,
             ready_max_polls: 600,
             ready_interval_ms: 500,
+            seed: 42,
         }
     }
 }
@@ -169,10 +173,10 @@ impl Config {
         self.root.join("llama.cpp")
     }
 
-    /// Bench run records, one JSON file per run.
+    /// Bench run directories (spec §7.5): `eval/<run_id>/`.
     #[must_use]
-    pub fn bench_dir(&self) -> PathBuf {
-        self.logs_dir().join("bench")
+    pub fn eval_dir(&self) -> PathBuf {
+        self.root.join("eval")
     }
 
     /// `http://host:port` — the base every probe and integration derives from.
