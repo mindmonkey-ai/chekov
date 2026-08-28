@@ -188,6 +188,28 @@ silently). Not currently reachable — every registry entry uses
 `--reasoning-format none` — which is why it is filed rather than fixed.
 Proposed 2026-08-28 — status: OPEN
 
+## A cell's second character ignores the overhead's provenance (2026-08-28)
+`frontier::Cell::inputs()` reports `#` (measured) whenever KV is measured,
+regardless of `overhead_bytes.provenance` — and `build_frontier` gives every
+cell a flat predicted 3 GiB overhead. So a cell can print "measured" while one
+of its three summands is a constant guess. Defensible as shipped (KV is the
+term that varies with context and dominates the total; a second character that
+was always `·` would carry no information), but it is a real gap between the
+glyph and the arithmetic. The SVG's per-cell tooltip prints each part's own
+provenance, which is the honest version; the glyph is the lossy summary.
+Noticed while building `--svg`; not changed there, because it would alter
+shipped terminal output and its tests.
+Proposed 2026-08-28 — status: OPEN
+
+## Throughput dots in the SVG (2026-08-28)
+Spec §5 wants the SVG to carry measured throughput as filled dots with p10-p90
+whiskers and predicted throughput as hollow dots with a ±15% range. Not built:
+`Frontier` carries no speed at all, because the "`--metric tok-s` grid upgrades
+from predicted to measured" line is still deferred (see below). Blocked on the
+same work — once stored bench medians reach the frontier model, both the ASCII
+grid and the SVG gain the layer together, from one source.
+Proposed 2026-08-28 — status: OPEN
+
 ## Feed measured bench medians into `capability graph` (2026-08-27)
 Slice 5's spec line "the `--metric tok-s` grid upgrades from predicted to
 measured" is deliberately deferred from the harness change: wiring stored

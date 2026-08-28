@@ -178,6 +178,302 @@ pub fn render_ascii(f: &Frontier) -> String {
     out
 }
 
+/// Geometry of the rendered grid, in user units.
+const CELL_W: usize = 96;
+const CELL_H: usize = 34;
+const TOP: usize = 96;
+const MARGIN: usize = 20;
+const GAP: usize = 16;
+const LINE_H: usize = 18;
+
+const CEILING_WARNING: &str = "CEILING PREDICTED — every verdict below is measured against a guess";
+
+const FOOTER: [&str; 2] = [
+    "hatched cells carry predicted inputs; solid cells are measured.",
+    "hover a cell for its arithmetic.",
+];
+
+/// Advance of `chars` glyphs in a monospace face at `font_px`: 0.6 em per
+/// glyph is the common monospace ratio, plus one glyph of slack so an
+/// estimate never undercuts the real text.
+const fn text_w(chars: usize, font_px: usize) -> usize {
+    chars * font_px * 6 / 10 + font_px
+}
+
+/// Positions derived from the frontier's own content. A long model name moves
+/// the quant column and the grid right instead of running under them, and the
+/// canvas is at least as wide as its widest line of text, so nothing is
+/// clipped at the right edge.
+struct Layout {
+    quant_x: usize,
+    left: usize,
+    width: usize,
+    legend_top: usize,
+    height: usize,
+}
+
+fn longest(rows: &[Row], text: impl Fn(&Row) -> &str) -> usize {
+    rows.iter()
+        .map(|row| text(row).chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+fn layout(f: &Frontier) -> Layout {
+    let quant_x = MARGIN + text_w(longest(&f.rows, |row| &row.name), 13) + GAP;
+    let left = quant_x + text_w(longest(&f.rows, |row| &row.quant), 12) + GAP;
+    let grid_w = left + f.ctx_ladder.len() * CELL_W + MARGIN;
+    let legend_top = TOP + f.rows.len() * CELL_H + 2 * LINE_H;
+    let text_lines = legend(f.budget).lines().count() + FOOTER.len();
+    Layout {
+        quant_x,
+        left,
+        width: grid_w.max(widest_text(f)),
+        legend_top,
+        height: legend_top + text_lines * LINE_H + MARGIN,
+    }
+}
+
+/// The widest line of prose on the sheet, margins included.
+fn widest_text(f: &Frontier) -> usize {
+    let legend = legend(f.budget);
+    let prose = legend
+        .lines()
+        .map(|line| text_w(line.trim().chars().count(), 12))
+        .chain(FOOTER.iter().map(|line| text_w(line.chars().count(), 11)))
+        .chain([
+            text_w(header_line(f).chars().count(), 13),
+            text_w(CEILING_WARNING.chars().count(), 13),
+        ]);
+    prose.max().unwrap_or(0) + 2 * MARGIN
+}
+
+/// The frontier with its layout resolved: what every emitter draws from.
+struct Sheet<'a> {
+    f: &'a Frontier,
+    lay: Layout,
+}
+
+/// `bytes` as GiB with one decimal, without a lossy float cast.
+fn gib(bytes: u64) -> String {
+    let tenths = bytes * 10 / (1024 * 1024 * 1024);
+    format!("{}.{} GiB", tenths / 10, tenths % 10)
+}
+
+/// XML-escape text that came from the registry or the machine.
+///
+/// A model name is user data; an unescaped `&` produces a file no viewer will
+/// open.
+fn esc(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Fill colours ordered by luminance, so the three states remain distinct in
+/// greyscale. Colour is never the only carrier: each cell also prints its
+/// glyph, and predicted inputs are hatched.
+const fn fill_for(fit: Fit) -> &'static str {
+    match fit {
+        Fit::Fits => "#f2f9f2",
+        Fit::Tight => "#fde9b8",
+        Fit::Exceeds => "#e8a6a6",
+        Fit::Unknown => "#ffffff",
+    }
+}
+
+/// One cell in its place: which row, which context, which budget (§4).
+struct CellAt<'a> {
+    row: &'a Row,
+    ctx: u32,
+    cell: &'a Cell,
+    budget_mib: u64,
+}
+
+/// The cell's own arithmetic, as the reader would check it by hand.
+fn cell_title(at: &CellAt) -> String {
+    let CellAt {
+        row,
+        ctx,
+        cell,
+        budget_mib,
+    } = *at;
+    let part = |v: Option<u64>| v.map_or_else(|| "unknown".to_owned(), gib);
+    let verdict = match fit_for(cell.total_bytes(), budget_mib) {
+        Fit::Fits => "fits",
+        Fit::Tight => "tight (85-100% of budget)",
+        Fit::Exceeds => "exceeds the budget",
+        // Said in full: a blank here reads as a rendering gap rather than a
+        // refusal to guess.
+        Fit::Unknown => "unknown — an unknown input is never a fit",
+    };
+    format!(
+        "{} {} @ {}: weights {} + kv {} ({}) + overhead {} ({}) = {} vs budget {} -> {}",
+        row.name,
+        row.quant,
+        format_ctx(ctx),
+        part(cell.weights_bytes),
+        part(cell.kv_bytes.value),
+        cell.kv_bytes.provenance.label(),
+        part(cell.overhead_bytes.value),
+        cell.overhead_bytes.provenance.label(),
+        part(cell.total_bytes()),
+        gib(budget_mib * 1024 * 1024),
+        verdict,
+    )
+}
+
+/// One cell: base fill, hatch when the inputs are predicted, glyph, tooltip.
+fn svg_cell(row: &Row, index: usize, sheet: &Sheet) -> String {
+    let f = sheet.f;
+    let cell = &row.cells[index];
+    let ctx = f.ctx_ladder[index];
+    let fit = fit_for(cell.total_bytes(), f.budget.value);
+    let (x, y) = (sheet.lay.left + index * CELL_W, 0);
+    let hatched = cell.inputs() != '#';
+    let hatch = if hatched {
+        format!(
+            "<rect x=\"{x}\" y=\"{y}\" width=\"{}\" height=\"{}\" fill=\"url(#predicted)\"/>",
+            CELL_W - 4,
+            CELL_H - 4
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<g><title>{}</title>\
+         <rect x=\"{x}\" y=\"{y}\" width=\"{}\" height=\"{}\" fill=\"{}\" stroke=\"#666\"/>\
+         {hatch}\
+         <text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"14\">{} {}</text></g>",
+        esc(&cell_title(&CellAt {
+            row,
+            ctx,
+            cell,
+            budget_mib: f.budget.value,
+        })),
+        CELL_W - 4,
+        CELL_H - 4,
+        fill_for(fit),
+        x + (CELL_W - 4) / 2,
+        y + 22,
+        esc(&fit.glyph().to_string()),
+        esc(&cell.inputs().to_string()),
+    )
+}
+
+/// A self-contained SVG of the same frontier the terminal grid shows.
+///
+/// Hand-emitted: no dependency, no CDN, no script. The caller prints the path
+/// and never opens it — launching a GUI from a CLI is an unrequested side
+/// effect, and a printed path composes with the user's own tooling.
+#[must_use]
+pub fn render_svg(f: &Frontier) -> String {
+    let sheet = Sheet { f, lay: layout(f) };
+    let (width, height) = (sheet.lay.width, sheet.lay.height);
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
+         viewBox=\"0 0 {width} {height}\" font-family=\"ui-monospace, Menlo, monospace\">\n\
+         <rect width=\"{width}\" height=\"{height}\" fill=\"#ffffff\"/>\n\
+         <defs><pattern id=\"predicted\" width=\"6\" height=\"6\" patternUnits=\"userSpaceOnUse\" \
+         patternTransform=\"rotate(45)\">\
+         <line x1=\"0\" y1=\"0\" x2=\"0\" y2=\"6\" stroke=\"#000000\" stroke-opacity=\"0.35\" \
+         stroke-width=\"2\"/></pattern></defs>\n\
+         <text x=\"20\" y=\"32\" font-size=\"18\">chekov capability frontier</text>\n"
+    );
+    out.push_str(&svg_header(f));
+    out.push_str(&svg_axis(&sheet));
+    for (r, row) in f.rows.iter().enumerate() {
+        out.push_str(&svg_row(row, r, &sheet));
+    }
+    out.push_str(&svg_legend(&sheet));
+    out.push_str("</svg>\n");
+    out
+}
+
+fn header_line(f: &Frontier) -> String {
+    format!(
+        "GPU budget {} MiB ({}) — {}",
+        f.budget.value,
+        gib(f.budget.value * 1024 * 1024),
+        f.budget.provenance.label(),
+    )
+}
+
+/// The budget line, and the same loud warning the terminal prints when the
+/// ceiling every verdict is measured against is itself a guess.
+fn svg_header(f: &Frontier) -> String {
+    let mut out = format!(
+        "<text x=\"{MARGIN}\" y=\"56\" font-size=\"13\">{}</text>\n",
+        esc(&header_line(f)),
+    );
+    if f.budget.provenance == Provenance::Predicted {
+        let _ = writeln!(
+            out,
+            "<text x=\"{MARGIN}\" y=\"76\" font-size=\"13\" fill=\"#a33\">{}</text>",
+            esc(CEILING_WARNING),
+        );
+    }
+    out
+}
+
+fn svg_axis(sheet: &Sheet) -> String {
+    let mut out = String::new();
+    for (i, ctx) in sheet.f.ctx_ladder.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"12\">{}</text>",
+            sheet.lay.left + i * CELL_W + (CELL_W - 4) / 2,
+            TOP - 8,
+            esc(&format_ctx(*ctx)),
+        );
+    }
+    out
+}
+
+fn svg_row(row: &Row, index: usize, sheet: &Sheet) -> String {
+    let y = TOP + index * CELL_H;
+    let mut out = format!(
+        "<g transform=\"translate(0,{y})\">\
+         <text x=\"{MARGIN}\" y=\"22\" font-size=\"13\">{}</text>\
+         <text x=\"{}\" y=\"22\" font-size=\"12\" fill=\"#555\">{}</text>",
+        esc(&row.name),
+        sheet.lay.quant_x,
+        esc(&row.quant),
+    );
+    for i in 0..row.cells.len().min(sheet.f.ctx_ladder.len()) {
+        out.push_str(&svg_cell(row, i, sheet));
+    }
+    out.push_str("</g>\n");
+    out
+}
+
+/// The legend comes from the SAME function the terminal renderer calls, so
+/// the two views can never disagree about what a glyph means. Its spacing is
+/// preserved — SVG collapses runs of spaces by default, which would fuse the
+/// legend's columns into one run-on line.
+fn svg_legend(sheet: &Sheet) -> String {
+    let mut out = String::new();
+    let mut y = sheet.lay.legend_top;
+    for line in legend(sheet.f.budget).lines() {
+        let _ = writeln!(
+            out,
+            "<text x=\"{MARGIN}\" y=\"{y}\" font-size=\"12\" xml:space=\"preserve\">{}</text>",
+            esc(line.trim()),
+        );
+        y += LINE_H;
+    }
+    for line in FOOTER {
+        let _ = writeln!(
+            out,
+            "<text x=\"{MARGIN}\" y=\"{y}\" font-size=\"11\" fill=\"#555\">{}</text>",
+            esc(line),
+        );
+        y += LINE_H;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Cell, Fit, fit_for};
@@ -240,6 +536,132 @@ mod tests {
         assert!(
             out.contains("inputs   #"),
             "a two-char cell is unreadable without it: {out}"
+        );
+    }
+
+    #[test]
+    fn the_svg_is_self_contained_and_never_reaches_out() {
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(svg.starts_with("<svg"), "{svg}");
+        assert!(svg.trim_end().ends_with("</svg>"));
+        assert!(svg.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+        // A report that phones home, runs script, or breaks without a network
+        // is not a report you can put in a bug thread.
+        assert!(!svg.contains("<script"), "no script: {svg}");
+        assert!(!svg.contains("<image"), "no external image: {svg}");
+        assert!(
+            !svg.contains("href="),
+            "no external reference of any kind: {svg}"
+        );
+    }
+
+    #[test]
+    fn predicted_inputs_are_hatched_so_the_distinction_survives_greyscale() {
+        // Colour alone fails greyscale printing and colour-blind viewers, and
+        // measured-vs-predicted is the whole point of the second character.
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(
+            svg.contains("<pattern id=\"predicted\""),
+            "the hatch must be defined: {svg}"
+        );
+        assert!(
+            svg.contains("url(#predicted)"),
+            "and applied to the predicted cells: {svg}"
+        );
+    }
+
+    #[test]
+    fn every_cell_carries_its_arithmetic_as_a_tooltip() {
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(
+            svg.contains("<title>"),
+            "a cell the reader cannot audit is a claim, not a measurement: {svg}"
+        );
+        assert!(
+            svg.contains("weights") && svg.contains("+ kv") && svg.contains("vs budget"),
+            "the tooltip shows the sum, not just the verdict: {svg}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_cell_says_unknown_and_claims_no_fit() {
+        // The second ctx column has no KV number.
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(svg.contains("unknown"), "{svg}");
+    }
+
+    #[test]
+    fn the_svg_legend_is_the_ascii_legend() {
+        // One legend function, so the two views cannot disagree about what a
+        // glyph means.
+        let predicted = super::render_svg(&frontier(Provenance::Predicted));
+        assert!(
+            predicted.contains("fits against a predicted ceiling"),
+            "{predicted}"
+        );
+        assert!(predicted.contains("CEILING PREDICTED"), "{predicted}");
+        let measured = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(measured.contains("fits (&lt;85% of budget)"), "{measured}");
+        assert!(!measured.contains("CEILING PREDICTED"), "{measured}");
+    }
+
+    #[test]
+    fn a_long_model_name_moves_the_grid_right_instead_of_running_under_the_quant() {
+        // Seen live: an 18-character name at a fixed quant column printed
+        // "ornith-1.5-35b-a3b" straight through "Q8_0".
+        let short = super::layout(&frontier(Provenance::EngineReported));
+        let mut f = frontier(Provenance::EngineReported);
+        f.rows[0].name = "a".repeat(40);
+        let long = super::layout(&f);
+        assert!(
+            long.quant_x > short.quant_x,
+            "{} vs {}",
+            long.quant_x,
+            short.quant_x
+        );
+        assert!(long.quant_x >= super::MARGIN + super::text_w(40, 13));
+        assert!(long.left > long.quant_x);
+        let svg = super::render_svg(&f);
+        assert!(svg.contains(&format!("x=\"{}\"", long.quant_x)), "{svg}");
+    }
+
+    #[test]
+    fn the_canvas_is_at_least_as_wide_as_its_widest_line_of_text() {
+        // Seen live: the footer ran off the right edge of a three-column
+        // grid, because the width came from the grid alone.
+        let mut f = frontier(Provenance::Predicted);
+        f.ctx_ladder.truncate(1);
+        f.rows[0].cells.truncate(1);
+        let lay = super::layout(&f);
+        let widest_legend = super::legend(f.budget)
+            .lines()
+            .map(|line| line.trim().chars().count())
+            .max()
+            .unwrap_or(0);
+        assert!(lay.width >= 2 * super::MARGIN + super::text_w(widest_legend, 12));
+        assert!(
+            lay.width
+                >= 2 * super::MARGIN + super::text_w(super::CEILING_WARNING.chars().count(), 13)
+        );
+        let svg = super::render_svg(&f);
+        assert!(svg.contains(&format!("width=\"{}\"", lay.width)), "{svg}");
+        assert!(
+            svg.contains("xml:space=\"preserve\""),
+            "legend spacing survives: {svg}"
+        );
+    }
+
+    #[test]
+    fn text_from_the_registry_is_xml_escaped() {
+        // A model name is user data; an unescaped & or < produces a file no
+        // viewer will open.
+        let mut f = frontier(Provenance::EngineReported);
+        f.rows[0].name = "a&b<c>\"d\"".into();
+        let svg = super::render_svg(&f);
+        assert!(svg.contains("a&amp;b&lt;c&gt;"), "{svg}");
+        assert!(
+            !svg.contains("a&b<c>"),
+            "the raw text must not survive: {svg}"
         );
     }
 

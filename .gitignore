@@ -5,6 +5,10 @@
 # Downloaded weights and runtime state — one dir per model@rev, gigabytes each.
 /models/
 /logs/
+# Bench run records and rendered reports — machine-local measurements, and
+# `eval/` grows one directory per run.
+/eval/
+/reports/
 # Machine-local registry (absolute paths) + generated launcher + engine checkout.
 /models.toml
 /bin/
