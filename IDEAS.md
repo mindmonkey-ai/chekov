@@ -99,6 +99,72 @@ Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
 Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) v0 SHIPPED 2026-08-28 (--suite agentic: tool_emit/grammar_gap/instruction seed set, growing toward 30/40; deferred: diff_fidelity+tool_loop+long_ctx_trace+hallucination need the §8/§9 corpora, think_leak waits on §13 Q5); fixture-v1 content release-gated; slice 6 OPEN**
 
+## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
+`response_format` json_schema is refused (HTTP 400, "Failed to initialize
+samplers") by this engine for `ornith-1.5-35b-a3b`, so the §7.2 grammar_gap
+axis reports N/A on it. Root cause, verified in source and reproduced
+live: on `/v1/chat/completions` llama.cpp builds a grammar whose root is
+`"<|im_start|>assistant\n" space response-format`, then prefills the FULL
+generation prompt — which this template ends with `<|im_start|>assistant\n<think>\n`
+— through that grammar sampler. The root cannot accept the `<think>\n` the
+template itself emitted, so sampler init throws before a single token is
+generated. `/completion` (no generation prompt, no prefill) accepts every
+schema shape including oneOf+const, so the schema converter is not at fault.
+
+Two candidate mechanisms, neither validated end to end:
+(a) **raw GBNF via the `grammar` field.** Proven to return 200 AND to produce a
+    correct forced call (`{"name":"grep","arguments":{...}}` for te-002) — raw
+    grammars are USER-type and skip the prefill. Two open problems: the reply
+    arrives wrapped in an UNTERMINATED `<think>` prefix (the template's prefill
+    echoed into content), which the translator's strip rightly refuses to treat
+    as an answer; and it means hand-rolling JSON-Schema→GBNF, which is
+    re-implementing llama.cpp's converter unless kept to the narrow
+    `{name, arguments}` shape the probe set actually uses.
+(b) **per-request `"reasoning_format":"deepseek"`.** Returns 200 on the same
+    schema that 400s, because that flag gates whether the `<think>` alternative
+    enters the grammar. NOT validated: at `max_tokens=30` the whole budget went
+    to `reasoning_content` and schema-constrained JSON was never observed, and
+    changing the parse format makes the forced arm no longer apples-to-apples
+    with the unconstrained one.
+
+Note a false-pass hazard for whoever builds this: an EMPTY schema, and
+`response_format: {"type":"json_object"}`, both return 200 with UNCONSTRAINED
+prose — no grammar is attached at all. A preflight probing with `{}` would
+conclude structured output works and then fabricate passes, the mirror image
+of the failures this N/A change removed. Probe with a non-empty schema only.
+Proposed 2026-08-28 — status: OPEN
+
+## Streaming probes for bench (2026-08-28)
+Spec §7.1 asked for probes over the STREAMING seam as well ("what makes
+streaming-only defects reachable — interleaved parallel tool-call deltas, an
+upstream error frame swallowed into a fake `end_turn`, an unterminated
+`<think>` eating the turn"). Only the non-streaming half was built, and the
+first agentic run found exactly that class of bug: the streaming translator
+stripped thinking spans while the non-streaming one did not, so the two halves
+of the same translator disagreed about what the agent receives. Claude Code
+streams; the bench did not — so the bench was grading a path the agent never
+takes. Fixed for thinking, but the asymmetry class remains until probes cross
+`stream_translator()` the way `serve::relay` does.
+Proposed 2026-08-28 — status: OPEN
+
+## `EndpointDown` claims "not answering" for a request that WAS answered (2026-08-28)
+A 400 refusal renders as "endpoint ... is not answering ... restart with
+`chekov restart`". The endpoint answered — it refused — and restarting cannot
+help when the request itself is unacceptable. Surfaced by the grammar_gap N/A
+message, whose remediation advice is actively misleading. Wants a distinct
+variant for "the upstream refused this request" carrying the server's own
+explanation, now that `hub::post_json` preserves it.
+Proposed 2026-08-28 — status: OPEN
+
+## The non-streaming translator drops `reasoning_content` (2026-08-28)
+`to_anthropic_response` reads `message.content` and `message.tool_calls` only.
+A model served with `--reasoning-format auto|deepseek` puts its reasoning in
+`message.reasoning_content`, which the streaming path turns into a `thinking`
+block and the non-streaming path silently discards (§C.2: nothing degrades
+silently). Not currently reachable — every registry entry uses
+`--reasoning-format none` — which is why it is filed rather than fixed.
+Proposed 2026-08-28 — status: OPEN
+
 ## Feed measured bench medians into `capability graph` (2026-08-27)
 Slice 5's spec line "the `--metric tok-s` grid upgrades from predicted to
 measured" is deliberately deferred from the harness change: wiring stored
