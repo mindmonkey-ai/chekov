@@ -12,6 +12,23 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
+- `chekov capability bench --suite agentic` — the corpus-free §7.2 probe
+  suites, seed set v0. `tool_emit` (7 call + 2 abstention + 1
+  missing-function cases) crosses the translator's real tool mapping and
+  grades the translated `tool_use` block BFCL-style (name + arguments as
+  parsed JSON); `grammar_gap` re-runs the call cases with the case's own
+  `oneOf` schema forced via `response_format` on the wire, and the summary
+  prints forced-vs-unconstrained ON THE SAME CASES — the anti-self-deception
+  device: a large gap means "works only with a babysitter"; `instruction`
+  (12 IFEval-style cases) reports strict and loose separately with the
+  chattiness gap. Failures are listed individually, passes counted, and the
+  probe-set TOML's hash rides in `prompt_set_hash`, so an edited case makes
+  old runs incomparable by construction. `--suite` defaults to `throughput`
+  (a stated deviation from the spec's `agentic` default, held until the set
+  reaches the spec's 30/40 counts). Deferred with their reasons recorded:
+  `diff_fidelity`/`tool_loop`/`long_ctx_trace`/`hallucination` (need the
+  §8/§9 corpora), `think_leak` (waits on the `--reasoning-format none`
+  question).
 - `chekov capability bench --models a,b [--dry-run] [--yes]` — the §7.3
   per-candidate lifecycle. Bench launches each candidate itself behind `run`'s
   own preflight gates, checks the argv against the binary's own `--help`
