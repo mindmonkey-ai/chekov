@@ -172,6 +172,13 @@ pub enum ChekovError {
     },
 
     #[error(
+        "these runs were measured on different engines — engine.build_commit is \
+         '{a}' vs '{b}' — a cross-engine comparison attributes the engine's \
+         change to the model; re-bench on one engine and compare those runs"
+    )]
+    BenchEngineMismatch { a: String, b: String },
+
+    #[error(
         "degenerate output detected: {reason} — this matches the known GGUF \
          corruption class; re-pull the model shards with `chekov pull` and re-run \
          `chekov doctor`"
