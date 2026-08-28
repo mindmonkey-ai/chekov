@@ -88,6 +88,92 @@ pub fn wait_budget_released(
     })
 }
 
+/// One candidate's place in the run, as data — printed by `--dry-run`,
+/// estimated for the confirm gate, executed sequentially.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BenchStep {
+    pub model: String,
+    pub action: StepAction,
+    /// Weights on disk, for the load estimate. `None` renders `?` — an
+    /// unknown size is stated, never invented.
+    pub weights_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepAction {
+    /// The server already serves this model; measure and leave it up.
+    UseRunning,
+    /// Bench launches it, tears it down, and verifies the budget released.
+    Launch,
+}
+
+/// Reference rates from the spec's measured inputs (§7.6): load ≈ 4 s/GiB,
+/// prefill ≈ 150 tok/s, decode ≈ 60 tok/s. An estimate, never a promise.
+const LOAD_MS_PER_GIB: u64 = 4_000;
+const PREFILL_TOK_S: u64 = 150;
+const DECODE_TOK_S: u64 = 60;
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// Rough wall-clock seconds for the whole plan. Integer milliseconds
+/// throughout — an estimate needs no float.
+#[must_use]
+pub fn estimate_secs(steps: &[BenchStep], plan: &crate::core::bench::sweep::SweepPlan) -> u64 {
+    let sweep_ms: u64 = plan
+        .depths
+        .iter()
+        .map(|&d| {
+            u64::from(plan.repetitions)
+                * (u64::from(d) * 1000 / PREFILL_TOK_S
+                    + u64::from(plan.max_tokens) * 1000 / DECODE_TOK_S)
+        })
+        .sum();
+    let total_ms: u64 = steps
+        .iter()
+        .map(|step| {
+            let load_ms = match step.action {
+                StepAction::Launch => step.weights_bytes.unwrap_or(0) / GIB * LOAD_MS_PER_GIB,
+                StepAction::UseRunning => 0,
+            };
+            load_ms + sweep_ms
+        })
+        .sum();
+    total_ms.div_ceil(1000)
+}
+
+/// Any launch is a real side effect (a model load, a teardown) — those runs
+/// confirm; a pure reuse-the-running-server run stays gate-free.
+#[must_use]
+pub fn needs_confirm(steps: &[BenchStep]) -> bool {
+    steps.iter().any(|s| s.action == StepAction::Launch)
+}
+
+/// The plan a human reads before agreeing to it.
+#[must_use]
+pub fn render_plan(steps: &[BenchStep], estimate_s: u64) -> String {
+    let lines: String = steps.iter().map(step_line).collect();
+    format!(
+        "bench plan:\n{lines}~{} min estimated\n",
+        estimate_s.div_ceil(60)
+    )
+}
+
+fn step_line(step: &BenchStep) -> String {
+    let action = match step.action {
+        StepAction::UseRunning => "use running server",
+        StepAction::Launch => "launch + teardown",
+    };
+    let weights = step
+        .weights_bytes
+        .map_or_else(|| "?".to_owned(), render_gib);
+    format!("  {}  {action}  weights {weights}\n", step.model)
+}
+
+/// One-decimal GiB without touching floats.
+fn render_gib(bytes: u64) -> String {
+    let tenths = bytes * 10 / GIB;
+    format!("{}.{} GiB", tenths / 10, tenths % 10)
+}
+
 #[cfg(test)]
 mod tests {
     use super::unknown_flags;
@@ -198,5 +284,58 @@ mod tests {
     #[test]
     fn a_reader_that_stops_answering_is_loud_not_a_verified_release() {
         assert!(wait_budget_released(instant_policy(3), &mut || None).is_err());
+    }
+
+    use super::{BenchStep, StepAction, estimate_secs, needs_confirm, render_plan};
+    use crate::core::bench::sweep::SweepPlan;
+
+    fn plan() -> SweepPlan {
+        SweepPlan {
+            depths: vec![1024, 4096, 16384],
+            repetitions: 5,
+            max_tokens: 128,
+        }
+    }
+
+    fn step(model: &str, action: StepAction, gib: Option<u64>) -> BenchStep {
+        BenchStep {
+            model: model.into(),
+            action,
+            weights_bytes: gib.map(|g| g * 1024 * 1024 * 1024),
+        }
+    }
+
+    #[test]
+    fn a_pure_reuse_run_needs_no_confirm_and_any_launch_does() {
+        assert!(!needs_confirm(&[step("m", StepAction::UseRunning, None)]));
+        assert!(needs_confirm(&[
+            step("m", StepAction::UseRunning, None),
+            step("n", StepAction::Launch, Some(35)),
+        ]));
+    }
+
+    #[test]
+    fn the_estimate_grows_with_launches_and_depths() {
+        let reuse = estimate_secs(&[step("m", StepAction::UseRunning, None)], &plan());
+        let launch = estimate_secs(&[step("m", StepAction::Launch, Some(35))], &plan());
+        assert!(launch > reuse, "a load is not free: {launch} vs {reuse}");
+        let mut deeper = plan();
+        deeper.depths.push(65_536);
+        assert!(estimate_secs(&[step("m", StepAction::UseRunning, None)], &deeper) > reuse);
+    }
+
+    #[test]
+    fn the_rendered_plan_names_every_step_and_the_total() {
+        let steps = [
+            step("qwen3.8-27b", StepAction::Launch, Some(24)),
+            step("gpt-oss-120b", StepAction::Launch, None),
+        ];
+        let rendered = render_plan(&steps, estimate_secs(&steps, &plan()));
+        assert!(rendered.contains("qwen3.8-27b  launch + teardown  weights 24.0 GiB"));
+        assert!(
+            rendered.contains("gpt-oss-120b  launch + teardown  weights ?"),
+            "an unknown size is stated, never invented: {rendered}"
+        );
+        assert!(rendered.contains("min estimated"), "{rendered}");
     }
 }
