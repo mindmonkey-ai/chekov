@@ -264,7 +264,106 @@ pub fn render_run(log: &RunLog) -> String {
         .map(probe_line)
         .collect();
     out.push_str(&probes);
+    out.push_str(&suite_summaries(log));
     out
+}
+
+/// Per-suite summary lines for the agentic suites: counts always printed,
+/// failures listed individually, passes counted — no silent caps.
+fn suite_summaries(log: &RunLog) -> String {
+    let mut out = String::new();
+    let failures: String = log
+        .rows
+        .iter()
+        .filter(|r| ["tool_emit", "grammar_gap", "instruction"].contains(&r.suite.as_str()))
+        .filter(|r| r.grade.as_ref().is_some_and(|g| !g.pass))
+        .map(agentic_fail_line)
+        .collect();
+    out.push_str(&failures);
+    if let Some(line) = tool_emit_line(log) {
+        out.push_str(&line);
+    }
+    if let Some(line) = grammar_gap_line(log) {
+        out.push_str(&line);
+    }
+    if let Some(line) = instruction_line(log) {
+        out.push_str(&line);
+    }
+    out
+}
+
+fn agentic_fail_line(row: &TaskRow) -> String {
+    let reason = row
+        .grade
+        .as_ref()
+        .and_then(|g| g.reason.as_deref())
+        .unwrap_or("");
+    format!("{} FAIL {}  {reason}\n", row.suite, row.task_id)
+}
+
+fn rows_of<'a>(log: &'a RunLog, suite: &'a str) -> impl Iterator<Item = &'a TaskRow> {
+    log.rows.iter().filter(move |r| r.suite == suite)
+}
+
+fn passed(rows: &[&TaskRow]) -> usize {
+    rows.iter()
+        .filter(|r| r.grade.as_ref().is_some_and(|g| g.pass))
+        .count()
+}
+
+fn tool_emit_line(log: &RunLog) -> Option<String> {
+    let rows: Vec<&TaskRow> = rows_of(log, "tool_emit").collect();
+    (!rows.is_empty()).then(|| format!("tool_emit    {}/{}\n", passed(&rows), rows.len()))
+}
+
+/// The §7.2 anti-self-deception line: forced vs unconstrained ON THE SAME
+/// CASES — a large gap means "works only with a babysitter".
+fn grammar_gap_line(log: &RunLog) -> Option<String> {
+    let forced: Vec<&TaskRow> = rows_of(log, "grammar_gap").collect();
+    if forced.is_empty() {
+        return None;
+    }
+    let base_ids: Vec<&str> = forced
+        .iter()
+        .filter_map(|r| r.task_id.strip_prefix("gg-"))
+        .collect();
+    let unconstrained: Vec<&TaskRow> = rows_of(log, "tool_emit")
+        .filter(|r| base_ids.contains(&r.task_id.as_str()))
+        .collect();
+    let pct = |pass: usize, total: usize| i64::try_from(pass * 100 / total.max(1)).unwrap_or(0);
+    let gap = pct(passed(&forced), forced.len()) - pct(passed(&unconstrained), unconstrained.len());
+    Some(format!(
+        "grammar_gap  {}/{} forced — unconstrained on the same cases {}/{} (gap {gap:+}%)\n",
+        passed(&forced),
+        forced.len(),
+        passed(&unconstrained),
+        unconstrained.len(),
+    ))
+}
+
+fn instruction_line(log: &RunLog) -> Option<String> {
+    let rows: Vec<&TaskRow> = rows_of(log, "instruction").collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let strict = passed(&rows);
+    let loose = rows
+        .iter()
+        .filter(|r| {
+            r.grade.as_ref().is_some_and(|g| {
+                g.pass
+                    || g.reason
+                        .as_deref()
+                        .is_some_and(|s| s.contains("loose:pass"))
+            })
+        })
+        .count();
+    Some(format!(
+        "instruction  strict {strict}/{}, loose {loose}/{} (chattiness gap {})\n",
+        rows.len(),
+        rows.len(),
+        loose.saturating_sub(strict),
+    ))
 }
 
 fn depth_line(row: &TaskRow) -> String {
@@ -361,6 +460,66 @@ mod tests {
         let row = r#"{"schema":1,"run_id":"r","seq":0,"suite":"throughput","task_id":"depth-1024","measure":{"prompt_n":10,"decode_samples":[1.0,2.0],"prefill_samples":[1.0,2.0],"warmup_dropped":1}}"#;
         let parsed: super::TaskRow = serde_json::from_str(row).expect("old row loads");
         assert_eq!(parsed.measure.cache_n, 0);
+    }
+
+    /// Unconstrained 1/2 on the call cases, forced 2/2 (gap +50%);
+    /// instruction strict 1/2, loose 2/2 (chattiness gap 1).
+    fn graded_run(eval: &std::path::Path) -> RunWriter {
+        let mut writer = RunWriter::create(eval, "r7-model", &head()).expect("create");
+        let rows: [(&str, &str, bool, Option<&str>); 6] = [
+            ("tool_emit", "te-001", true, None),
+            (
+                "tool_emit",
+                "te-002",
+                false,
+                Some("called 'read_file', expected 'grep'"),
+            ),
+            ("grammar_gap", "gg-te-001", true, None),
+            ("grammar_gap", "gg-te-002", true, None),
+            ("instruction", "if-001", true, Some("loose:pass")),
+            (
+                "instruction",
+                "if-002",
+                false,
+                Some("failed 'fenced_rust_only'; loose:pass"),
+            ),
+        ];
+        for (suite, id, pass, reason) in rows {
+            writer
+                .append(Task {
+                    suite: suite.into(),
+                    task_id: id.into(),
+                    measure: measure(&[20.0, 20.0]),
+                    grade: Some(GradeRow {
+                        pass,
+                        reason: reason.map(str::to_owned),
+                    }),
+                })
+                .expect("append");
+        }
+        writer
+    }
+
+    #[test]
+    fn suite_summaries_carry_both_gaps_and_list_failures() {
+        let eval = scratch("summaries");
+        let writer = graded_run(&eval);
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(rendered.contains("tool_emit    1/2"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "grammar_gap  2/2 forced — unconstrained on the same cases 1/2 (gap +50%)"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("instruction  strict 1/2, loose 2/2 (chattiness gap 1)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("tool_emit FAIL te-002  called 'read_file'"),
+            "failures are listed individually: {rendered}"
+        );
     }
 
     #[test]
