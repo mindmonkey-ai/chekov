@@ -12,6 +12,14 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
+- `core::stats` — the statistical honesty slice 5's bench rests on. Median with
+  p10/p90, never mean ± stddev, because decode rate is right-skewed by thermal
+  events and a mean flatters a run that hit one stall. The first repetition is
+  dropped as warmup and the drop is recorded rather than absorbed. Two
+  configurations are called indistinguishable — and printed as such rather than
+  resolved into a winner — when their p10-p90 intervals overlap OR the medians
+  differ by less than the significance threshold. Fewer than three distinct
+  depths refuses to fit a curve instead of extrapolating from a line.
 - `chekov capability recommend --refresh` — queries the Hugging Face list
   endpoint for candidates, classifies each repo's tool parser from the chat
   template it returns, and sizes it through the same `quant_options` path
