@@ -2,5 +2,7 @@
 //! chekov's OWN `Anthropic<->OpenAI` translator, so every number was earned on
 //! the exact code path a Claude Code turn takes.
 
+pub mod fixture;
+pub mod grade;
 pub mod probes;
 pub mod runner;

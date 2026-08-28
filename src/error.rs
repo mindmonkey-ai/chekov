@@ -159,6 +159,12 @@ pub enum ChekovError {
     )]
     BenchNoTimings,
 
+    #[error("bench fixture {}: {reason}", path.display())]
+    FixtureInvalid {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+
     #[error(
         "degenerate output detected: {reason} — this matches the known GGUF \
          corruption class; re-pull the model shards with `chekov pull` and re-run \

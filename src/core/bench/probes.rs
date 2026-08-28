@@ -2,6 +2,7 @@
 //! them — a probe that skipped the translator would measure a server chekov
 //! does not actually serve.
 
+use super::fixture::FixtureProbe;
 use crate::core::proxy::http::HttpRequest;
 
 /// A probe whose prompt approximates `depth_tokens` and whose reply exercises
@@ -20,6 +21,16 @@ pub fn throughput_probe(depth_tokens: u32, max_tokens: u32) -> HttpRequest {
             "role": "user",
             "content": "Count upward from one, one number per line, and do not stop."
         }],
+    }))
+}
+
+/// A graded probe from a fixture, in the same dialect as every other probe.
+#[must_use]
+pub fn fixture_probe(probe: &FixtureProbe) -> HttpRequest {
+    anthropic_post(&serde_json::json!({
+        "model": "claude-sonnet-4",
+        "max_tokens": probe.max_tokens,
+        "messages": [{"role": "user", "content": probe.prompt}],
     }))
 }
 
