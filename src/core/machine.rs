@@ -169,9 +169,56 @@ pub fn probe(engine_dir: &Path) -> Machine {
     }
 }
 
+/// `sha256(model_id | memsize | brand | gpu_cores)`, first 12 hex chars.
+///
+/// Spec §4.2. `None` when ANY component is unknown — a partial identity
+/// would let a bench row from another machine compare as if it were this
+/// one's.
+#[must_use]
+pub fn machine_id(m: &Machine) -> Option<String> {
+    let key = format!(
+        "{}|{}|{}|{}",
+        m.model.as_deref()?,
+        m.memsize_bytes?,
+        m.chip.as_deref()?,
+        m.gpu_cores?
+    );
+    Some(crate::core::hash::sha256_hex(key.as_bytes())[..12].to_owned())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Provenance, gpu_budget, parse_gpu_cores, parse_list_devices, parse_sysctl_batch};
+    use super::{
+        Machine, Provenance, gpu_budget, machine_id, parse_gpu_cores, parse_list_devices,
+        parse_sysctl_batch,
+    };
+
+    fn m3_ultra() -> Machine {
+        Machine {
+            chip: Some("Apple M3 Ultra".into()),
+            model: Some("Mac15,14".into()),
+            memsize_bytes: Some(274_877_906_944),
+            gpu_cores: Some(80),
+            perf_threads: Some(24),
+            budget: None,
+            macos: Some("27.0".into()),
+        }
+    }
+
+    #[test]
+    fn machine_id_is_stable_and_refuses_partial_identity() {
+        let full = m3_ultra();
+        let id = machine_id(&full).expect("complete identity");
+        assert_eq!(id.len(), 12);
+        assert_eq!(id, machine_id(&full).expect("deterministic"));
+        let mut partial = m3_ultra();
+        partial.chip = None;
+        assert_eq!(
+            machine_id(&partial),
+            None,
+            "an invented id would let a foreign bench row compare as this machine's"
+        );
+    }
 
     /// Verbatim from `./llama.cpp/build/bin/llama-server --list-devices` on the
     /// author's M3 Ultra.

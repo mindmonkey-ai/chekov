@@ -65,28 +65,48 @@ pub fn wait_ready(
 /// (the endpoint sits behind `--api-key`), a canned closure in tests.
 pub type PropsFetch<'a> = dyn Fn() -> Result<String, ChekovError> + 'a;
 
-/// The context the server ACTUALLY loaded, asserted against the config's
-/// intent — a bench under the wrong context would be recorded under a config
-/// the server is not running.
-pub fn assert_props_ctx(fetch: &PropsFetch, expected: u32) -> Result<u32, ChekovError> {
+/// What `/props` says the server actually loaded. `n_ctx` is the PER-SLOT
+/// window (`meta.slot_n_ctx`), not the `-c` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropsInfo {
+    pub n_ctx: u32,
+    pub total_slots: u32,
+}
+
+/// Read `/props`. Every field is required — a missing one is loud, never
+/// assumed.
+pub fn read_props(fetch: &PropsFetch) -> Result<PropsInfo, ChekovError> {
     let raw = fetch()?;
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| ChekovError::EndpointDown {
         url: "/props".to_owned(),
         reason: format!("/props is not JSON: {e}"),
     })?;
-    let n_ctx = parsed
-        .pointer("/default_generation_settings/n_ctx")
-        .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n).ok())
-        .ok_or_else(|| ChekovError::EndpointDown {
-            url: "/props".to_owned(),
-            reason: "no default_generation_settings.n_ctx in /props".to_owned(),
-        })?;
-    if n_ctx == expected {
-        Ok(n_ctx)
+    let field = |pointer: &str| {
+        parsed
+            .pointer(pointer)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| ChekovError::EndpointDown {
+                url: "/props".to_owned(),
+                reason: format!("no {pointer} in /props"),
+            })
+    };
+    Ok(PropsInfo {
+        n_ctx: field("/default_generation_settings/n_ctx")?,
+        total_slots: field("/total_slots")?,
+    })
+}
+
+/// The context the server ACTUALLY loaded, asserted against the config's
+/// intent — a bench under the wrong context would be recorded under a config
+/// the server is not running.
+pub fn assert_props_ctx(fetch: &PropsFetch, expected: u32) -> Result<PropsInfo, ChekovError> {
+    let props = read_props(fetch)?;
+    if props.n_ctx == expected {
+        Ok(props)
     } else {
         Err(ChekovError::PropsCtxMismatch {
-            server: n_ctx,
+            server: props.n_ctx,
             config: expected,
         })
     }
@@ -109,11 +129,20 @@ pub struct ProbeArtifact {
     pub timings: Timings,
 }
 
+/// Sampling the bench pins ON THE WIRE (spec §7.3.6): greedy, seeded. The
+/// pins are injected into the forwarded body after translation, so they hold
+/// regardless of what the probe's Anthropic body carried.
+#[derive(Debug, Clone, Copy)]
+pub struct SamplingPins {
+    pub seed: u32,
+}
+
 /// Everything one crossing needs, bundled (§4).
 pub struct ProbeWire<'a> {
     pub http: &'a dyn HttpClient,
     pub facade: &'a dyn AgentFacade,
     pub upstream: &'a Upstream,
+    pub pins: SamplingPins,
 }
 
 /// Route → POST upstream → capture `timings` → translate.
@@ -135,6 +164,7 @@ pub fn cross(wire: &ProbeWire, req: &HttpRequest) -> Result<ProbeArtifact, Cheko
     let body = String::from_utf8(forward.body).map_err(|e| ChekovError::ProxyBadRequest {
         reason: format!("forwarded body is not UTF-8: {e}"),
     })?;
+    let body = pin_sampling(&body, wire.pins)?;
     let upstream_body = wire.http.post_json(&JsonRequest {
         url: format!("{}{}", wire.upstream.base_url, forward.path),
         body,
@@ -146,6 +176,24 @@ pub fn cross(wire: &ProbeWire, req: &HttpRequest) -> Result<ProbeArtifact, Cheko
         anthropic_body,
         timings,
     })
+}
+
+/// Overwrite the forwarded body's sampling with the pinned values —
+/// whatever the probe asked for, the measurement is greedy and seeded.
+fn pin_sampling(body: &str, pins: SamplingPins) -> Result<String, ChekovError> {
+    let mut parsed: Value =
+        serde_json::from_str(body).map_err(|e| ChekovError::ProxyBadRequest {
+            reason: format!("forwarded body is not JSON: {e}"),
+        })?;
+    let object = parsed
+        .as_object_mut()
+        .ok_or_else(|| ChekovError::ProxyBadRequest {
+            reason: "forwarded body is not a JSON object".to_owned(),
+        })?;
+    object.insert("temperature".to_owned(), Value::from(0));
+    object.insert("top_k".to_owned(), Value::from(1));
+    object.insert("seed".to_owned(), Value::from(pins.seed));
+    Ok(parsed.to_string())
 }
 
 /// The four numbers the sweep records. All-or-nothing: a partial timings
@@ -265,6 +313,17 @@ mod tests {
     struct CannedUpstream {
         body: String,
         bearer_seen: RefCell<Option<String>>,
+        sent_body: RefCell<Option<String>>,
+    }
+
+    impl CannedUpstream {
+        fn new(body: String) -> Self {
+            Self {
+                body,
+                bearer_seen: RefCell::new(None),
+                sent_body: RefCell::new(None),
+            }
+        }
     }
 
     impl HttpClient for CannedUpstream {
@@ -274,6 +333,7 @@ mod tests {
 
         fn post_json(&self, req: &JsonRequest) -> Result<String, ChekovError> {
             *self.bearer_seen.borrow_mut() = req.bearer.clone();
+            *self.sent_body.borrow_mut() = Some(req.body.clone());
             Ok(self.body.clone())
         }
     }
@@ -310,20 +370,26 @@ mod tests {
         }
     }
 
+    fn wire<'a>(
+        http: &'a CannedUpstream,
+        facade: &'a ClaudeFacade,
+        up: &'a Upstream,
+    ) -> super::ProbeWire<'a> {
+        super::ProbeWire {
+            http,
+            facade,
+            upstream: up,
+            pins: super::SamplingPins { seed: 42 },
+        }
+    }
+
     #[test]
     fn cross_returns_the_anthropic_body_and_the_upstream_timings() {
-        let http = CannedUpstream {
-            body: openai_with_timings(),
-            bearer_seen: RefCell::new(None),
-        };
+        let http = CannedUpstream::new(openai_with_timings());
         let facade = ClaudeFacade::new("local-model");
         let up = fake_upstream();
-        let wire = super::ProbeWire {
-            http: &http,
-            facade: &facade,
-            upstream: &up,
-        };
-        let art = super::cross(&wire, &anthropic_request("say hi")).expect("crossing succeeds");
+        let art = super::cross(&wire(&http, &facade, &up), &anthropic_request("say hi"))
+            .expect("crossing succeeds");
         // Timings are the server's own measurement, read before translation.
         assert!((art.timings.predicted_per_second - 21.7).abs() < 1e-9);
         assert_eq!(art.timings.prompt_n, 900);
@@ -339,23 +405,29 @@ mod tests {
     }
 
     #[test]
+    fn the_wire_carries_pinned_greedy_seeded_sampling() {
+        let http = CannedUpstream::new(openai_with_timings());
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        super::cross(&wire(&http, &facade, &up), &anthropic_request("say hi")).expect("crossing");
+        let sent = http.sent_body.borrow().clone().expect("a body was sent");
+        let sent: serde_json::Value = serde_json::from_str(&sent).expect("sent body is json");
+        assert_eq!(sent["temperature"], 0, "greedy: {sent}");
+        assert_eq!(sent["top_k"], 1, "greedy: {sent}");
+        assert_eq!(sent["seed"], 42, "seeded: {sent}");
+    }
+
+    #[test]
     fn a_response_without_timings_fails_rather_than_inventing_a_number() {
         let no_timings = serde_json::json!({
             "choices": [{ "message": { "content": "hi" }, "finish_reason": "stop" }]
         })
         .to_string();
-        let http = CannedUpstream {
-            body: no_timings,
-            bearer_seen: RefCell::new(None),
-        };
+        let http = CannedUpstream::new(no_timings);
         let facade = ClaudeFacade::new("m");
         let up = fake_upstream();
-        let wire = super::ProbeWire {
-            http: &http,
-            facade: &facade,
-            upstream: &up,
-        };
-        let err = super::cross(&wire, &anthropic_request("hi")).expect_err("no measurement");
+        let err = super::cross(&wire(&http, &facade, &up), &anthropic_request("hi"))
+            .expect_err("no measurement");
         assert!(matches!(err, ChekovError::BenchNoTimings));
     }
 
@@ -363,34 +435,31 @@ mod tests {
     fn a_locally_answered_request_cannot_be_a_probe() {
         // GET /v1/models is answered by the facade without touching the server —
         // "measuring" it would time chekov, not the model.
-        let http = CannedUpstream {
-            body: String::new(),
-            bearer_seen: RefCell::new(None),
-        };
+        let http = CannedUpstream::new(String::new());
         let facade = ClaudeFacade::new("m");
         let up = fake_upstream();
-        let wire = super::ProbeWire {
-            http: &http,
-            facade: &facade,
-            upstream: &up,
-        };
         let req = HttpRequest {
             method: "GET".into(),
             path: "/v1/models".into(),
             body: vec![],
         };
-        assert!(super::cross(&wire, &req).is_err());
+        assert!(super::cross(&wire(&http, &facade, &up), &req).is_err());
     }
 
     fn props(n_ctx: u64) -> String {
-        serde_json::json!({"default_generation_settings": {"n_ctx": n_ctx}}).to_string()
+        serde_json::json!({
+            "default_generation_settings": {"n_ctx": n_ctx},
+            "total_slots": 1,
+        })
+        .to_string()
     }
 
     #[test]
-    fn a_matching_props_ctx_passes() {
+    fn a_matching_props_ctx_passes_and_reports_the_slots() {
         let body = props(131_072);
         let got = assert_props_ctx(&|| Ok(body.clone()), 131_072).expect("matches");
-        assert_eq!(got, 131_072);
+        assert_eq!(got.n_ctx, 131_072);
+        assert_eq!(got.total_slots, 1);
     }
 
     #[test]

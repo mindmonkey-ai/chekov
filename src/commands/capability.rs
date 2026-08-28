@@ -60,10 +60,13 @@ pub enum CapAction {
         /// fixture-v1 is release-gated on a three-model measurement campaign.
         #[arg(long)]
         fixture: Option<std::path::PathBuf>,
+        /// Continue a previous run id, skipping tasks its JSONL already holds.
+        #[arg(long)]
+        resume: Option<String>,
     },
-    /// Compare two stored bench runs (same engine only).
+    /// Compare two stored bench runs (same environment only).
     Compare {
-        /// Run records written by `capability bench`.
+        /// Run ids under `eval/`, or paths to run directories.
         a: std::path::PathBuf,
         b: std::path::PathBuf,
     },
@@ -139,7 +142,15 @@ impl Command for CapabilityCmd {
                     },
                 );
             }
-            Some(CapAction::Bench { fixture }) => return bench(ctx, fixture.as_deref()),
+            Some(CapAction::Bench { fixture, resume }) => {
+                return bench(
+                    ctx,
+                    &BenchArgs {
+                        fixture: fixture.as_deref(),
+                        resume: resume.as_deref(),
+                    },
+                );
+            }
             Some(CapAction::Compare { a, b }) => return compare(ctx, a, b),
             _ => {}
         }
@@ -601,7 +612,7 @@ fn ensure_ready(
     ctx: &Ctx,
     upstream: &crate::core::proxy::serve::Upstream,
     setup: &BenchSetup,
-) -> Result<u32, ChekovError> {
+) -> Result<crate::core::bench::runner::PropsInfo, ChekovError> {
     use crate::core::bench::runner;
     let ready = runner::ReadyTarget {
         base_url: upstream.base_url.clone(),
@@ -614,9 +625,14 @@ fn ensure_ready(
     )
 }
 
-fn bench(ctx: &Ctx, fixture_path: Option<&std::path::Path>) -> Result<ExitCode, ChekovError> {
-    use crate::core::bench::{runner, store, sweep};
-    use crate::core::proxy::claude::ClaudeFacade;
+/// The bench invocation's own inputs, bundled (§4).
+struct BenchArgs<'a> {
+    fixture: Option<&'a std::path::Path>,
+    resume: Option<&'a str>,
+}
+
+fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
+    use crate::core::bench::{store, sweep};
     use crate::core::proxy::serve::Upstream;
     let setup = bench_setup(ctx)?;
     let cfg = &ctx.config;
@@ -624,100 +640,331 @@ fn bench(ctx: &Ctx, fixture_path: Option<&std::path::Path>) -> Result<ExitCode, 
         base_url: cfg.base_url(),
         api_key: cfg.file.server.api_key.clone(),
     };
-    let ctx_loaded = ensure_ready(ctx, &upstream, &setup)?;
-    let facade = ClaudeFacade::new(&setup.eff.name);
+    let props = ensure_ready(ctx, &upstream, &setup)?;
+    let plan: sweep::SweepPlan = (&cfg.file.bench).into();
+    let head = build_head(
+        ctx,
+        &setup,
+        &HeadInputs {
+            props,
+            plan: &plan,
+            fixture: args.fixture,
+        },
+    )?;
+    let (mut writer, done) = open_run(ctx, &head, args.resume)?;
+    run_suites(
+        &mut TaskSink {
+            writer: &mut writer,
+            done: &done,
+        },
+        ctx,
+        &SuiteInputs {
+            plan: &plan,
+            upstream: &upstream,
+            model: &setup.eff.name,
+            fixture: args.fixture,
+        },
+    )?;
+    let log = store::RunLog::load(writer.dir())?;
+    print!("{}", store::render_run(&log));
+    println!("run: {}", writer.dir().display());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What the suites need beyond the sink and `Ctx` (§4).
+struct SuiteInputs<'a> {
+    plan: &'a crate::core::bench::sweep::SweepPlan,
+    upstream: &'a crate::core::proxy::serve::Upstream,
+    model: &'a str,
+    fixture: Option<&'a std::path::Path>,
+}
+
+fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<(), ChekovError> {
+    use crate::core::bench::runner;
+    use crate::core::proxy::claude::ClaudeFacade;
+    let facade = ClaudeFacade::new(inputs.model);
     let wire = runner::ProbeWire {
         http: ctx.http.as_ref(),
         facade: &facade,
-        upstream: &upstream,
+        upstream: inputs.upstream,
+        pins: runner::SamplingPins {
+            seed: ctx.config.file.bench.seed,
+        },
     };
-    let results = sweep::run_sweep(&(&cfg.file.bench).into(), &mut |req| {
-        runner::cross(&wire, req)
-    })?;
-    let graded = match fixture_path {
-        Some(path) => grade_fixture(&wire, path)?,
-        None => Vec::new(),
-    };
-    let outcome = BenchOutcome {
-        ctx_loaded,
-        results,
-        graded,
-    };
-    let record = build_record(ctx, &setup, outcome);
-    let path = store::save(&cfg.bench_dir(), &record)?;
-    print!("{}", store::render_run(&record));
-    println!("stored: {}", path.display());
-    Ok(ExitCode::SUCCESS)
+    run_throughput(sink, inputs.plan, &wire)?;
+    if let Some(path) = inputs.fixture {
+        run_fixture(sink, &wire, path)?;
+    }
+    Ok(())
+}
+
+/// Create a fresh run, or reopen one for `--resume` (stamp must match).
+fn open_run(
+    ctx: &Ctx,
+    head: &crate::core::bench::store::RunHead,
+    resume: Option<&str>,
+) -> Result<(crate::core::bench::store::RunWriter, Vec<(String, String)>), ChekovError> {
+    use crate::core::bench::store::RunWriter;
+    let eval = ctx.config.eval_dir();
+    if let Some(run_id) = resume {
+        let (writer, log) = RunWriter::resume(&eval, run_id, head)?;
+        let done = log
+            .rows
+            .iter()
+            .map(|r| (r.suite.clone(), r.task_id.clone()))
+            .collect();
+        return Ok((writer, done));
+    }
+    let run_id = format!("{}-{}", crate::core::clock::utc_compact_now(), head.model);
+    Ok((RunWriter::create(&eval, &run_id, head)?, Vec::new()))
+}
+
+/// Where task rows land, plus what a resumed run already holds.
+struct TaskSink<'a> {
+    writer: &'a mut crate::core::bench::store::RunWriter,
+    done: &'a [(String, String)],
+}
+
+impl TaskSink<'_> {
+    fn is_done(&self, suite: &str, task_id: &str) -> bool {
+        self.done.iter().any(|(s, t)| s == suite && t == task_id)
+    }
+}
+
+/// Measure each depth and append its row as soon as it completes — a crash
+/// or ctrl-C loses at most the depth in flight.
+fn run_throughput(
+    sink: &mut TaskSink,
+    plan: &crate::core::bench::sweep::SweepPlan,
+    wire: &crate::core::bench::runner::ProbeWire,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::{runner, store, sweep};
+    for &depth in &plan.depths {
+        let task_id = format!("depth-{depth}");
+        if sink.is_done("throughput", &task_id) {
+            eprintln!("chekov: {task_id} already recorded — skipped (--resume)");
+            continue;
+        }
+        let result = sweep::measure_depth(plan, depth, &mut |req| runner::cross(wire, req))?;
+        let warmup = result.decode.as_ref().map_or(0, |s| s.warmup_dropped);
+        sink.writer.append(store::Task {
+            suite: "throughput".into(),
+            task_id,
+            measure: store::Measure {
+                prompt_n: result.prompt_n,
+                decode_samples: result.decode_samples,
+                prefill_samples: result.prefill_samples,
+                warmup_dropped: u32::try_from(warmup).unwrap_or(0),
+            },
+            grade: None,
+        })?;
+    }
+    Ok(())
 }
 
 /// Cross and grade every fixture probe. A crossing failure records a FAIL
 /// with its reason — a broken exchange must never look like an empty reply.
-fn grade_fixture(
+fn run_fixture(
+    sink: &mut TaskSink,
     wire: &crate::core::bench::runner::ProbeWire,
     path: &std::path::Path,
-) -> Result<Vec<crate::core::bench::store::ProbeRecord>, ChekovError> {
+) -> Result<(), ChekovError> {
     use crate::core::bench::{fixture, grade, probes, runner, store};
     let loaded = fixture::load(path)?;
-    let mut out = Vec::new();
     for probe in &loaded.probes {
-        let outcome = runner::cross(wire, &probes::fixture_probe(probe))
-            .map(|artifact| grade::grade(&artifact.anthropic_body, probe));
-        let (pass, reason) = match outcome {
-            Ok(grade::Grade::Pass) => (true, None),
-            Ok(grade::Grade::Fail { reason }) => (false, Some(reason)),
-            Err(e) => (false, Some(e.to_string())),
-        };
-        out.push(store::ProbeRecord {
-            id: probe.id.clone(),
-            pass,
-            reason,
+        if sink.is_done("fixture", &probe.id) {
+            eprintln!(
+                "chekov: fixture {} already recorded — skipped (--resume)",
+                probe.id
+            );
+            continue;
+        }
+        let outcome = runner::cross(wire, &probes::fixture_probe(probe)).map(|artifact| {
+            (
+                artifact.timings,
+                grade::grade(&artifact.anthropic_body, probe),
+            )
         });
+        let (measure, verdict) = match outcome {
+            Ok((timings, graded)) => (probe_measure(&timings), grade_row(graded)),
+            Err(e) => failed_probe(&e),
+        };
+        sink.writer.append(store::Task {
+            suite: "fixture".into(),
+            task_id: probe.id.clone(),
+            measure,
+            grade: Some(verdict),
+        })?;
     }
-    Ok(out)
+    Ok(())
 }
 
-/// What one bench measured, bundled for the record builder (§4).
-struct BenchOutcome {
-    ctx_loaded: u32,
-    results: Vec<crate::core::bench::sweep::DepthResult>,
-    graded: Vec<crate::core::bench::store::ProbeRecord>,
+/// A crossing failure is a FAILED probe with the error as its reason and no
+/// invented measurement — never an empty reply.
+fn failed_probe(
+    e: &ChekovError,
+) -> (
+    crate::core::bench::store::Measure,
+    crate::core::bench::store::GradeRow,
+) {
+    use crate::core::bench::store;
+    (
+        store::Measure {
+            prompt_n: 0,
+            decode_samples: vec![],
+            prefill_samples: vec![],
+            warmup_dropped: 0,
+        },
+        store::GradeRow {
+            pass: false,
+            reason: Some(e.to_string()),
+        },
+    )
 }
 
-fn build_record(
+fn probe_measure(
+    timings: &crate::core::bench::runner::Timings,
+) -> crate::core::bench::store::Measure {
+    crate::core::bench::store::Measure {
+        prompt_n: timings.prompt_n,
+        decode_samples: vec![timings.predicted_per_second],
+        prefill_samples: vec![timings.prompt_per_second],
+        warmup_dropped: 0,
+    }
+}
+
+fn grade_row(graded: crate::core::bench::grade::Grade) -> crate::core::bench::store::GradeRow {
+    use crate::core::bench::{grade, store};
+    match graded {
+        grade::Grade::Pass => store::GradeRow {
+            pass: true,
+            reason: None,
+        },
+        grade::Grade::Fail { reason } => store::GradeRow {
+            pass: false,
+            reason: Some(reason),
+        },
+    }
+}
+
+/// Everything the stamp is built from beyond `Ctx` and the setup (§4).
+struct HeadInputs<'a> {
+    props: crate::core::bench::runner::PropsInfo,
+    plan: &'a crate::core::bench::sweep::SweepPlan,
+    fixture: Option<&'a std::path::Path>,
+}
+
+/// Who measured: the hashed machine identity, its human-readable brand, and
+/// the engine commit. Each is required — a stamp cannot pin an unknown.
+fn stamp_identity(
+    cfg: &crate::core::config::Config,
+) -> Result<(String, Option<String>, String), ChekovError> {
+    let probed = machine::probe(&cfg.engine_dir());
+    let machine_id = machine::machine_id(&probed).ok_or_else(|| ChekovError::SetupIncomplete {
+        remaining: "the machine identity is incomplete (model, memory, chip, or GPU \
+                    cores unknown) — run `chekov setup` and retry"
+            .to_owned(),
+    })?;
+    let engine = crate::core::engine::recorded_commit(&cfg.logs_dir())
+        .or_else(|| crate::core::engine::current_commit(&cfg.engine_dir()))
+        .ok_or_else(|| ChekovError::SetupIncomplete {
+            remaining: "the engine commit is unknown — run `chekov update --engine` so \
+                        the stamp can pin it"
+                .to_owned(),
+        })?;
+    Ok((machine_id, probed.chip, engine))
+}
+
+fn build_head(
     ctx: &Ctx,
     setup: &BenchSetup,
-    outcome: BenchOutcome,
-) -> crate::core::bench::store::RunRecord {
-    use crate::core::bench::store;
+    inputs: &HeadInputs,
+) -> Result<crate::core::bench::store::RunHead, ChekovError> {
+    use crate::core::bench::{probes, stamp, store};
     let cfg = &ctx.config;
-    let machine = machine::probe(&cfg.engine_dir());
-    store::RunRecord {
-        schema_version: store::SCHEMA_VERSION,
-        created_utc: crate::core::clock::utc_compact_now(),
+    let (machine_id, machine_brand, engine) = stamp_identity(cfg)?;
+    let launch_args = crate::core::server::launch_args(cfg, &setup.eff);
+    let bench_cfg = &cfg.file.bench;
+    let flags = stamped_flags(&launch_args);
+    let head_stamp = stamp::Stamp {
+        machine_id,
+        engine_build_commit: engine,
+        weights_revision: format!(
+            "{}/{}",
+            setup.eff.entry.revision, setup.eff.entry.first_shard
+        ),
+        quant: setup.eff.entry.quant.clone(),
+        ctx: inputs.props.n_ctx,
+        n_parallel: inputs.props.total_slots,
+        kv_unified: flags.kv_unified,
+        n_batch: flags.n_batch,
+        n_ubatch: flags.n_ubatch,
+        type_k: flags.type_k,
+        type_v: flags.type_v,
+        flash_attn: flags.flash_attn,
+        seed: bench_cfg.seed,
+        temperature_milli: 0,
+        chekov_version: env!("CARGO_PKG_VERSION").to_owned(),
+        prompt_set_hash: probes::prompt_set_hash(inputs.plan, bench_cfg.seed),
+        corpus_id: corpus_id(inputs.fixture)?,
+    };
+    Ok(store::RunHead {
         model: setup.eff.name.clone(),
-        ctx: outcome.ctx_loaded,
-        launch_args: crate::core::server::launch_args(cfg, &setup.eff),
-        engine_build_commit: crate::core::engine::recorded_commit(&cfg.logs_dir())
-            .or_else(|| crate::core::engine::current_commit(&cfg.engine_dir())),
-        machine: store::MachineRecord {
-            chip: machine.chip,
-            memsize_bytes: machine.memsize_bytes,
-            gpu_budget_mib: machine.budget.map(|b| b.value),
-            budget_provenance: machine.budget.map(|b| b.provenance.label().to_owned()),
-        },
-        depths: outcome
-            .results
-            .iter()
-            .map(store::DepthRecord::from)
-            .collect(),
-        fixture: outcome.graded,
+        machine_brand,
+        launch_args,
+        stamp: head_stamp,
+    })
+}
+
+/// The stamp's flag-sourced sextet, each spelling covered (§7.4).
+struct StampedFlags {
+    kv_unified: String,
+    n_batch: String,
+    n_ubatch: String,
+    type_k: String,
+    type_v: String,
+    flash_attn: String,
+}
+
+fn stamped_flags(launch_args: &[String]) -> StampedFlags {
+    use crate::core::bench::stamp::flag_value_either as flags;
+    StampedFlags {
+        kv_unified: flags(launch_args, &["-kvu", "--kv-unified"]),
+        n_batch: flags(launch_args, &["-b", "--batch-size"]),
+        n_ubatch: flags(launch_args, &["-ub", "--ubatch-size"]),
+        type_k: flags(launch_args, &["-ctk", "--cache-type-k"]),
+        type_v: flags(launch_args, &["-ctv", "--cache-type-v"]),
+        flash_attn: flags(launch_args, &["-fa", "--flash-attn"]),
+    }
+}
+
+/// "throughput-v1", plus the fixture file's content hash when one is graded —
+/// runs over different task sets must never compare as the same set.
+fn corpus_id(fixture: Option<&std::path::Path>) -> Result<String, ChekovError> {
+    let Some(path) = fixture else {
+        return Ok("throughput-v1".to_owned());
+    };
+    let text = std::fs::read_to_string(path).map_err(|e| ChekovError::FixtureInvalid {
+        path: path.to_path_buf(),
+        reason: e.to_string(),
+    })?;
+    let digest = crate::core::hash::sha256_hex(text.as_bytes());
+    Ok(format!("throughput-v1+fixture:{}", &digest[..12]))
+}
+
+/// A run argument is a directory path, or a run id under `eval/`.
+fn resolve_run(ctx: &Ctx, arg: &std::path::Path) -> std::path::PathBuf {
+    if arg.is_dir() {
+        arg.to_path_buf()
+    } else {
+        ctx.config.eval_dir().join(arg)
     }
 }
 
 fn compare(ctx: &Ctx, a: &std::path::Path, b: &std::path::Path) -> Result<ExitCode, ChekovError> {
     use crate::core::bench::{compare as bench_compare, store};
-    let run_a = store::load(a)?;
-    let run_b = store::load(b)?;
+    let run_a = store::RunLog::load(&resolve_run(ctx, a))?;
+    let run_b = store::RunLog::load(&resolve_run(ctx, b))?;
     let rows = bench_compare::compare_runs(
         &run_a,
         &run_b,
@@ -766,7 +1013,8 @@ mod tests {
         .expect("bench parses");
         match cli.cmd {
             crate::cli::Cmd::Capability(cap) => match cap.action {
-                Some(super::CapAction::Bench { fixture }) => {
+                Some(super::CapAction::Bench { fixture, resume }) => {
+                    assert_eq!(resume, None);
                     assert_eq!(
                         fixture.as_deref(),
                         Some(std::path::Path::new("probes.toml"))

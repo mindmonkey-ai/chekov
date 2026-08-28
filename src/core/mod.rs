@@ -6,6 +6,7 @@ pub mod config;
 pub mod engine;
 pub mod frontier;
 pub mod gguf;
+pub mod hash;
 pub mod hub;
 pub mod launch;
 pub mod machine;
