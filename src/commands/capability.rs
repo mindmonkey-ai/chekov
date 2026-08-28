@@ -7,14 +7,29 @@
 use std::process::ExitCode;
 
 use super::{Command, Ctx};
-use crate::core::machine::{self, Machine};
+use crate::core::frontier;
+use crate::core::machine::{self, Machine, Probed, Provenance};
 use crate::error::ChekovError;
 
 #[derive(Debug, clap::Args)]
 pub struct CapabilityCmd {
+    #[command(subcommand)]
+    pub action: Option<CapAction>,
     /// Emit the scan as JSON instead of a table.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum CapAction {
+    /// What this Mac is and what it can hold (the default).
+    Scan,
+    /// Grid of registered models against context lengths, with fit verdicts.
+    Graph {
+        /// Context lengths to plot; repeatable. Defaults to 32K/128K/256K.
+        #[arg(long = "ctx")]
+        ctx: Vec<u32>,
+    },
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -66,6 +81,9 @@ fn render_budget(m: &Machine) -> String {
 
 impl Command for CapabilityCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
+        if let Some(CapAction::Graph { ctx: ladder }) = &self.action {
+            return graph(ctx, ladder);
+        }
         let m = machine::probe(&ctx.config.engine_dir());
         if self.json {
             println!("{}", render_json(&m));
@@ -74,6 +92,77 @@ impl Command for CapabilityCmd {
         }
         Ok(ExitCode::SUCCESS)
     }
+}
+
+fn graph(ctx: &Ctx, ladder: &[u32]) -> Result<ExitCode, ChekovError> {
+    let ladder = if ladder.is_empty() {
+        vec![32_768, 131_072, 262_144]
+    } else {
+        ladder.to_vec()
+    };
+    let budget = machine::live_gpu_budget(&ctx.config.engine_dir()).ok_or_else(|| {
+        ChekovError::SetupIncomplete {
+            remaining: "the GPU budget is unknown — run `chekov setup` so the engine \
+                        can report it"
+                .to_owned(),
+        }
+    })?;
+    let f = build_frontier(ctx, &ladder, budget)?;
+    println!("{}", frontier::render_ascii(&f));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Rows come from the registry; weights come from the files already on disk.
+/// KV and overhead are an explicitly predicted reserve until the GGUF header
+/// reader lands — an unknown must never render as a confident fit.
+fn build_frontier(
+    ctx: &Ctx,
+    ladder: &[u32],
+    budget: Probed<u64>,
+) -> Result<frontier::Frontier, ChekovError> {
+    let reg = ctx.registry()?;
+    let mut rows: Vec<frontier::Row> = Vec::new();
+    for (name, entry) in &reg.models {
+        let weights = weights_on_disk(ctx, entry);
+        let cells = ladder
+            .iter()
+            .map(|&c| frontier::Cell {
+                weights_bytes: weights,
+                kv_bytes: Probed::new(Some(kv_reserve(c)), Provenance::Predicted),
+                overhead_bytes: Probed::new(Some(3 * 1024 * 1024 * 1024), Provenance::Predicted),
+            })
+            .collect();
+        rows.push(frontier::Row {
+            name: name.clone(),
+            quant: entry.quant.clone(),
+            cells,
+        });
+    }
+    rows.sort_by_key(|r| r.cells.first().and_then(|c| c.weights_bytes));
+    Ok(frontier::Frontier {
+        budget,
+        ctx_ladder: ladder.to_vec(),
+        rows,
+    })
+}
+
+/// Bytes actually on disk for a model directory, or `None` when it is absent.
+fn weights_on_disk(ctx: &Ctx, entry: &crate::core::registry::ModelEntry) -> Option<u64> {
+    let dir = ctx.config.root.join(&entry.path);
+    let mut total = 0_u64;
+    for e in std::fs::read_dir(dir).ok()? {
+        let e = e.ok()?;
+        if e.path().extension().is_some_and(|x| x == "gguf") {
+            total += e.metadata().ok()?.len();
+        }
+    }
+    (total > 0).then_some(total)
+}
+
+/// A deliberately coarse KV reserve, labelled Predicted at the call site.
+/// Real geometry needs the GGUF header, which slice 3 reads.
+const fn kv_reserve(ctx_len: u32) -> u64 {
+    (ctx_len as u64) * 40 * 8 * 128 * 2 * 17 / 16
 }
 
 /// Machine-readable scan. Provenance is a field, never dropped.

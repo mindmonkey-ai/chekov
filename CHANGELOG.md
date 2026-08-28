@@ -12,6 +12,14 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
+- `chekov capability graph [--ctx N]...` — slice 2 of the capability spec. A
+  grid of registered models against context lengths. Each cell is two
+  characters (fit verdict, then input provenance) because one glyph cannot
+  carry two orthogonal facts. A cell with any unknown component renders `?`,
+  never a fit; when the GPU ceiling itself is predicted the header says
+  `CEILING PREDICTED` and the legend reads "fits against a predicted ceiling"
+  rather than promising a plain fit. KV and overhead are a labelled reserve
+  until the GGUF header reader lands in slice 3.
 - `chekov capability [--json]` — slice 1 of the capability spec. Reports chip,
   model, memory, GPU cores, performance threads, macOS, and the GPU budget with
   its provenance. On the author's M3 Ultra it prints
