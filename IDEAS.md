@@ -97,7 +97,7 @@ machine where the engine reports 228065 MiB — chekov understates its own budge
 Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 `MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)`.
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
-Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 PARTIAL (toolparser + recommend over the registry; catalog/live-HF still open); slices 5-6 OPEN**
+Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slices 5-6 OPEN**
 
 ## Tool-parser gate: report, do not refuse (2026-08-27)
 Slice 4 of the capability spec makes "falls through to llama.cpp's generic PEG

@@ -38,6 +38,13 @@ pub enum CapAction {
         /// `agent` weighs tool-call support; `chat` ignores it.
         #[arg(long, default_value = "agent")]
         role: String,
+        /// Also query Hugging Face for candidates. The ONLY networked path;
+        /// chekov never reaches out on an ordinary invocation.
+        #[arg(long)]
+        refresh: bool,
+        /// How many discovered repos to size (each costs one request).
+        #[arg(long, default_value_t = 12)]
+        limit: u32,
     },
     /// Read one model's `GGUF` header and print its fit arithmetic line by line.
     Explain {
@@ -103,8 +110,21 @@ impl Command for CapabilityCmd {
             Some(CapAction::Explain { name, ctx: at }) => {
                 return explain(ctx, name.as_deref(), *at);
             }
-            Some(CapAction::Recommend { ctx: at, role }) => {
-                return recommend(ctx, *at, role);
+            Some(CapAction::Recommend {
+                ctx: at,
+                role,
+                refresh,
+                limit,
+            }) => {
+                return recommend(
+                    ctx,
+                    &RecommendArgs {
+                        at: *at,
+                        role,
+                        refresh: *refresh,
+                        limit: *limit,
+                    },
+                );
             }
             _ => {}
         }
@@ -342,8 +362,16 @@ pub fn render_explain(e: &Explained) -> String {
 }
 
 /// Rank the registered models for this machine, printing why each was rejected.
-fn recommend(ctx: &Ctx, at: Option<u32>, role: &str) -> Result<ExitCode, ChekovError> {
+struct RecommendArgs<'a> {
+    at: Option<u32>,
+    role: &'a str,
+    refresh: bool,
+    limit: u32,
+}
+
+fn recommend(ctx: &Ctx, args: &RecommendArgs) -> Result<ExitCode, ChekovError> {
     use crate::core::recommend::{Role, rank};
+    let (at, role) = (args.at, args.role);
     let role = match role {
         "chat" => Role::Chat,
         _ => Role::Agent,
@@ -360,11 +388,17 @@ fn recommend(ctx: &Ctx, at: Option<u32>, role: &str) -> Result<ExitCode, ChekovE
         reg: &reg,
         ctx_len,
     };
-    let candidates = reg
+    let mut candidates: Vec<_> = reg
         .models
         .iter()
         .map(|(name, entry)| candidate_for(&input, name, entry))
         .collect();
+    if args.refresh {
+        eprintln!("chekov: querying Hugging Face (--refresh)…");
+        candidates.extend(discovered(ctx, ctx_len, args.limit)?);
+    } else {
+        eprintln!("chekov: registered models only — pass --refresh to also query Hugging Face");
+    }
     let ranked = rank(candidates, budget.value, role);
     println!("{}", render_recommend(&ranked, budget, ctx_len));
     Ok(ExitCode::SUCCESS)
@@ -417,37 +451,51 @@ pub fn render_recommend(
     budget: Probed<u64>,
     ctx_len: u32,
 ) -> String {
-    use crate::core::recommend::Verdict;
-    use std::fmt::Write;
+    let width = ranked
+        .iter()
+        .map(|r| r.candidate.name.len())
+        .max()
+        .unwrap_or(20)
+        .clamp(20, 52);
     let mut out = format!(
-        "  at ctx {ctx_len}, budget {} MiB ({})\n\n",
+        "  at ctx {ctx_len}, budget {} MiB ({})\n           per repo: the largest quant whose size is fully known — best quality \
+         that fits\n\n",
         budget.value,
         budget.provenance.label()
     );
     let mut rank = 0;
     for r in ranked {
-        match &r.verdict {
-            Verdict::Ranked { notes } => {
-                rank += 1;
-                let _ = writeln!(
-                    out,
-                    "  {rank}. {:22} {:>12}   {:7}  tools: {}",
-                    r.candidate.name,
-                    r.candidate.quant,
-                    fit_word(r.fit),
-                    r.candidate.parser.label()
-                );
-                for n in notes {
-                    let _ = writeln!(out, "       note: {n}");
-                }
+        out.push_str(&render_row(r, &mut rank, width));
+    }
+    out
+}
+
+/// One row, ranked or rejected. Rejections keep their reason inline.
+fn render_row(r: &crate::core::recommend::Ranked, rank: &mut u32, width: usize) -> String {
+    use crate::core::recommend::Verdict;
+    use std::fmt::Write;
+    let mut out = String::new();
+    match &r.verdict {
+        Verdict::Ranked { notes } => {
+            *rank += 1;
+            let _ = writeln!(
+                out,
+                "  {rank:>2}. {:width$} {:>12}   {:7}  tools: {}",
+                r.candidate.name,
+                r.candidate.quant,
+                fit_word(r.fit),
+                r.candidate.parser.label()
+            );
+            for n in notes {
+                let _ = writeln!(out, "       note: {n}");
             }
-            Verdict::Rejected { reason } => {
-                let _ = writeln!(
-                    out,
-                    "   -  {:22} {:>12}   rejected: {reason}",
-                    r.candidate.name, r.candidate.quant
-                );
-            }
+        }
+        Verdict::Rejected { reason } => {
+            let _ = writeln!(
+                out,
+                "   -  {:width$} {:>12}   rejected: {reason}",
+                r.candidate.name, r.candidate.quant
+            );
         }
     }
     out
@@ -461,6 +509,50 @@ const fn fit_word(fit: crate::core::frontier::Fit) -> &'static str {
         Fit::Exceeds => "exceeds",
         Fit::Unknown => "unknown",
     }
+}
+
+/// Candidates from the live HF list endpoint, sized through the same
+/// `quant_options` path `pull` uses — so a repo that withholds a shard's size
+/// yields `None` rather than a partial sum.
+fn discovered(
+    ctx: &Ctx,
+    ctx_len: u32,
+    limit: u32,
+) -> Result<Vec<crate::core::recommend::Candidate>, ChekovError> {
+    use crate::core::{catalog, hub, toolparser};
+    let listed = catalog::discover(ctx.http.as_ref(), limit)?;
+    let mut out = Vec::new();
+    for row in listed.iter().filter(|r| catalog::worth_sizing(r)) {
+        let Ok(repo) = crate::core::pullspec::RepoId::try_new(&row.id) else {
+            continue;
+        };
+        let Ok(snapshot) = hub::fetch_snapshot(ctx.http.as_ref(), &repo, None) else {
+            continue;
+        };
+        let parser = row
+            .gguf
+            .as_ref()
+            .and_then(|g| g.chat_template.as_deref())
+            .map_or(
+                toolparser::ToolParser::AutoparserFallthrough,
+                toolparser::classify,
+            );
+        // Largest quant whose weights are fully known — sizes are measured per
+        // shard, never computed from a nominal bits-per-weight.
+        let best = hub::quant_options(&snapshot)
+            .into_iter()
+            .filter(|o| o.bytes.is_some())
+            .max_by_key(|o| o.bytes);
+        let Some(best) = best else { continue };
+        out.push(crate::core::recommend::Candidate {
+            name: row.id.clone(),
+            quant: best.tag,
+            // KV is unknown without the header; the reserve keeps it honest.
+            total_bytes: best.bytes.map(|w| w + kv_reserve(ctx_len)),
+            parser,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
