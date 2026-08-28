@@ -98,3 +98,17 @@ Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 `MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)`.
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
 Proposed 2026-08-25 — status: **slices 1-3 (scan, graph, GGUF sizing + explain) SHIPPED; slices 4-6 OPEN**
+
+## Tool-parser gate: report, do not refuse (2026-08-27)
+Slice 4 of the capability spec makes "falls through to llama.cpp's generic PEG
+autoparser" a HARD REFUSAL under `--role agent`. Replaying the real cascade
+(`llama.cpp/common/chat.cpp` ~3430-3552) against live templates shows that gate
+would reject `unsloth/MiniMax-M2.7-GGUF` — the author's own daily driver, marked
+`hermes_ok = true` in `models.toml`. Its 6594-char template carries
+`<minimax:tool_call>` and `<invoke name=` but not the `]<]minimax[>[` namespace
+token that llama.cpp's only MiniMax arm (M3) requires, so it falls through and
+still works. Fallthrough means "no dedicated parser", not "cannot call tools".
+`core::toolparser` therefore classifies and reports; it does not refuse.
+Whether `recommend --role agent` should DOWNRANK fallthrough candidates (rather
+than reject them) is the open question.
+Proposed 2026-08-27 — status: OPEN
