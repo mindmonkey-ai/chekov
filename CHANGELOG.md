@@ -12,6 +12,26 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
+- `chekov capability [--json]` — slice 1 of the capability spec. Reports chip,
+  model, memory, GPU cores, performance threads, macOS, and the GPU budget with
+  its provenance. On the author's M3 Ultra it prints
+  `228065 MiB (engine-reported) — 31457 MiB more than the 196608 MiB formula
+  would predict`.
+
+### Changed
+- **The wired-limit gate is loosened**, deliberately. `run`'s refusal and
+  `status`'s report now resolve the GPU budget through the same
+  `machine::live_gpu_budget` ladder the new scan prints: the engine's own
+  `--list-devices` figure first, then an explicit `iogpu.wired_limit_mb`, and
+  only then the 75%-of-RAM formula. The formula is measurably 31457 MiB low on
+  a 256 GiB M3 Ultra — verified against
+  `MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)` — so this makes `run`
+  accept models it previously refused between those two figures. It is a
+  correctness fix that happens to loosen a gate, not a relaxation for
+  convenience; when the engine is not built the ladder falls back to the old
+  formula and behaviour is unchanged.
+
+### Added
 - `setup` and `update --engine` record the llama.cpp commit they built to
   `logs/chekov.engine`, and `chekov status` shows it — an unrecorded engine
   says so and names the command that records one, rather than being guessed.

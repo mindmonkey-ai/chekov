@@ -100,7 +100,8 @@ The registry stores the absolute path; everything else works unchanged.
 | `use <name>` | Set the active model. Never auto-restarts — prints the restart hint. |
 | `rm <name> [--yes]` | Remove a model and its files. Confirmation required; refuses the active or currently running model. |
 | `show [name]` | Fully resolved server invocation + license provenance — zero mystery about what will run. |
-| `doctor` | Five checks (below). Skipped is reported as SKIP, never PASS. |
+| `doctor` | Five checks (below) — four probe the server, one compares configuration. Skipped is reported as SKIP, never PASS. |
+| `capability [--json]` | What this Mac is and what it can hold: chip, GPU cores, performance threads, macOS, and the GPU budget **with its provenance**. The budget is read from the engine (`llama-server --list-devices`) when it is built, from `iogpu.wired_limit_mb` when set, and only otherwise from the 75%-of-RAM formula — which measures 31457 MiB low on a 256 GiB M3 Ultra, so the source is always printed. |
 | `setup [--dry-run]` | Engine clone/pull + cmake Metal build; creates `models/`/`logs/`; wired-limit verification (see Installation). Idempotent. |
 | `update --engine\|--model\|--all [--dry-run]` | Engine: git pull + rebuild, reports old→new commit. Model: re-resolve the active repo; new revisions land in a new `@rev` dir, license is diffed and **any change stops for explicit confirmation (STOP-4)** before an atomic registry repoint. Old revisions are never auto-deleted. |
 | `integrate hermes [--yes]` | Surgical merge into `~/.hermes/config.yaml` (details below). |
