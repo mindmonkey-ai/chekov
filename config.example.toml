@@ -22,3 +22,11 @@ hermes_ctx_floor = 65536
 canary_max_tokens = 1500
 degenerate_run_len = 30
 replacement_char_max_pct = 5
+
+[bench]                        # `chekov capability bench` sweep
+depths = [1024, 4096, 16384]   # prompt depths (approx tokens)
+repetitions = 5                # per depth; the first is dropped as warmup
+max_tokens = 128               # decode length per probe
+significance_pct = 5           # median delta below this: no significant difference
+ready_max_polls = 600          # readiness budget: polls x interval
+ready_interval_ms = 500

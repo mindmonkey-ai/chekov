@@ -12,6 +12,22 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
+- `chekov capability bench [--fixture <path>]` — slice 5 of the capability
+  spec, completed. Measures the running server THROUGH chekov's own
+  Anthropic↔OpenAI translator: `/health`+pid readiness (a server that dies
+  while loading fails as "died", not as a timeout), a `/props` assertion that
+  the loaded `n_ctx` matches the config's intent, a depth sweep whose samples
+  are stored raw under `logs/bench/` (summaries are recomputed on read, so a
+  stored median can never drift), and optional graded probes from a
+  user-supplied TOML fixture. There is deliberately no compiled-in fixture:
+  fixture-v1 is release-gated on a three-model measurement campaign.
+- `chekov capability compare <a.json> <b.json>` — refuses runs from different
+  engine builds (naming `engine.build_commit`, and refusing an unrecorded one,
+  which cannot be attested), compares only depths present in both runs, and
+  prints `no significant difference` as a first-class outcome rather than
+  forcing a winner.
+- `[bench]` config section: sweep depths, repetitions, probe `max_tokens`,
+  the significance threshold, and the readiness poll budget.
 - `core::stats` — the statistical honesty slice 5's bench rests on. Median with
   p10/p90, never mean ± stddev, because decode rate is right-skewed by thermal
   events and a mean flatters a run that hit one stall. The first repetition is
