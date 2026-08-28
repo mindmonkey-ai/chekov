@@ -188,6 +188,13 @@ pub enum ChekovError {
     BenchWrongModel { running: String, resolved: String },
 
     #[error(
+        "llama-server's own --help does not list '{flag}' — a routine \
+         `chekov update --engine` may have removed it upstream (removed flags \
+         terminate startup); fix `extra_flags`/defaults in models.toml and re-run"
+    )]
+    BenchFlagUnknown { flag: String },
+
+    #[error(
         "degenerate output detected: {reason} — this matches the known GGUF \
          corruption class; re-pull the model shards with `chekov pull` and re-run \
          `chekov doctor`"

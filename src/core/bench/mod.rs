@@ -5,6 +5,7 @@
 pub mod compare;
 pub mod fixture;
 pub mod grade;
+pub mod lifecycle;
 pub mod probes;
 pub mod runner;
 pub mod stamp;
