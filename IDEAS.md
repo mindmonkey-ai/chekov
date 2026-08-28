@@ -97,7 +97,7 @@ machine where the engine reports 228065 MiB — chekov understates its own budge
 Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 `MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)`.
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
-Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap parts 2 (per-candidate lifecycle §7.3) and 3 (probe suites §7.2) OPEN; fixture-v1 content release-gated; slice 6 OPEN**
+Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) OPEN; fixture-v1 content release-gated; slice 6 OPEN**
 
 ## Feed measured bench medians into `capability graph` (2026-08-27)
 Slice 5's spec line "the `--metric tok-s` grid upgrades from predicted to
