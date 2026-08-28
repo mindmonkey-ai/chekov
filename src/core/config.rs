@@ -15,6 +15,7 @@ pub struct FileConfig {
     pub server: ServerSection,
     pub limits: LimitsSection,
     pub doctor: DoctorSection,
+    pub bench: BenchSection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -70,6 +71,37 @@ impl Default for DoctorSection {
             canary_max_tokens: 1_500,
             degenerate_run_len: 30,
             replacement_char_max_pct: 5,
+        }
+    }
+}
+
+/// `chekov capability bench` tunables (§6: knobs live here, not in code).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BenchSection {
+    /// Prompt depths (approximate tokens) the sweep measures, ascending.
+    pub depths: Vec<u32>,
+    /// Probes per depth; `core::stats` drops the first as warmup.
+    pub repetitions: u32,
+    /// Decode length per probe — long enough to measure, short enough to end.
+    pub max_tokens: u32,
+    /// Median delta (percent) below which two runs are "no significant difference".
+    pub significance_pct: u32,
+    /// Readiness poll budget: attempts × interval. 600 × 500ms covers the
+    /// ~2-minute load of a ~158 GiB model with headroom.
+    pub ready_max_polls: u32,
+    pub ready_interval_ms: u64,
+}
+
+impl Default for BenchSection {
+    fn default() -> Self {
+        Self {
+            depths: vec![1024, 4096, 16384],
+            repetitions: 5,
+            max_tokens: 128,
+            significance_pct: 5,
+            ready_max_polls: 600,
+            ready_interval_ms: 500,
         }
     }
 }
@@ -135,6 +167,12 @@ impl Config {
     #[must_use]
     pub fn engine_dir(&self) -> PathBuf {
         self.root.join("llama.cpp")
+    }
+
+    /// Bench run records, one JSON file per run.
+    #[must_use]
+    pub fn bench_dir(&self) -> PathBuf {
+        self.logs_dir().join("bench")
     }
 
     /// `http://host:port` — the base every probe and integration derives from.
@@ -222,6 +260,27 @@ mod tests {
         std::fs::write(root.join("config.toml"), "[server]\nprot = 9090\n").expect("write");
         let msg = Config::load(&root).expect_err("must reject").to_string();
         assert!(msg.contains("config.toml"), "no path in: {msg}");
+    }
+
+    #[test]
+    fn bench_section_defaults_and_overrides_parse() {
+        let cfg: super::FileConfig = toml::from_str("").expect("empty config is all defaults");
+        assert_eq!(cfg.bench.depths, vec![1024, 4096, 16384]);
+        assert_eq!(cfg.bench.repetitions, 5);
+        assert_eq!(cfg.bench.significance_pct, 5);
+        let cfg: super::FileConfig =
+            toml::from_str("[bench]\ndepths = [2048]\nrepetitions = 3\n").expect("overrides parse");
+        assert_eq!(cfg.bench.depths, vec![2048]);
+        assert_eq!(cfg.bench.repetitions, 3);
+        assert_eq!(cfg.bench.max_tokens, 128, "unset keys keep their defaults");
+    }
+
+    #[test]
+    fn bench_section_refuses_unknown_keys() {
+        assert!(
+            toml::from_str::<super::FileConfig>("[bench]\ntypo = 1\n").is_err(),
+            "deny_unknown_fields (§C.7)"
+        );
     }
 
     #[test]
