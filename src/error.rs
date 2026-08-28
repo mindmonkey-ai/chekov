@@ -196,6 +196,12 @@ pub enum ChekovError {
     BenchResumeNeedsOneCandidate,
 
     #[error(
+        "the compiled-in probe set is invalid ({reason}) — this is a chekov \
+         build defect; report it rather than working around it"
+    )]
+    BenchProbeSetInvalid { reason: String },
+
+    #[error(
         "llama-server's own --help does not list '{flag}' — a routine \
          `chekov update --engine` may have removed it upstream (removed flags \
          terminate startup); fix `extra_flags`/defaults in models.toml and re-run"
