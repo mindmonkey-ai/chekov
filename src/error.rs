@@ -141,6 +141,19 @@ pub enum ChekovError {
     EndpointDown { url: String, reason: String },
 
     #[error(
+        "llama-server (pid {pid}) exited while chekov waited for it to become \
+         ready — read the tail of logs/llama-server.log"
+    )]
+    ServerDiedWhileLoading { pid: i32 },
+
+    #[error(
+        "the server loaded n_ctx {server} but the effective config says {config} — \
+         a bench against the wrong context would be recorded under a config the \
+         server is not running; `chekov restart` and re-run"
+    )]
+    PropsCtxMismatch { server: u32, config: u32 },
+
+    #[error(
         "degenerate output detected: {reason} — this matches the known GGUF \
          corruption class; re-pull the model shards with `chekov pull` and re-run \
          `chekov doctor`"

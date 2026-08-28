@@ -181,6 +181,38 @@ impl Bridge<'_> {
     }
 }
 
+/// Authenticated GET against the upstream llama-server.
+///
+/// `/props` and friends sit behind `--api-key`. Mirrors `Bridge::post`:
+/// non-2xx keeps the body's own explanation instead of ureq's bare status
+/// line. Network-only by nature; exercised live, not in tests (like the
+/// shard download in `hub`).
+pub fn get_bearer(upstream: &Upstream, path: &str) -> Result<String, ChekovError> {
+    let url = format!("{}{}", upstream.base_url, path);
+    let res = ureq::get(&url)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("authorization", &format!("Bearer {}", upstream.api_key))
+        .call()
+        .map_err(|e| ChekovError::EndpointDown {
+            url: url.clone(),
+            reason: e.to_string(),
+        })?;
+    let status = res.status().as_u16();
+    let mut text = String::new();
+    // A body we cannot read is not a reason to lose the status.
+    let _ = res.into_body().into_reader().read_to_string(&mut text);
+    if (200..300).contains(&status) {
+        Ok(text)
+    } else {
+        Err(ChekovError::EndpointDown {
+            url,
+            reason: upstream_reason(status, &text),
+        })
+    }
+}
+
 /// Why an upstream call failed, in words the user can act on.
 ///
 /// ureq renders a non-2xx as `http status: 400` and drops the body, but the
