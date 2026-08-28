@@ -245,30 +245,16 @@ fn build_frontier(
     let mut rows: Vec<frontier::Row> = Vec::new();
     for (name, entry) in &reg.models {
         let weights = weights_on_disk(ctx, entry);
-        // Real geometry when the header can be read; the coarse reserve only
-        // when it cannot — and the cell says which, in its second character.
-        let geometry = reg
-            .effective(name)
-            .ok()
-            .map(|eff| crate::core::server::shard_path(&ctx.config, &eff))
-            .filter(|p| p.exists())
-            .and_then(|p| crate::core::gguf::read_geometry(&p).ok());
+        let geometry = geometry_for(ctx, &reg, name);
         let q8 = entry.extra_flags.iter().any(|f| f == "q8_0")
             || reg.defaults.flags.iter().any(|f| f == "q8_0");
         let cells = ladder
             .iter()
             .map(|&c| frontier::Cell {
                 weights_bytes: weights,
-                kv_bytes: geometry.as_ref().map_or_else(
-                    || Probed::new(Some(kv_reserve(c)), Provenance::Predicted),
-                    |g| {
-                        crate::core::gguf::kv_bytes(g, c, q8).map_or_else(
-                            || Probed::new(None, Provenance::Predicted),
-                            |b| Probed::new(Some(b), Provenance::Measured),
-                        )
-                    },
-                ),
+                kv_bytes: kv_for(geometry.as_ref(), c, q8),
                 overhead_bytes: Probed::new(Some(3 * 1024 * 1024 * 1024), Provenance::Predicted),
+                speed: None,
             })
             .collect();
         rows.push(frontier::Row {
@@ -282,7 +268,40 @@ fn build_frontier(
         budget,
         ctx_ladder: ladder.to_vec(),
         rows,
+        metric: frontier::Metric::Fit,
+        engine_commit: None,
+        notes: Vec::new(),
     })
+}
+
+/// Real geometry when the first shard is on disk and its header reads.
+fn geometry_for(
+    ctx: &Ctx,
+    reg: &crate::core::registry::Registry,
+    name: &str,
+) -> Option<crate::core::gguf::Geometry> {
+    let eff = reg.effective(name).ok()?;
+    let path = crate::core::server::shard_path(&ctx.config, &eff);
+    if !path.exists() {
+        return None;
+    }
+    crate::core::gguf::read_geometry(&path).ok()
+}
+
+/// KV from the header when it was read; the coarse reserve when it was not —
+/// and the cell says which, in its second character.
+fn kv_for(
+    geometry: Option<&crate::core::gguf::Geometry>,
+    ctx: u32,
+    q8: bool,
+) -> Probed<Option<u64>> {
+    let Some(g) = geometry else {
+        return Probed::new(Some(kv_reserve(ctx)), Provenance::Predicted);
+    };
+    crate::core::gguf::kv_bytes(g, ctx, q8).map_or_else(
+        || Probed::new(None, Provenance::Predicted),
+        |b| Probed::new(Some(b), Provenance::Measured),
+    )
 }
 
 /// Bytes actually on disk for a model directory, or `None` when it is absent.
