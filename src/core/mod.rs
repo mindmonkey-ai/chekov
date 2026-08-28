@@ -12,3 +12,4 @@ pub mod proxy;
 pub mod pullspec;
 pub mod registry;
 pub mod server;
+pub mod toolparser;

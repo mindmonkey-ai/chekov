@@ -12,6 +12,13 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
+- `core::toolparser` — replays llama.cpp's `common_chat_try_specialized_template`
+  substring cascade so chekov can tell which tool-call parser a chat template
+  resolves to, or that it falls through to the generic autoparser. Verified
+  against live templates: `OBLITERATUS/Qwen3.8-27B-OBLITERATED` (509k downloads,
+  506 chars, zero tool markup) falls through, while
+  `unsloth/Qwen3.8-27B-GGUF` (9993 chars) resolves to Qwen3-Coder — so ranking
+  candidates by downloads recommends the one that cannot call a tool.
 - `chekov capability explain [name] [--ctx N]` — slice 3 of the capability
   spec. Reads the model's real GGUF header from local disk and prints the fit
   arithmetic line by line. `capability graph` now uses those numbers, so cells
