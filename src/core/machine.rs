@@ -169,8 +169,9 @@ pub fn probe(engine_dir: &Path) -> Machine {
     }
 }
 
-/// `sha256(model_id | memsize | brand | gpu_cores)`, first 12 hex chars
-/// (spec §4.2). `None` when ANY component is unknown — a partial identity
+/// `sha256(model_id | memsize | brand | gpu_cores)`, first 12 hex chars.
+///
+/// Spec §4.2. `None` when ANY component is unknown — a partial identity
 /// would let a bench row from another machine compare as if it were this
 /// one's.
 #[must_use]

@@ -2,6 +2,8 @@
 //! a `sha2` dependency for two hashing sites (machine identity, prompt-set
 //! hash). Verified against the NIST test vectors below.
 
+use std::fmt::Write;
+
 /// FIPS 180-4 round constants: fractional parts of the cube roots of the
 /// first 64 primes.
 const K: [u32; 64] = [
@@ -94,45 +96,48 @@ pub fn sha256_hex(data: &[u8]) -> String {
     for block in message.chunks_exact(64) {
         compress(&mut state, block);
     }
-    state.iter().map(|word| format!("{word:08x}")).collect()
+    let mut hex = String::with_capacity(64);
+    for word in state {
+        let _ = write!(hex, "{word:08x}");
+    }
+    hex
 }
 
-/// One 64-round compression over a 512-bit block.
+/// One 64-round compression over a 512-bit block. `reg` holds the eight
+/// working registers FIPS names a..h, in that order.
 fn compress(state: &mut [u32; 8], block: &[u8]) {
-    let mut w = [0u32; 64];
+    let mut sched = [0u32; 64];
     for (i, chunk) in block.chunks_exact(4).enumerate() {
-        w[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        sched[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     for i in 16..64 {
-        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-        w[i] = w[i - 16]
+        let s0 =
+            sched[i - 15].rotate_right(7) ^ sched[i - 15].rotate_right(18) ^ (sched[i - 15] >> 3);
+        let s1 =
+            sched[i - 2].rotate_right(17) ^ sched[i - 2].rotate_right(19) ^ (sched[i - 2] >> 10);
+        sched[i] = sched[i - 16]
             .wrapping_add(s0)
-            .wrapping_add(w[i - 7])
+            .wrapping_add(sched[i - 7])
             .wrapping_add(s1);
     }
-    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+    let mut reg = *state;
     for i in 0..64 {
-        let big_s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-        let choose = (e & f) ^ (!e & g);
-        let temp1 = h
+        let [ra, rb, rc, re, rf, rg] = [reg[0], reg[1], reg[2], reg[4], reg[5], reg[6]];
+        let big_s1 = re.rotate_right(6) ^ re.rotate_right(11) ^ re.rotate_right(25);
+        let choose = (re & rf) ^ (!re & rg);
+        let temp1 = reg[7]
             .wrapping_add(big_s1)
             .wrapping_add(choose)
             .wrapping_add(K[i])
-            .wrapping_add(w[i]);
-        let big_s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-        let majority = (a & b) ^ (a & c) ^ (b & c);
+            .wrapping_add(sched[i]);
+        let big_s0 = ra.rotate_right(2) ^ ra.rotate_right(13) ^ ra.rotate_right(22);
+        let majority = (ra & rb) ^ (ra & rc) ^ (rb & rc);
         let temp2 = big_s0.wrapping_add(majority);
-        h = g;
-        g = f;
-        f = e;
-        e = d.wrapping_add(temp1);
-        d = c;
-        c = b;
-        b = a;
-        a = temp1.wrapping_add(temp2);
+        reg.copy_within(0..7, 1);
+        reg[4] = reg[4].wrapping_add(temp1); // e = d + temp1 (d shifted into slot 4)
+        reg[0] = temp1.wrapping_add(temp2);
     }
-    for (slot, val) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+    for (slot, val) in state.iter_mut().zip(reg) {
         *slot = slot.wrapping_add(val);
     }
 }
