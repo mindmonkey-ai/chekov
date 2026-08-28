@@ -330,11 +330,13 @@ const FOOTER: [&str; 2] = [
     "hover a cell for its arithmetic.",
 ];
 
-/// Advance of `chars` glyphs in a monospace face at `font_px`: 0.6 em per
-/// glyph is the common monospace ratio, plus one glyph of slack so an
-/// estimate never undercuts the real text.
+/// Advance of `chars` glyphs in a monospace face at `font_px`. Chrome renders
+/// `ui-monospace` at 0.60 em (measured with `getBBox`); 0.65 plus one glyph of
+/// slack leaves room for a wider fallback face. Right-side whitespace is
+/// cheap; an estimate that undercuts the text loses words. (A `qlmanage`
+/// thumbnail ignores the canvas width entirely and is not a check.)
 const fn text_w(chars: usize, font_px: usize) -> usize {
-    chars * font_px * 6 / 10 + font_px
+    chars * font_px * 13 / 20 + font_px
 }
 
 /// Positions derived from the frontier's own content. A long model name moves
@@ -532,7 +534,7 @@ pub fn render_svg(f: &Frontier) -> String {
          patternTransform=\"rotate(45)\">\
          <line x1=\"0\" y1=\"0\" x2=\"0\" y2=\"6\" stroke=\"#000000\" stroke-opacity=\"0.35\" \
          stroke-width=\"2\"/></pattern></defs>\n\
-         <text x=\"20\" y=\"32\" font-size=\"18\">{}</text>\n",
+         <text x=\"20\" y=\"32\" font-size=\"18\" xml:space=\"preserve\">{}</text>\n",
         esc(&title(f)),
     );
     out.push_str(&svg_header(f));

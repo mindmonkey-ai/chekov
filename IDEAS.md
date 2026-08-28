@@ -97,7 +97,7 @@ machine where the engine reports 228065 MiB — chekov understates its own budge
 Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 `MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)`.
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
-Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) v0 SHIPPED 2026-08-28 (--suite agentic: tool_emit/grammar_gap/instruction seed set, growing toward 30/40; deferred: diff_fidelity+tool_loop+long_ctx_trace+hallucination need the §8/§9 corpora, think_leak waits on §13 Q5); fixture-v1 content release-gated; slice 6 OPEN**
+Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) v0 SHIPPED 2026-08-28 (--suite agentic: tool_emit/grammar_gap/instruction seed set, growing toward 30/40; deferred: diff_fidelity+tool_loop+long_ctx_trace+hallucination need the §8/§9 corpora, think_leak waits on §13 Q5); slice-5 "`--metric tok-s` upgrades from predicted to measured" SHIPPED 2026-08-28 (fixed bands, deepest-depth median, exact-match + stale footer); fixture-v1 content release-gated; slice 6 OPEN (`--svg` SHIPPED 2026-08-28; `--codebase`, `--judge`, throughput dots OPEN)**
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
@@ -208,6 +208,10 @@ whiskers and predicted throughput as hollow dots with a ±15% range. Not built:
 from predicted to measured" line is still deferred (see below). Blocked on the
 same work — once stored bench medians reach the frontier model, both the ASCII
 grid and the SVG gain the layer together, from one source.
+UNBLOCKED 2026-08-28: `Cell.speed` now carries the measured median with p10-p90,
+so the filled-dot layer has its source. The hollow predicted dots do not — no
+predicted tok/s reaches the frontier model, and the ±15% band is an unvalidated
+prior — so the layer should ship measured-only first.
 Proposed 2026-08-28 — status: OPEN
 
 ## Feed measured bench medians into `capability graph` (2026-08-27)
@@ -217,7 +221,17 @@ measured" is deliberately deferred from the harness change: wiring stored
 surface and needs a staleness rule (a measurement from an older
 engine.build_commit must not silently pose as current). Do it as its own
 change once a few real runs exist.
-Proposed 2026-08-27 — status: OPEN
+SHIPPED 2026-08-28 as `capability graph --metric tok-s`. Two decisions
+recorded here because they deviate from or sharpen the spec: (1) the band
+digit uses FIXED edges (5/10/15/20/30/40/60/80 tok/s), not the §5.2 "deciles
+of decode rate" — deciles of the peer set move a cell's digit when a
+different model is benched, the objection §7.5 already adopted for
+composites; (2) the headline per run is the decode median at the DEEPEST
+summarisable depth, named in the legend — the closest to an agent loop with a
+full context, where a shallow probe flatters every model. A run applies to a
+cell only on an exact model+quant+ctx+machine match; the latest of several is
+shown and the choice is a footnote; rule 8's stale footer names both builds.
+Proposed 2026-08-27 — status: SHIPPED
 
 ## Tool-parser gate: report, do not refuse (2026-08-27)
 Slice 4 of the capability spec makes "falls through to llama.cpp's generic PEG
