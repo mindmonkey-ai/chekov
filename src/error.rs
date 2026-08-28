@@ -165,6 +165,12 @@ pub enum ChekovError {
         reason: String,
     },
 
+    #[error("bench run {}: {reason}", path.display())]
+    BenchRunInvalid {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+
     #[error(
         "degenerate output detected: {reason} — this matches the known GGUF \
          corruption class; re-pull the model shards with `chekov pull` and re-run \

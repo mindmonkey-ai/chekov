@@ -6,4 +6,5 @@ pub mod fixture;
 pub mod grade;
 pub mod probes;
 pub mod runner;
+pub mod store;
 pub mod sweep;
