@@ -25,16 +25,7 @@ pub enum CapAction {
     /// What this Mac is and what it can hold (the default).
     Scan,
     /// Grid of registered models against context lengths, with fit verdicts.
-    Graph {
-        /// Context lengths to plot; repeatable. Defaults to 32K/128K/256K.
-        #[arg(long = "ctx")]
-        ctx: Vec<u32>,
-        /// Also write a self-contained SVG. Bare, it lands under
-        /// `reports/`. The path is PRINTED, never opened — launching a GUI
-        /// from a CLI is an unrequested side effect.
-        #[arg(long, num_args = 0..=1)]
-        svg: Option<Option<std::path::PathBuf>>,
-    },
+    Graph(GraphOpts),
     /// Rank what this machine should actually run, with rejections explained.
     Recommend {
         /// Context length to size against; defaults to the registry default.
@@ -67,6 +58,41 @@ pub enum CapAction {
         a: std::path::PathBuf,
         b: std::path::PathBuf,
     },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct GraphOpts {
+    /// Context lengths to plot; repeatable. Defaults to 32K/128K/256K.
+    #[arg(long = "ctx")]
+    pub ctx: Vec<u32>,
+    /// Also write a self-contained SVG. Bare, it lands under `reports/`. The
+    /// path is PRINTED, never opened — launching a GUI from a CLI is an
+    /// unrequested side effect.
+    #[arg(long, num_args = 0..=1)]
+    pub svg: Option<Option<std::path::PathBuf>>,
+    /// What the first cell character encodes: `fit` (memory verdict) or
+    /// `tok-s` (a band digit of the MEASURED decode median from stored bench
+    /// runs; a cell with no run stays `??`).
+    #[arg(long, value_enum, default_value_t = MetricArg::Fit)]
+    pub metric: MetricArg,
+}
+
+/// `--metric`, exactly the spec's two values (§2.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum MetricArg {
+    #[default]
+    Fit,
+    #[value(name = "tok-s")]
+    TokS,
+}
+
+impl From<MetricArg> for frontier::Metric {
+    fn from(arg: MetricArg) -> Self {
+        match arg {
+            MetricArg::Fit => Self::Fit,
+            MetricArg::TokS => Self::TokS,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -145,9 +171,7 @@ fn render_budget(m: &Machine) -> String {
 impl Command for CapabilityCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
         match &self.action {
-            Some(CapAction::Graph { ctx: ladder, svg }) => {
-                return graph(ctx, ladder, svg.as_ref());
-            }
+            Some(CapAction::Graph(opts)) => return graph(ctx, opts),
             Some(CapAction::Explain { name, ctx: at }) => {
                 return explain(ctx, name.as_deref(), *at);
             }
@@ -181,15 +205,11 @@ impl Command for CapabilityCmd {
     }
 }
 
-fn graph(
-    ctx: &Ctx,
-    ladder: &[u32],
-    svg: Option<&Option<std::path::PathBuf>>,
-) -> Result<ExitCode, ChekovError> {
-    let ladder = if ladder.is_empty() {
+fn graph(ctx: &Ctx, opts: &GraphOpts) -> Result<ExitCode, ChekovError> {
+    let ladder = if opts.ctx.is_empty() {
         vec![32_768, 131_072, 262_144]
     } else {
-        ladder.to_vec()
+        opts.ctx.clone()
     };
     let budget = machine::live_gpu_budget(&ctx.config.engine_dir()).ok_or_else(|| {
         ChekovError::SetupIncomplete {
@@ -198,12 +218,28 @@ fn graph(
                 .to_owned(),
         }
     })?;
-    let f = build_frontier(ctx, &ladder, budget)?;
+    let mut f = build_frontier(ctx, &ladder, budget)?;
+    if opts.metric == MetricArg::TokS {
+        attach_measured_speeds(ctx, &mut f);
+    }
     println!("{}", frontier::render_ascii(&f));
-    if let Some(requested) = svg {
+    if let Some(requested) = &opts.svg {
         write_svg(ctx, &f, requested.as_deref())?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Under `--metric tok-s`: the stored runs, this machine's identity (so no
+/// other machine's run can match), and the engine build now installed (so a
+/// measurement from an older build is named, never carried silently).
+fn attach_measured_speeds(ctx: &Ctx, f: &mut frontier::Frontier) {
+    use crate::core::bench::speeds;
+    let cfg = &ctx.config;
+    f.metric = frontier::Metric::TokS;
+    f.engine_commit = crate::core::engine::recorded_commit(&cfg.logs_dir())
+        .or_else(|| crate::core::engine::current_commit(&cfg.engine_dir()));
+    let machine_id = machine::machine_id(&machine::probe(&cfg.engine_dir()));
+    speeds::attach(f, speeds::load_all(&cfg.eval_dir()), machine_id.as_deref());
 }
 
 /// Write the SVG and PRINT its path. Deliberately does not open it: launching
@@ -245,30 +281,16 @@ fn build_frontier(
     let mut rows: Vec<frontier::Row> = Vec::new();
     for (name, entry) in &reg.models {
         let weights = weights_on_disk(ctx, entry);
-        // Real geometry when the header can be read; the coarse reserve only
-        // when it cannot — and the cell says which, in its second character.
-        let geometry = reg
-            .effective(name)
-            .ok()
-            .map(|eff| crate::core::server::shard_path(&ctx.config, &eff))
-            .filter(|p| p.exists())
-            .and_then(|p| crate::core::gguf::read_geometry(&p).ok());
+        let geometry = geometry_for(ctx, &reg, name);
         let q8 = entry.extra_flags.iter().any(|f| f == "q8_0")
             || reg.defaults.flags.iter().any(|f| f == "q8_0");
         let cells = ladder
             .iter()
             .map(|&c| frontier::Cell {
                 weights_bytes: weights,
-                kv_bytes: geometry.as_ref().map_or_else(
-                    || Probed::new(Some(kv_reserve(c)), Provenance::Predicted),
-                    |g| {
-                        crate::core::gguf::kv_bytes(g, c, q8).map_or_else(
-                            || Probed::new(None, Provenance::Predicted),
-                            |b| Probed::new(Some(b), Provenance::Measured),
-                        )
-                    },
-                ),
+                kv_bytes: kv_for(geometry.as_ref(), c, q8),
                 overhead_bytes: Probed::new(Some(3 * 1024 * 1024 * 1024), Provenance::Predicted),
+                speed: None,
             })
             .collect();
         rows.push(frontier::Row {
@@ -282,7 +304,40 @@ fn build_frontier(
         budget,
         ctx_ladder: ladder.to_vec(),
         rows,
+        metric: frontier::Metric::Fit,
+        engine_commit: None,
+        notes: Vec::new(),
     })
+}
+
+/// Real geometry when the first shard is on disk and its header reads.
+fn geometry_for(
+    ctx: &Ctx,
+    reg: &crate::core::registry::Registry,
+    name: &str,
+) -> Option<crate::core::gguf::Geometry> {
+    let eff = reg.effective(name).ok()?;
+    let path = crate::core::server::shard_path(&ctx.config, &eff);
+    if !path.exists() {
+        return None;
+    }
+    crate::core::gguf::read_geometry(&path).ok()
+}
+
+/// KV from the header when it was read; the coarse reserve when it was not —
+/// and the cell says which, in its second character.
+fn kv_for(
+    geometry: Option<&crate::core::gguf::Geometry>,
+    ctx: u32,
+    q8: bool,
+) -> Probed<Option<u64>> {
+    let Some(g) = geometry else {
+        return Probed::new(Some(kv_reserve(ctx)), Provenance::Predicted);
+    };
+    crate::core::gguf::kv_bytes(g, ctx, q8).map_or_else(
+        || Probed::new(None, Provenance::Predicted),
+        |b| Probed::new(Some(b), Provenance::Measured),
+    )
 }
 
 /// Bytes actually on disk for a model directory, or `None` when it is absent.
@@ -1569,13 +1624,41 @@ mod tests {
     }
 
     #[test]
+    fn metric_parses_tok_s_and_defaults_to_fit() {
+        use clap::Parser;
+        let metric_of = |args: &[&str]| {
+            let cli = crate::cli::Cli::try_parse_from(args).expect("parses");
+            match cli.cmd {
+                crate::cli::Cmd::Capability(cap) => match cap.action {
+                    Some(super::CapAction::Graph(opts)) => opts.metric,
+                    other => panic!("expected Graph, got {other:?}"),
+                },
+                _ => panic!("expected capability"),
+            }
+        };
+        assert_eq!(
+            metric_of(&["chekov", "capability", "graph"]),
+            super::MetricArg::Fit
+        );
+        assert_eq!(
+            metric_of(&["chekov", "capability", "graph", "--metric", "tok-s"]),
+            super::MetricArg::TokS
+        );
+        assert!(
+            crate::cli::Cli::try_parse_from(["chekov", "capability", "graph", "--metric", "speed"])
+                .is_err(),
+            "only the spec's two values parse"
+        );
+    }
+
+    #[test]
     fn svg_parses_absent_bare_and_with_a_path() {
         use clap::Parser;
         let svg_of = |args: &[&str]| {
             let cli = crate::cli::Cli::try_parse_from(args).expect("parses");
             match cli.cmd {
                 crate::cli::Cmd::Capability(cap) => match cap.action {
-                    Some(super::CapAction::Graph { svg, .. }) => svg,
+                    Some(super::CapAction::Graph(opts)) => opts.svg,
                     other => panic!("expected Graph, got {other:?}"),
                 },
                 _ => panic!("expected capability"),

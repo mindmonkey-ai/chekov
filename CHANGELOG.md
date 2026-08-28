@@ -7,6 +7,23 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `chekov capability graph --metric tok-s` — the grid's first character
+  becomes a band digit 1–9 of the MEASURED decode median from stored bench
+  runs (`eval/`), and every cell without a run stays `??`: predicted and
+  measured are never blended in one column. Band edges are fixed and printed
+  in the legend (5/10/15/20/30/40/60/80 tok/s), not deciles of the peer set,
+  so a digit cannot move because a different model was benched. A run applies
+  to a cell only on an exact match of model, quant, configured ctx AND machine
+  id — never another machine's row; among several matches the latest is shown
+  and the choice is a numbered footnote. The headline per run is the median at
+  the deepest depth that can be summarised, and the legend says so. A measured
+  cell from a build other than the installed engine is shown AND named:
+  `measured cells are from build <old>; the engine is now at <new>. Re-run
+  'chekov capability bench' to revalidate.` An unreadable run directory is a
+  footnote, not a crash and not a silent skip. The SVG carries the same digit,
+  the same footer, and the median with p10–p90, depth and run id in each
+  cell's tooltip. Live on this machine: qwen3.8-27b `5#` at 128K (20.5
+  tok/s), ornith-1.5-35b-a3b `8#` at 256K (68 tok/s), `??` elsewhere.
 - `chekov capability graph --svg [PATH]` — a self-contained SVG of the same
   frontier the terminal prints, the first piece of slice 6. Hand-emitted: no
   dependency, no CDN, no script, no external reference, so it opens offline
