@@ -179,6 +179,15 @@ pub enum ChekovError {
     BenchEngineMismatch { a: String, b: String },
 
     #[error(
+        "bench stamp mismatch on '{field}' ({a} vs {b}) — llama.cpp does not \
+         guarantee bit-identical results across configurations (GPU reduction \
+         kernels pick different accumulation orders and float addition is not \
+         associative), so determinism holds only inside one pinned \
+         configuration; re-bench under a matching stamp and compare those runs"
+    )]
+    BenchStampMismatch { field: String, a: String, b: String },
+
+    #[error(
         "the server is running '{running}' but the resolved model is '{resolved}' \
          — bench refuses to record one model's numbers under another's name; \
          `chekov restart` and re-run"
