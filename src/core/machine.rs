@@ -129,6 +129,18 @@ pub fn sysctl_one(key: &str) -> Option<String> {
     capture("sysctl", &["-n", key]).map(|v| v.trim().to_owned())
 }
 
+/// Free MiB the engine reports right now — the teardown check that the last
+/// model's memory was actually released before the next one loads.
+#[must_use]
+pub fn live_gpu_free(engine_dir: &Path) -> Option<u64> {
+    let binary = engine_binary(engine_dir);
+    let out = binary
+        .exists()
+        .then(|| capture(&binary.to_string_lossy(), &["--list-devices"]))
+        .flatten()?;
+    parse_list_devices(&out).map(|(_, _, free)| free)
+}
+
 /// This machine's GPU budget, by the first rung that answers.
 #[must_use]
 pub fn live_gpu_budget(engine_dir: &Path) -> Option<Probed<u64>> {

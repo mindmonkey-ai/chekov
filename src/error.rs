@@ -195,6 +195,13 @@ pub enum ChekovError {
     BenchFlagUnknown { flag: String },
 
     #[error(
+        "Metal has not released the previous model's memory ({free_mib} MiB free, \
+         want {want_mib}) — wait a few seconds and re-run, or check for other \
+         GPU processes"
+    )]
+    BenchBudgetNotReleased { free_mib: u64, want_mib: u64 },
+
+    #[error(
         "degenerate output detected: {reason} — this matches the known GGUF \
          corruption class; re-pull the model shards with `chekov pull` and re-run \
          `chekov doctor`"

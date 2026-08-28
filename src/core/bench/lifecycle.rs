@@ -37,6 +37,57 @@ pub fn server_help(engine_dir: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The child env every bench-managed spawn carries (spec §7.3.3).
+///
+/// Metal keeps GPU memory wired for 3 MINUTES after use by default, which
+/// makes a sequential sweep OOM nondeterministically on the second model —
+/// and the failure vanishes when runs are spaced out.
+pub const METAL_RESIDENCY: (&str, &str) = ("GGML_METAL_RESIDENCY_KEEP_ALIVE_S", "5");
+
+/// How long teardown waits for the budget to come back, from `[bench]`.
+#[derive(Debug, Clone, Copy)]
+pub struct ReleasePolicy {
+    pub total_mib: u64,
+    pub release_pct: u32,
+    pub max_polls: u32,
+    pub interval: std::time::Duration,
+}
+
+impl ReleasePolicy {
+    #[must_use]
+    pub const fn want_mib(&self) -> u64 {
+        self.total_mib * self.release_pct as u64 / 100
+    }
+}
+
+/// Wait until the engine reports at least `release_pct` of the budget free.
+///
+/// `read_free` is `machine::live_gpu_free` in production, canned in tests.
+/// A reader that stops answering is loud — an unverifiable release must not
+/// read as a verified one.
+pub fn wait_budget_released(
+    policy: ReleasePolicy,
+    read_free: &mut dyn FnMut() -> Option<u64>,
+) -> Result<u64, crate::error::ChekovError> {
+    let want = policy.want_mib();
+    let mut last_seen = 0;
+    for _ in 0..policy.max_polls {
+        let free = read_free().ok_or(crate::error::ChekovError::BenchBudgetNotReleased {
+            free_mib: last_seen,
+            want_mib: want,
+        })?;
+        if free >= want {
+            return Ok(free);
+        }
+        last_seen = free;
+        std::thread::sleep(policy.interval);
+    }
+    Err(crate::error::ChekovError::BenchBudgetNotReleased {
+        free_mib: last_seen,
+        want_mib: want,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::unknown_flags;
@@ -109,5 +160,43 @@ mod tests {
         // q8_0, file paths, numbers — only `-`-prefixed tokens are flags.
         let args = argv(&["--cache-type-k", "q8_0", "-m", "/x/-weird-dir/m.gguf"]);
         assert_eq!(unknown_flags(&args, HELP), Vec::<String>::new());
+    }
+
+    use super::{ReleasePolicy, wait_budget_released};
+    use crate::error::ChekovError;
+
+    fn instant_policy(max_polls: u32) -> ReleasePolicy {
+        ReleasePolicy {
+            total_mib: 228_065,
+            release_pct: 80,
+            max_polls,
+            interval: std::time::Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn a_recovering_budget_succeeds_when_it_crosses_the_threshold() {
+        let mut readings = [10_000_u64, 100_000, 190_000].into_iter();
+        let free = wait_budget_released(instant_policy(5), &mut || readings.next())
+            .expect("released on the third poll");
+        assert_eq!(free, 190_000, "80% of 228065 is 182452 — 190000 crosses it");
+    }
+
+    #[test]
+    fn a_budget_that_never_recovers_is_loud_with_both_numbers() {
+        let err =
+            wait_budget_released(instant_policy(3), &mut || Some(50_000)).expect_err("still wired");
+        match err {
+            ChekovError::BenchBudgetNotReleased { free_mib, want_mib } => {
+                assert_eq!(free_mib, 50_000);
+                assert_eq!(want_mib, 182_452);
+            }
+            other => panic!("expected the release refusal, got {other}"),
+        }
+    }
+
+    #[test]
+    fn a_reader_that_stops_answering_is_loud_not_a_verified_release() {
+        assert!(wait_budget_released(instant_policy(3), &mut || None).is_err());
     }
 }
