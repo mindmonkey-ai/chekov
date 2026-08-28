@@ -109,12 +109,15 @@ pub fn render_run(record: &RunRecord) -> String {
         out.push_str(&note);
         out.push('\n');
     }
-    for probe in &record.fixture {
-        let verdict = if probe.pass { "PASS" } else { "FAIL" };
-        let reason = probe.reason.as_deref().unwrap_or("");
-        out.push_str(&format!("fixture {verdict} {}  {reason}\n", probe.id));
-    }
+    let probes: String = record.fixture.iter().map(probe_line).collect();
+    out.push_str(&probes);
     out
+}
+
+fn probe_line(probe: &ProbeRecord) -> String {
+    let verdict = if probe.pass { "PASS" } else { "FAIL" };
+    let reason = probe.reason.as_deref().unwrap_or("");
+    format!("fixture {verdict} {}  {reason}\n", probe.id)
 }
 
 fn header_line(record: &RunRecord) -> String {
