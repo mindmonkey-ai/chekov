@@ -188,6 +188,21 @@ silently). Not currently reachable — every registry entry uses
 `--reasoning-format none` — which is why it is filed rather than fixed.
 Proposed 2026-08-28 — status: OPEN
 
+## Bench GLM-5.3-Flash — blocked on upstream llama.cpp (2026-08-28)
+`unsloth/GLM-5.3-Flash-GGUF` (arch `glm5_next`, released 2026-08-26) needs
+llama.cpp PR #27754 (https://github.com/ggml-org/llama.cpp/pull/27754), which
+is not on `master` as of 2026-08-28 (`d7bd3bfca`): `llama-arch.cpp` there has
+no `glm5*` entry. `chekov update --engine` tracks master only, so the engine
+cannot reach it, and building from a PR branch would stamp every run with a
+non-master commit that no later run could compare against. Human's call
+2026-08-28: skip until the PR merges. When it does: `chekov update --engine`,
+then `chekov pull unsloth/GLM-5.3-Flash-GGUF:UD-Q3_K_XL --model-loc
+/Volumes/jane/models` (137.4 GiB; UD-Q4_K_XL is 186 GiB and tight against the
+222.7 GiB budget before KV), then `chekov capability bench --models
+glm-5.3-flash`. Qwen3.8-Flash-Next (`qwen4exp`) IS on master and is being
+benched in the same pass.
+Proposed 2026-08-28 — status: BLOCKED (upstream)
+
 ## A cell's second character ignores the overhead's provenance (2026-08-28)
 `frontier::Cell::inputs()` reports `#` (measured) whenever KV is measured,
 regardless of `overhead_bytes.provenance` — and `build_frontier` gives every
