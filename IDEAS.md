@@ -99,6 +99,28 @@ Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
 Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) OPEN; fixture-v1 content release-gated; slice 6 OPEN**
 
+## A cell's second character ignores the overhead's provenance (2026-08-28)
+`frontier::Cell::inputs()` reports `#` (measured) whenever KV is measured,
+regardless of `overhead_bytes.provenance` — and `build_frontier` gives every
+cell a flat predicted 3 GiB overhead. So a cell can print "measured" while one
+of its three summands is a constant guess. Defensible as shipped (KV is the
+term that varies with context and dominates the total; a second character that
+was always `·` would carry no information), but it is a real gap between the
+glyph and the arithmetic. The SVG's per-cell tooltip prints each part's own
+provenance, which is the honest version; the glyph is the lossy summary.
+Noticed while building `--svg`; not changed there, because it would alter
+shipped terminal output and its tests.
+Proposed 2026-08-28 — status: OPEN
+
+## Throughput dots in the SVG (2026-08-28)
+Spec §5 wants the SVG to carry measured throughput as filled dots with p10-p90
+whiskers and predicted throughput as hollow dots with a ±15% range. Not built:
+`Frontier` carries no speed at all, because the "`--metric tok-s` grid upgrades
+from predicted to measured" line is still deferred (see below). Blocked on the
+same work — once stored bench medians reach the frontier model, both the ASCII
+grid and the SVG gain the layer together, from one source.
+Proposed 2026-08-28 — status: OPEN
+
 ## Feed measured bench medians into `capability graph` (2026-08-27)
 Slice 5's spec line "the `--metric tok-s` grid upgrades from predicted to
 measured" is deliberately deferred from the harness change: wiring stored
