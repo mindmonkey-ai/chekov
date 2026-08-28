@@ -12,6 +12,18 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
+- `chekov capability recommend --refresh` — queries the Hugging Face list
+  endpoint for candidates, classifies each repo's tool parser from the chat
+  template it returns, and sizes it through the same `quant_options` path
+  `pull` uses, so a repo withholding a shard's size yields no number rather
+  than a partial sum. **The only networked path**: without `--refresh` chekov
+  ranks registered models and never reaches out, because a recommendation that
+  changed due to a background fetch is not reproducible. Download order is used
+  only to bound which repos are worth a size lookup, never to rank them.
+- `pull` excludes calibration and draft artifacts from quant sizing:
+  `imatrix*`, `MTP/`, `mtp-*` and `dspark-*` join `mmproj-*`. Each ships as a
+  `.gguf` beside real quants and would otherwise inflate a quant's size or be
+  offered as one.
 - `chekov capability recommend [--ctx N] [--role agent|chat]` — ranks the
   registered models for this machine. Rejected candidates are printed with
   their reason, never silently dropped. A model whose template has no dedicated

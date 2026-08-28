@@ -298,7 +298,12 @@ fn derived_quant(path: &str) -> Option<String> {
 /// this teaches the code the same thing.
 fn is_weights(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    !name.starts_with("mmproj") && !name.contains("-mmproj-")
+    let dir = path.split('/').next().unwrap_or("");
+    // Vision projectors, calibration data, multi-token-prediction layers and
+    // draft models all ship as .gguf beside real quants. Summing them inflates
+    // a quant's size; offering them as one hands the user a non-model.
+    let junk_prefix = ["mmproj", "imatrix", "mtp-", "dspark-"];
+    !junk_prefix.iter().any(|p| name.starts_with(p)) && !name.contains("-mmproj-") && dir != "MTP"
 }
 
 /// Heuristic for quant-tag tokens: `UD-Q5_K_XL`, `IQ4_XS`, `Q8_0`, `BF16`…
@@ -642,6 +647,32 @@ mod tests {
         assert!(quants.contains(&"UD-Q5_K_XL".to_owned()), "{quants:?}");
         assert!(quants.contains(&"UD-Q4_K_XL".to_owned()), "{quants:?}");
         assert!(quants.contains(&"Q8_0".to_owned()), "{quants:?}");
+    }
+
+    #[test]
+    fn calibration_and_draft_artifacts_are_not_weights() {
+        // Every one of these lives beside real quants in popular repos and
+        // would otherwise be summed into a quant's size, or offered as one.
+        for junk in [
+            "imatrix_unsloth.gguf",
+            "imatrix.gguf",
+            "MTP/GLM-5.3-Flash-MTP-Q8_0.gguf",
+            "mtp-Q4_K_M.gguf",
+            "dspark-draft-Q4_0.gguf",
+            "mmproj-F16.gguf",
+        ] {
+            assert_eq!(
+                super::derived_quant(junk),
+                None,
+                "{junk} is not model weights"
+            );
+        }
+        // …while a real shard in a quant folder still resolves.
+        assert_eq!(
+            super::derived_quant("UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL-00001-of-00006.gguf")
+                .as_deref(),
+            Some("UD-Q4_K_XL")
+        );
     }
 
     #[test]
