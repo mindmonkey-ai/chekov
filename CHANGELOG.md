@@ -12,6 +12,16 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
+- `chekov capability explain [name] [--ctx N]` — slice 3 of the capability
+  spec. Reads the model's real GGUF header from local disk and prints the fit
+  arithmetic line by line. `capability graph` now uses those numbers, so cells
+  backed by a readable header report `measured` inputs instead of the coarse
+  reserve.
+  The layer ladder is the point: `kv_layers` is **not** `block_count`. An MTP
+  block is subtracted, then a hybrid model caches one layer in every
+  `full_attention_interval` — 41 blocks becomes 10 cached layers on
+  ornith-1.5-35b-a3b, and using `block_count` would over-estimate KV by 4x and
+  refuse configurations that fit. `q8_0` is 17/16 bytes per element, not 1/2.
 - `chekov capability graph [--ctx N]...` — slice 2 of the capability spec. A
   grid of registered models against context lengths. Each cell is two
   characters (fit verdict, then input provenance) because one glyph cannot
