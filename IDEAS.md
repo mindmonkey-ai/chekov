@@ -97,4 +97,4 @@ machine where the engine reports 228065 MiB — chekov understates its own budge
 Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 `MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)`.
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
-Proposed 2026-08-25 — status: **slice 1 (`capability` scan) SHIPPED; slices 2-6 OPEN**
+Proposed 2026-08-25 — status: **slices 1-2 (`capability` scan + graph) SHIPPED; slices 3-6 OPEN**
