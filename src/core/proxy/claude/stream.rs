@@ -14,14 +14,9 @@
 
 use serde_json::{Value, json};
 
-use super::{SseEvent, StreamTranslator, message_id, to_stop_reason, to_usage};
-
-/// Reasoning models served by llama.cpp (e.g. Ornith-1.5) emit their thinking
-/// block *inside* `content` rather than in `reasoning_content`, and it sits
-/// ahead of the real answer. Anthropic's grammar has no room for thinking in a
-/// text block, so strip the leading thinking span here before translating.
-const THINK_OPEN: &str = "<think>";
-const THINK_CLOSE: &str = "</think>";
+use super::{
+    SseEvent, StreamTranslator, THINK_CLOSE, THINK_OPEN, message_id, to_stop_reason, to_usage,
+};
 
 /// Which content block is currently open.
 #[derive(PartialEq, Eq)]
