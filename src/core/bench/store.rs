@@ -240,23 +240,7 @@ pub fn render_run(log: &RunLog) -> String {
         "bench {}  ctx {}  engine {}  machine {}\n",
         log.head.model, stamp.ctx, stamp.engine_build_commit, stamp.machine_id
     );
-    out.push_str("depth  prompt_n  decode tok/s (median [p10..p90])  prefill tok/s  n\n");
-    let throughput: Vec<&TaskRow> = log
-        .rows
-        .iter()
-        .filter(|r| r.suite == "throughput")
-        .collect();
-    for row in &throughput {
-        out.push_str(&depth_line(row));
-    }
-    let summarisable = throughput
-        .iter()
-        .filter(|r| stats::summarize(&r.measure.decode_samples).is_some())
-        .count();
-    if let Some(note) = curve_note(summarisable) {
-        out.push_str(&note);
-        out.push('\n');
-    }
+    out.push_str(&throughput_table(log));
     let probes: String = log
         .rows
         .iter()
@@ -265,6 +249,31 @@ pub fn render_run(log: &RunLog) -> String {
         .collect();
     out.push_str(&probes);
     out.push_str(&suite_summaries(log));
+    out
+}
+
+/// The depth table, and only when throughput was actually measured.
+///
+/// Printing "insufficient depths to fit a curve" for a suite that never ran
+/// reports a failure to fit a curve nobody asked for.
+fn throughput_table(log: &RunLog) -> String {
+    let rows: Vec<&TaskRow> = rows_of(log, "throughput").collect();
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out =
+        String::from("depth  prompt_n  decode tok/s (median [p10..p90])  prefill tok/s  n\n");
+    for row in &rows {
+        out.push_str(&depth_line(row));
+    }
+    let summarisable = rows
+        .iter()
+        .filter(|r| stats::summarize(&r.measure.decode_samples).is_some())
+        .count();
+    if let Some(note) = curve_note(summarisable) {
+        out.push_str(&note);
+        out.push('\n');
+    }
     out
 }
 
@@ -498,6 +507,21 @@ mod tests {
                 .expect("append");
         }
         writer
+    }
+
+    #[test]
+    fn an_agentic_only_run_does_not_claim_a_failed_curve_fit() {
+        // The throughput suite never ran; "insufficient depths" would report a
+        // failure to fit a curve nobody asked for.
+        let eval = scratch("agentic-only");
+        let writer = graded_run(&eval);
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            !rendered.contains("insufficient depths"),
+            "no throughput rows means no curve claim: {rendered}"
+        );
+        assert!(!rendered.contains("decode tok/s"), "{rendered}");
+        assert!(rendered.contains("tool_emit    1/2"), "{rendered}");
     }
 
     #[test]
