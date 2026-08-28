@@ -181,11 +181,19 @@ pub enum ChekovError {
     BenchStampMismatch { field: String, a: String, b: String },
 
     #[error(
-        "the server is running '{running}' but the resolved model is '{resolved}' \
-         — bench refuses to record one model's numbers under another's name; \
-         `chekov restart` and re-run"
+        "the server is running '{running}' but bench was asked for '{resolved}' \
+         — bench never stops a server it did not start, and never records one \
+         model's numbers under another's name; `chekov stop` first, or bench \
+         just the running model"
     )]
     BenchWrongModel { running: String, resolved: String },
+
+    #[error(
+        "--resume names one run id, which pins one stamp and one model — \
+         re-run with a single candidate (drop --models or name exactly the \
+         resumed model)"
+    )]
+    BenchResumeNeedsOneCandidate,
 
     #[error(
         "llama-server's own --help does not list '{flag}' — a routine \
