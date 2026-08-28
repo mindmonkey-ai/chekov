@@ -94,6 +94,27 @@ pub fn content_hash() -> String {
     crate::core::hash::sha256_hex(AGENTIC_V0.as_bytes())[..12].to_owned()
 }
 
+/// The forced-pass grammar for one case: a `{"name","arguments"}` object
+/// constrained to the case's OWN palette — one `oneOf` arm per tool, each
+/// pinning the name and that tool's argument schema.
+#[must_use]
+pub fn forced_schema(case: &ToolCase) -> serde_json::Value {
+    let arms: Vec<serde_json::Value> = case
+        .tools
+        .iter()
+        .map(|tool| {
+            let schema: serde_json::Value = serde_json::from_str(&tool.input_schema)
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"}));
+            serde_json::json!({
+                "type": "object",
+                "properties": { "name": { "const": tool.name }, "arguments": schema },
+                "required": ["name", "arguments"],
+            })
+        })
+        .collect();
+    serde_json::json!({ "oneOf": arms })
+}
+
 const fn invalid(reason: String) -> ChekovError {
     ChekovError::BenchProbeSetInvalid { reason }
 }
@@ -183,6 +204,24 @@ mod tests {
                 case.id
             );
         }
+    }
+
+    #[test]
+    fn the_forced_schema_has_one_arm_per_palette_tool() {
+        let set = agentic_v0().expect("valid");
+        let case = set
+            .tool_emit
+            .iter()
+            .find(|c| c.id == "te-002")
+            .expect("te-002 exists");
+        let schema = super::forced_schema(case);
+        let arms = schema["oneOf"].as_array().expect("oneOf");
+        assert_eq!(arms.len(), 2, "read_file and grep");
+        assert_eq!(arms[1]["properties"]["name"]["const"], "grep");
+        assert_eq!(
+            arms[1]["properties"]["arguments"]["required"][0], "pattern",
+            "the tool's own schema is embedded"
+        );
     }
 
     #[test]
