@@ -54,22 +54,36 @@ pub enum CapAction {
         #[arg(long)]
         ctx: Option<u32>,
     },
-    /// Measure the running server through chekov's own translator; store the run.
-    Bench {
-        /// Graded probe set (TOML). There is no compiled-in fixture yet:
-        /// fixture-v1 is release-gated on a three-model measurement campaign.
-        #[arg(long)]
-        fixture: Option<std::path::PathBuf>,
-        /// Continue a previous run id, skipping tasks its JSONL already holds.
-        #[arg(long)]
-        resume: Option<String>,
-    },
+    /// Measure candidates through chekov's own translator; store each run.
+    Bench(BenchOpts),
     /// Compare two stored bench runs (same environment only).
     Compare {
         /// Run ids under `eval/`, or paths to run directories.
         a: std::path::PathBuf,
         b: std::path::PathBuf,
     },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct BenchOpts {
+    /// Graded probe set (TOML). There is no compiled-in fixture yet:
+    /// fixture-v1 is release-gated on a three-model measurement campaign.
+    #[arg(long)]
+    pub fixture: Option<std::path::PathBuf>,
+    /// Continue a previous run id, skipping tasks its JSONL already holds.
+    #[arg(long)]
+    pub resume: Option<String>,
+    /// Registered models to bench sequentially (default: the active one).
+    /// Bench launches and tears each down; it never stops a server it did
+    /// not start.
+    #[arg(long, value_delimiter = ',')]
+    pub models: Vec<String>,
+    /// Print the plan and the wall-clock estimate; run nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip the confirm gate that any launch step requires.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -142,15 +156,7 @@ impl Command for CapabilityCmd {
                     },
                 );
             }
-            Some(CapAction::Bench { fixture, resume }) => {
-                return bench(
-                    ctx,
-                    &BenchArgs {
-                        fixture: fixture.as_deref(),
-                        resume: resume.as_deref(),
-                    },
-                );
-            }
+            Some(CapAction::Bench(opts)) => return bench(ctx, &BenchArgs::from(opts)),
             Some(CapAction::Compare { a, b }) => return compare(ctx, a, b),
             _ => {}
         }
@@ -587,23 +593,61 @@ struct BenchSetup {
     pid: i32,
 }
 
-/// Resolve the active model and refuse to bench a server that is not
-/// running it — recording one model's numbers under another's name is the
-/// flag-hygiene failure the spec names.
-fn bench_setup(ctx: &Ctx) -> Result<BenchSetup, ChekovError> {
-    let reg = ctx.registry()?;
-    let name = reg.active_name()?.to_owned();
-    let eff = reg.effective(&name)?;
-    let pid = crate::core::server::live_pid(&ctx.config).ok_or(ChekovError::ServerNotRunning)?;
-    if let Some(running) = crate::core::server::read_run_state(&ctx.config)
-        && running != name
-    {
-        return Err(ChekovError::BenchWrongModel {
-            running,
-            resolved: name,
-        });
+/// Which action each requested candidate takes (spec §7.3): reuse the one
+/// running server when it IS the single request; otherwise a live server is
+/// a refusal — bench never stops a server it did not start.
+fn server_use_rule(
+    running: Option<&str>,
+    requested: &[String],
+) -> Result<Vec<crate::core::bench::lifecycle::StepAction>, ChekovError> {
+    use crate::core::bench::lifecycle::StepAction;
+    match running {
+        None => Ok(vec![StepAction::Launch; requested.len()]),
+        Some(model) if requested.len() == 1 && requested[0] == model => {
+            Ok(vec![StepAction::UseRunning])
+        }
+        Some(model) => Err(ChekovError::BenchWrongModel {
+            running: model.to_owned(),
+            resolved: requested.join(","),
+        }),
     }
-    Ok(BenchSetup { eff, pid })
+}
+
+/// The requested candidates with their actions, every guard applied.
+fn resolve_candidates(
+    ctx: &Ctx,
+    args: &BenchArgs,
+) -> Result<
+    Vec<(
+        crate::core::registry::Effective,
+        crate::core::bench::lifecycle::StepAction,
+    )>,
+    ChekovError,
+> {
+    let reg = ctx.registry()?;
+    let names: Vec<String> = if args.models.is_empty() {
+        vec![reg.active_name()?.to_owned()]
+    } else {
+        args.models.to_vec()
+    };
+    if args.resume.is_some() && names.len() > 1 {
+        return Err(ChekovError::BenchResumeNeedsOneCandidate);
+    }
+    let running = match crate::core::server::live_pid(&ctx.config) {
+        // A live server whose model is unrecorded cannot be identified —
+        // benching through it would attribute numbers to a guess.
+        Some(_) => Some(
+            crate::core::server::read_run_state(&ctx.config)
+                .ok_or(ChekovError::ServerModelUnknown)?,
+        ),
+        None => None,
+    };
+    let actions = server_use_rule(running.as_deref(), &names)?;
+    names
+        .iter()
+        .zip(actions)
+        .map(|(name, action)| Ok((reg.effective(name)?, action)))
+        .collect()
 }
 
 /// Wait for `/health` (watching the pid) then assert the loaded `/props`
@@ -629,22 +673,104 @@ fn ensure_ready(
 struct BenchArgs<'a> {
     fixture: Option<&'a std::path::Path>,
     resume: Option<&'a str>,
+    models: &'a [String],
+    dry_run: bool,
+    yes: bool,
+}
+
+impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
+    fn from(opts: &'a BenchOpts) -> Self {
+        Self {
+            fixture: opts.fixture.as_deref(),
+            resume: opts.resume.as_deref(),
+            models: &opts.models,
+            dry_run: opts.dry_run,
+            yes: opts.yes,
+        }
+    }
 }
 
 fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
+    use crate::core::bench::{lifecycle, sweep};
+    let candidates = resolve_candidates(ctx, args)?;
+    let plan: sweep::SweepPlan = (&ctx.config.file.bench).into();
+    let steps: Vec<lifecycle::BenchStep> = candidates
+        .iter()
+        .map(|(eff, action)| lifecycle::BenchStep {
+            model: eff.name.clone(),
+            action: *action,
+            weights_bytes: weights_on_disk(ctx, &eff.entry),
+        })
+        .collect();
+    let estimate = lifecycle::estimate_secs(&steps, &plan);
+    if args.dry_run {
+        print!("{}", lifecycle::render_plan(&steps, estimate));
+        return Ok(ExitCode::SUCCESS);
+    }
+    if lifecycle::needs_confirm(&steps) {
+        super::confirm(
+            &format!(
+                "bench {} candidate(s) with launch + teardown, ~{} min estimated",
+                steps.len(),
+                estimate.div_ceil(60)
+            ),
+            args.yes,
+        )?;
+    }
+    for candidate in &candidates {
+        let dir = run_candidate(ctx, candidate, args)?;
+        println!("run: {}", dir.display());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// One candidate end to end: server up (ours or reused), measure, record —
+/// and for launches, teardown with the budget-release check.
+fn run_candidate(
+    ctx: &Ctx,
+    candidate: &(
+        crate::core::registry::Effective,
+        crate::core::bench::lifecycle::StepAction,
+    ),
+    args: &BenchArgs,
+) -> Result<std::path::PathBuf, ChekovError> {
+    use crate::core::bench::lifecycle::StepAction;
+    let (eff, action) = candidate;
+    let pid = match action {
+        StepAction::UseRunning => {
+            crate::core::server::live_pid(&ctx.config).ok_or(ChekovError::ServerNotRunning)?
+        }
+        StepAction::Launch => launch_candidate(ctx, eff)?,
+    };
+    let setup = BenchSetup {
+        eff: eff.clone(),
+        pid,
+    };
+    let dir = measure_candidate(ctx, &setup, args)?;
+    if *action == StepAction::Launch {
+        teardown_candidate(ctx, pid)?;
+    }
+    Ok(dir)
+}
+
+/// Readiness through rendering for one already-up server.
+fn measure_candidate(
+    ctx: &Ctx,
+    setup: &BenchSetup,
+    args: &BenchArgs,
+) -> Result<std::path::PathBuf, ChekovError> {
     use crate::core::bench::{store, sweep};
     use crate::core::proxy::serve::Upstream;
-    let setup = bench_setup(ctx)?;
     let cfg = &ctx.config;
     let upstream = Upstream {
         base_url: cfg.base_url(),
         api_key: cfg.file.server.api_key.clone(),
     };
-    let props = ensure_ready(ctx, &upstream, &setup)?;
+    let props = ensure_ready(ctx, &upstream, setup)?;
     let plan: sweep::SweepPlan = (&cfg.file.bench).into();
     let head = build_head(
         ctx,
-        &setup,
+        setup,
         &HeadInputs {
             props,
             plan: &plan,
@@ -665,10 +791,57 @@ fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
             fixture: args.fixture,
         },
     )?;
-    let log = store::RunLog::load(writer.dir())?;
-    print!("{}", store::render_run(&log));
-    println!("run: {}", writer.dir().display());
-    Ok(ExitCode::SUCCESS)
+    print!("{}", store::render_run(&store::RunLog::load(writer.dir())?));
+    Ok(writer.dir().to_path_buf())
+}
+
+/// Preflight, flag hygiene, then a Metal-aware spawn — the same refusal
+/// gates as `chekov run`, never a back door around them.
+fn launch_candidate(ctx: &Ctx, eff: &crate::core::registry::Effective) -> Result<i32, ChekovError> {
+    use crate::core::bench::lifecycle;
+    use crate::core::server;
+    super::run::preflight(ctx, eff)?;
+    let argv = server::launch_args(&ctx.config, eff);
+    match lifecycle::server_help(&ctx.config.engine_dir()) {
+        Some(help) => {
+            if let Some(flag) = lifecycle::unknown_flags(&argv, &help).into_iter().next() {
+                return Err(ChekovError::BenchFlagUnknown { flag });
+            }
+        }
+        None => eprintln!(
+            "chekov bench: could not capture llama-server --help — flag hygiene unchecked"
+        ),
+    }
+    let pid = server::spawn_daemon_with_env(&ctx.config, eff, &[lifecycle::METAL_RESIDENCY])?;
+    server::write_run_state(&ctx.config, &eff.name)?;
+    eprintln!("chekov bench: started '{}' (pid {pid})", eff.name);
+    Ok(pid)
+}
+
+/// Stop what we started, then verify the budget actually came back before
+/// the next candidate loads (spec §7.3.8).
+fn teardown_candidate(ctx: &Ctx, pid: i32) -> Result<(), ChekovError> {
+    use crate::core::bench::lifecycle;
+    use crate::core::server::{self, PidFile};
+    let cfg = &ctx.config;
+    server::stop_pid(pid, std::time::Duration::from_secs(20))?;
+    PidFile::new(cfg.pidfile()).remove()?;
+    server::clear_run_state(cfg)?;
+    let Some(budget) = machine::live_gpu_budget(&cfg.engine_dir()) else {
+        eprintln!("chekov bench: budget release UNVERIFIED — the engine probe is unavailable");
+        return Ok(());
+    };
+    let bench_cfg = &cfg.file.bench;
+    let policy = lifecycle::ReleasePolicy {
+        total_mib: budget.value,
+        release_pct: bench_cfg.release_pct,
+        max_polls: bench_cfg.release_max_polls,
+        interval: std::time::Duration::from_millis(bench_cfg.release_interval_ms),
+    };
+    let free =
+        lifecycle::wait_budget_released(policy, &mut || machine::live_gpu_free(&cfg.engine_dir()))?;
+    eprintln!("chekov bench: budget released ({free} MiB free)");
+    Ok(())
 }
 
 /// What the suites need beyond the sink and `Ctx` (§4).
@@ -755,6 +928,7 @@ fn run_throughput(
                 decode_samples: result.decode_samples,
                 prefill_samples: result.prefill_samples,
                 warmup_dropped: u32::try_from(warmup).unwrap_or(0),
+                cache_n: result.cache_n,
             },
             grade: None,
         })?;
@@ -814,6 +988,7 @@ fn failed_probe(
             decode_samples: vec![],
             prefill_samples: vec![],
             warmup_dropped: 0,
+            cache_n: 0,
         },
         store::GradeRow {
             pass: false,
@@ -830,6 +1005,7 @@ fn probe_measure(
         decode_samples: vec![timings.predicted_per_second],
         prefill_samples: vec![timings.prompt_per_second],
         warmup_dropped: 0,
+        cache_n: timings.cache_n,
     }
 }
 
@@ -1013,10 +1189,11 @@ mod tests {
         .expect("bench parses");
         match cli.cmd {
             crate::cli::Cmd::Capability(cap) => match cap.action {
-                Some(super::CapAction::Bench { fixture, resume }) => {
-                    assert_eq!(resume, None);
+                Some(super::CapAction::Bench(opts)) => {
+                    assert_eq!(opts.resume, None);
+                    assert!(opts.models.is_empty() && !opts.dry_run && !opts.yes);
                     assert_eq!(
-                        fixture.as_deref(),
+                        opts.fixture.as_deref(),
                         Some(std::path::Path::new("probes.toml"))
                     );
                 }
@@ -1038,6 +1215,50 @@ mod tests {
             }
             _ => panic!("expected capability"),
         }
+    }
+
+    #[test]
+    fn models_flag_parses_a_comma_list() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "chekov",
+            "capability",
+            "bench",
+            "--models",
+            "a,b",
+            "--dry-run",
+        ])
+        .expect("parses");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Bench(opts)) => {
+                    assert_eq!(opts.models, vec!["a".to_owned(), "b".to_owned()]);
+                    assert!(opts.dry_run);
+                }
+                other => panic!("expected Bench, got {other:?}"),
+            },
+            _ => panic!("expected capability"),
+        }
+    }
+
+    #[test]
+    fn the_server_use_rule_reuses_refuses_and_launches() {
+        use crate::core::bench::lifecycle::StepAction;
+        let one = ["m1".to_owned()];
+        let two = ["m1".to_owned(), "m2".to_owned()];
+        // No server: launch everything.
+        assert_eq!(
+            super::server_use_rule(None, &two).expect("launch all"),
+            vec![StepAction::Launch, StepAction::Launch]
+        );
+        // The single request IS the running model: reuse, leave it up.
+        assert_eq!(
+            super::server_use_rule(Some("m1"), &one).expect("reuse"),
+            vec![StepAction::UseRunning]
+        );
+        // A live server bench did not start is never stopped for a sweep.
+        assert!(super::server_use_rule(Some("m1"), &two).is_err());
+        assert!(super::server_use_rule(Some("other"), &one).is_err());
     }
 
     #[test]

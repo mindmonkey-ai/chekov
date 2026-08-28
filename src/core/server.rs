@@ -163,6 +163,19 @@ fn server_command(cfg: &Config, eff: &Effective) -> std::process::Command {
 /// Detached start: own process group, output appended to the server log,
 /// pidfile written. The child outlives this process by design.
 pub fn spawn_daemon(cfg: &Config, eff: &Effective) -> Result<i32, ChekovError> {
+    spawn_daemon_with_env(cfg, eff, &[])
+}
+
+/// `spawn_daemon` with extra environment for the child.
+///
+/// Bench sets `GGML_METAL_RESIDENCY_KEEP_ALIVE_S=5` so a sequential sweep
+/// does not OOM on the next model while Metal keeps the last one wired for
+/// 3 minutes.
+pub fn spawn_daemon_with_env(
+    cfg: &Config,
+    eff: &Effective,
+    env: &[(&str, &str)],
+) -> Result<i32, ChekovError> {
     use std::os::unix::process::CommandExt;
     std::fs::create_dir_all(cfg.logs_dir())
         .map_err(|e| ChekovError::io(format!("creating {}", cfg.logs_dir().display()), e))?;
@@ -175,7 +188,8 @@ pub fn spawn_daemon(cfg: &Config, eff: &Effective) -> Result<i32, ChekovError> {
         .try_clone()
         .map_err(|e| ChekovError::io("cloning log handle", e))?;
     let mut cmd = server_command(cfg, eff);
-    cmd.stdin(std::process::Stdio::null())
+    cmd.envs(env.iter().copied())
+        .stdin(std::process::Stdio::null())
         .stdout(log)
         .stderr(log_err)
         .process_group(0);

@@ -181,11 +181,33 @@ pub enum ChekovError {
     BenchStampMismatch { field: String, a: String, b: String },
 
     #[error(
-        "the server is running '{running}' but the resolved model is '{resolved}' \
-         — bench refuses to record one model's numbers under another's name; \
-         `chekov restart` and re-run"
+        "the server is running '{running}' but bench was asked for '{resolved}' \
+         — bench never stops a server it did not start, and never records one \
+         model's numbers under another's name; `chekov stop` first, or bench \
+         just the running model"
     )]
     BenchWrongModel { running: String, resolved: String },
+
+    #[error(
+        "--resume names one run id, which pins one stamp and one model — \
+         re-run with a single candidate (drop --models or name exactly the \
+         resumed model)"
+    )]
+    BenchResumeNeedsOneCandidate,
+
+    #[error(
+        "llama-server's own --help does not list '{flag}' — a routine \
+         `chekov update --engine` may have removed it upstream (removed flags \
+         terminate startup); fix `extra_flags`/defaults in models.toml and re-run"
+    )]
+    BenchFlagUnknown { flag: String },
+
+    #[error(
+        "Metal has not released the previous model's memory ({free_mib} MiB free, \
+         want {want_mib}) — wait a few seconds and re-run, or check for other \
+         GPU processes"
+    )]
+    BenchBudgetNotReleased { free_mib: u64, want_mib: u64 },
 
     #[error(
         "degenerate output detected: {reason} — this matches the known GGUF \

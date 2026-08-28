@@ -12,6 +12,21 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Added
+- `chekov capability bench --models a,b [--dry-run] [--yes]` — the §7.3
+  per-candidate lifecycle. Bench launches each candidate itself behind `run`'s
+  own preflight gates, checks the argv against the binary's own `--help`
+  before spawning (upstream removes flags behind a handler that terminates
+  startup), carries `GGML_METAL_RESIDENCY_KEEP_ALIVE_S=5` into the child so a
+  sequential sweep does not OOM on the second model, and tears down with a
+  verification that the GPU budget actually came back before the next load.
+  The server-use rule is explicit: the one running server is reused when it
+  IS the single request; otherwise a live server is a refusal — bench never
+  stops a server it did not start. Any launch step requires confirmation;
+  `--dry-run` prints the plan and a rough wall-clock estimate as data.
+- Bench rows record `cache_n` (prompt tokens served from KV cache) — observed
+  live: a warm rerun's depth-1024 `prompt_n` fell 1055 → 516 because the
+  shared prefix was cached, and without `cache_n` that read as a shallower
+  measurement.
 - `chekov capability bench [--fixture <path>] [--resume <run-id>]` — slice 5's
   harness. Measures the running server THROUGH chekov's own Anthropic↔OpenAI
   translator: `/health`+pid readiness (a server that dies while loading fails

@@ -55,6 +55,11 @@ pub struct Measure {
     pub prefill_samples: Vec<f64>,
     /// Recorded per §7.4 even though `summarize` re-derives it — auditable.
     pub warmup_dropped: u32,
+    /// Max prompt tokens served from the KV cache across the repetitions —
+    /// the reason a warm rerun's `prompt_n` shrinks. Default so rows written
+    /// before this field load as zero-cached.
+    #[serde(default)]
+    pub cache_n: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,13 +271,19 @@ fn depth_line(row: &TaskRow) -> String {
     let decode = stats::summarize(&row.measure.decode_samples);
     let prefill = stats::summarize(&row.measure.prefill_samples);
     let depth = row.task_id.strip_prefix("depth-").unwrap_or(&row.task_id);
+    // A hot prefix cache must be visible next to the prompt_n it shrank.
+    let cached = if row.measure.cache_n > 0 {
+        format!("  cache_n {}", row.measure.cache_n)
+    } else {
+        String::new()
+    };
     match (decode, prefill) {
         (Some(d), Some(p)) => format!(
-            "{:>5}  {:>8}  {:.1} [{:.1}..{:.1}]  {:.1}  {} ({} warmup dropped)\n",
+            "{:>5}  {:>8}  {:.1} [{:.1}..{:.1}]  {:.1}  {} ({} warmup dropped){cached}\n",
             depth, row.measure.prompt_n, d.median, d.p10, d.p90, p.median, d.n, d.warmup_dropped
         ),
         _ => format!(
-            "{:>5}  {:>8}  too few samples to summarise\n",
+            "{:>5}  {:>8}  too few samples to summarise{cached}\n",
             depth, row.measure.prompt_n
         ),
     }
@@ -341,7 +352,33 @@ mod tests {
             decode_samples: decode.to_vec(),
             prefill_samples: decode.to_vec(),
             warmup_dropped: 1,
+            cache_n: 0,
         }
+    }
+
+    #[test]
+    fn a_row_written_before_cache_n_loads_as_zero_cached() {
+        let row = r#"{"schema":1,"run_id":"r","seq":0,"suite":"throughput","task_id":"depth-1024","measure":{"prompt_n":10,"decode_samples":[1.0,2.0],"prefill_samples":[1.0,2.0],"warmup_dropped":1}}"#;
+        let parsed: super::TaskRow = serde_json::from_str(row).expect("old row loads");
+        assert_eq!(parsed.measure.cache_n, 0);
+    }
+
+    #[test]
+    fn a_hot_cache_is_visible_in_the_rendering() {
+        let eval = scratch("cache-n");
+        let mut writer = RunWriter::create(&eval, "r6-model", &head()).expect("create");
+        let mut warm = measure(&[19.0, 21.0, 22.0]);
+        warm.cache_n = 512;
+        writer
+            .append(Task {
+                suite: "throughput".into(),
+                task_id: "depth-1024".into(),
+                measure: warm,
+                grade: None,
+            })
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(rendered.contains("cache_n 512"), "{rendered}");
     }
 
     #[test]

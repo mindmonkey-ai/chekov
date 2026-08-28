@@ -163,6 +163,7 @@ mod tests {
                     decode_samples: decode.to_vec(),
                     prefill_samples: decode.to_vec(),
                     warmup_dropped: 1,
+                    cache_n: 0,
                 },
                 grade: None,
             }],
@@ -223,6 +224,7 @@ mod tests {
                 decode_samples: vec![15.0, 16.0, 17.0],
                 prefill_samples: vec![15.0, 16.0, 17.0],
                 warmup_dropped: 1,
+                cache_n: 0,
             },
             grade: None,
         });

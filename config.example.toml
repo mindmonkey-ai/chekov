@@ -31,3 +31,6 @@ significance_pct = 5           # median delta below this: no significant differe
 ready_max_polls = 600          # readiness budget: polls x interval
 ready_interval_ms = 500
 seed = 42                      # sampling seed pinned onto every probe
+release_pct = 80               # teardown waits for this % of budget free
+release_max_polls = 60         # release budget: polls x interval
+release_interval_ms = 500

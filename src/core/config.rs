@@ -94,6 +94,11 @@ pub struct BenchSection {
     /// Sampling seed pinned onto every probe (greedy removes sampler
     /// nondeterminism; the seed pins what remains).
     pub seed: u32,
+    /// Teardown waits until this percentage of the GPU budget is free again
+    /// before the next candidate loads.
+    pub release_pct: u32,
+    pub release_max_polls: u32,
+    pub release_interval_ms: u64,
 }
 
 impl Default for BenchSection {
@@ -106,6 +111,9 @@ impl Default for BenchSection {
             ready_max_polls: 600,
             ready_interval_ms: 500,
             seed: 42,
+            release_pct: 80,
+            release_max_polls: 60,
+            release_interval_ms: 500,
         }
     }
 }
