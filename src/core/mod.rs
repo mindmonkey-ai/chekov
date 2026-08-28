@@ -14,4 +14,5 @@ pub mod pullspec;
 pub mod recommend;
 pub mod registry;
 pub mod server;
+pub mod stats;
 pub mod toolparser;
