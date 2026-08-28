@@ -88,6 +88,30 @@ pub fn wait_budget_released(
     })
 }
 
+/// Which task sets a bench run measures (spec §2.1 `--suite`).
+///
+/// Defaults to `throughput` — a DEVIATION from the spec's `agentic` default,
+/// held until the agentic set reaches the spec's full case counts; defaulting
+/// to a partial set would misrepresent what "bench" measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Suite {
+    Throughput,
+    Agentic,
+    All,
+}
+
+impl Suite {
+    #[must_use]
+    pub const fn runs_throughput(self) -> bool {
+        matches!(self, Self::Throughput | Self::All)
+    }
+
+    #[must_use]
+    pub const fn runs_agentic(self) -> bool {
+        matches!(self, Self::Agentic | Self::All)
+    }
+}
+
 /// One candidate's place in the run, as data — printed by `--dry-run`,
 /// estimated for the confirm gate, executed sequentially.
 #[derive(Debug, Clone, PartialEq, Eq)]

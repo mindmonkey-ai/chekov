@@ -67,6 +67,41 @@ pub struct Measure {
 pub struct GradeRow {
     pub pass: bool,
     pub reason: Option<String>,
+    /// The task could not be measured at all — the engine refused, the
+    /// capability is absent. NEVER a failure: a model is not wrong because
+    /// something outside it would not run. An unavailable axis reports N/A
+    /// with its reason (spec §7.5), never a zero.
+    #[serde(default)]
+    pub unavailable: bool,
+}
+
+impl GradeRow {
+    #[must_use]
+    pub const fn pass() -> Self {
+        Self {
+            pass: true,
+            reason: None,
+            unavailable: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn fail(reason: String) -> Self {
+        Self {
+            pass: false,
+            reason: Some(reason),
+            unavailable: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn unavailable(reason: String) -> Self {
+        Self {
+            pass: false,
+            reason: Some(reason),
+            unavailable: true,
+        }
+    }
 }
 
 /// One task to append: its identity plus what was measured.
@@ -240,23 +275,7 @@ pub fn render_run(log: &RunLog) -> String {
         "bench {}  ctx {}  engine {}  machine {}\n",
         log.head.model, stamp.ctx, stamp.engine_build_commit, stamp.machine_id
     );
-    out.push_str("depth  prompt_n  decode tok/s (median [p10..p90])  prefill tok/s  n\n");
-    let throughput: Vec<&TaskRow> = log
-        .rows
-        .iter()
-        .filter(|r| r.suite == "throughput")
-        .collect();
-    for row in &throughput {
-        out.push_str(&depth_line(row));
-    }
-    let summarisable = throughput
-        .iter()
-        .filter(|r| stats::summarize(&r.measure.decode_samples).is_some())
-        .count();
-    if let Some(note) = curve_note(summarisable) {
-        out.push_str(&note);
-        out.push('\n');
-    }
+    out.push_str(&throughput_table(log));
     let probes: String = log
         .rows
         .iter()
@@ -264,7 +283,218 @@ pub fn render_run(log: &RunLog) -> String {
         .map(probe_line)
         .collect();
     out.push_str(&probes);
+    out.push_str(&suite_summaries(log));
     out
+}
+
+/// The depth table, and only when throughput was actually measured.
+///
+/// Printing "insufficient depths to fit a curve" for a suite that never ran
+/// reports a failure to fit a curve nobody asked for.
+fn throughput_table(log: &RunLog) -> String {
+    let rows: Vec<&TaskRow> = rows_of(log, "throughput").collect();
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out =
+        String::from("depth  prompt_n  decode tok/s (median [p10..p90])  prefill tok/s  n\n");
+    for row in &rows {
+        out.push_str(&depth_line(row));
+    }
+    let summarisable = rows
+        .iter()
+        .filter(|r| stats::summarize(&r.measure.decode_samples).is_some())
+        .count();
+    if let Some(note) = curve_note(summarisable) {
+        out.push_str(&note);
+        out.push('\n');
+    }
+    out
+}
+
+/// Per-suite summary lines for the agentic suites: counts always printed,
+/// failures listed individually, passes counted — no silent caps.
+fn suite_summaries(log: &RunLog) -> String {
+    let mut out = String::new();
+    let failures: String = log
+        .rows
+        .iter()
+        .filter(|r| ["tool_emit", "grammar_gap", "instruction"].contains(&r.suite.as_str()))
+        .filter(|r| r.grade.as_ref().is_some_and(|g| !g.pass && !g.unavailable))
+        .map(agentic_fail_line)
+        .collect();
+    out.push_str(&failures);
+    if let Some(line) = tool_emit_line(log) {
+        out.push_str(&line);
+    }
+    if let Some(line) = grammar_gap_line(log) {
+        out.push_str(&line);
+    }
+    if let Some(line) = instruction_line(log) {
+        out.push_str(&line);
+    }
+    out
+}
+
+fn agentic_fail_line(row: &TaskRow) -> String {
+    let reason = row
+        .grade
+        .as_ref()
+        .and_then(|g| g.reason.as_deref())
+        .unwrap_or("");
+    format!("{} FAIL {}  {reason}\n", row.suite, row.task_id)
+}
+
+fn rows_of<'a>(log: &'a RunLog, suite: &'a str) -> impl Iterator<Item = &'a TaskRow> {
+    log.rows.iter().filter(move |r| r.suite == suite)
+}
+
+fn passed(rows: &[&TaskRow]) -> usize {
+    rows.iter()
+        .filter(|r| r.grade.as_ref().is_some_and(|g| g.pass))
+        .count()
+}
+
+fn is_unavailable(row: &TaskRow) -> bool {
+    row.grade.as_ref().is_some_and(|g| g.unavailable)
+}
+
+/// The rows that were actually measured, and how many were not.
+///
+/// An unmeasured task belongs in NEITHER the numerator nor the denominator:
+/// leaving it in the denominator scores the model down for a question it was
+/// never asked. The count rides along so the exclusion is always printed —
+/// a silently smaller denominator is its own dishonesty.
+fn measured<'a>(rows: &[&'a TaskRow]) -> (Vec<&'a TaskRow>, usize) {
+    let kept: Vec<&TaskRow> = rows
+        .iter()
+        .filter(|r| !is_unavailable(r))
+        .copied()
+        .collect();
+    let excluded = rows.len() - kept.len();
+    (kept, excluded)
+}
+
+/// ` (N unavailable, excluded)`, or nothing when everything was measured.
+fn excluded_note(excluded: usize) -> String {
+    if excluded == 0 {
+        String::new()
+    } else {
+        format!(" ({excluded} unavailable, excluded)")
+    }
+}
+
+/// The reason the first unavailable row recorded, for an N/A line.
+fn unavailable_reason(rows: &[&TaskRow]) -> String {
+    rows.iter()
+        .find(|r| is_unavailable(r))
+        .and_then(|r| r.grade.as_ref())
+        .and_then(|g| g.reason.as_deref())
+        .unwrap_or("reason unrecorded")
+        .to_owned()
+}
+
+fn tool_emit_line(log: &RunLog) -> Option<String> {
+    let rows: Vec<&TaskRow> = rows_of(log, "tool_emit").collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let (kept, excluded) = measured(&rows);
+    if kept.is_empty() {
+        return Some(format!(
+            "tool_emit    N/A — nothing was measured ({})\n",
+            unavailable_reason(&rows)
+        ));
+    }
+    Some(format!(
+        "tool_emit    {}/{}{}\n",
+        passed(&kept),
+        kept.len(),
+        excluded_note(excluded)
+    ))
+}
+
+/// The §7.2 anti-self-deception line: forced vs unconstrained ON THE SAME
+/// CASES — a large gap means "works only with a babysitter".
+///
+/// When the forced pass could not run at all, the axis is N/A with the
+/// engine's own reason. Reporting 0/N there would publish a gap the model
+/// never earned.
+fn grammar_gap_line(log: &RunLog) -> Option<String> {
+    let forced: Vec<&TaskRow> = rows_of(log, "grammar_gap").collect();
+    if forced.is_empty() {
+        return None;
+    }
+    let (kept, excluded) = measured(&forced);
+    if kept.is_empty() {
+        return Some(format!(
+            "grammar_gap  N/A — the forced pass could not run ({}); \
+             no gap is reported because none was measured\n",
+            unavailable_reason(&forced)
+        ));
+    }
+    // "The same cases" means the ones actually forced — an unavailable case
+    // has no forced result to compare against, so including its
+    // unconstrained result on one side of the gap invents the difference.
+    let base_ids: Vec<&str> = kept
+        .iter()
+        .filter_map(|r| r.task_id.strip_prefix("gg-"))
+        .collect();
+    let unconstrained: Vec<&TaskRow> = rows_of(log, "tool_emit")
+        .filter(|r| base_ids.contains(&r.task_id.as_str()))
+        .collect();
+    let (paired, _) = measured(&unconstrained);
+    if paired.is_empty() {
+        return Some(format!(
+            "grammar_gap  {}/{} forced — no unconstrained result to compare against{}\n",
+            passed(&kept),
+            kept.len(),
+            excluded_note(excluded)
+        ));
+    }
+    let pct = |pass: usize, total: usize| i64::try_from(pass * 100 / total.max(1)).unwrap_or(0);
+    let gap = pct(passed(&kept), kept.len()) - pct(passed(&paired), paired.len());
+    Some(format!(
+        "grammar_gap  {}/{} forced — unconstrained on the same cases {}/{} (gap {gap:+}%){}\n",
+        passed(&kept),
+        kept.len(),
+        passed(&paired),
+        paired.len(),
+        excluded_note(excluded)
+    ))
+}
+
+fn instruction_line(log: &RunLog) -> Option<String> {
+    let rows: Vec<&TaskRow> = rows_of(log, "instruction").collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let (kept, excluded) = measured(&rows);
+    if kept.is_empty() {
+        return Some(format!(
+            "instruction  N/A — nothing was measured ({})\n",
+            unavailable_reason(&rows)
+        ));
+    }
+    let strict = passed(&kept);
+    let loose = kept
+        .iter()
+        .filter(|r| {
+            r.grade.as_ref().is_some_and(|g| {
+                g.pass
+                    || g.reason
+                        .as_deref()
+                        .is_some_and(|s| s.contains("loose:pass"))
+            })
+        })
+        .count();
+    Some(format!(
+        "instruction  strict {strict}/{}, loose {loose}/{} (chattiness gap {}){}\n",
+        kept.len(),
+        kept.len(),
+        loose.saturating_sub(strict),
+        excluded_note(excluded)
+    ))
 }
 
 fn depth_line(row: &TaskRow) -> String {
@@ -361,6 +591,175 @@ mod tests {
         let row = r#"{"schema":1,"run_id":"r","seq":0,"suite":"throughput","task_id":"depth-1024","measure":{"prompt_n":10,"decode_samples":[1.0,2.0],"prefill_samples":[1.0,2.0],"warmup_dropped":1}}"#;
         let parsed: super::TaskRow = serde_json::from_str(row).expect("old row loads");
         assert_eq!(parsed.measure.cache_n, 0);
+    }
+
+    /// Unconstrained 1/2 on the call cases, forced 2/2 (gap +50%);
+    /// instruction strict 1/2, loose 2/2 (chattiness gap 1).
+    fn graded_run(eval: &std::path::Path) -> RunWriter {
+        let mut writer = RunWriter::create(eval, "r7-model", &head()).expect("create");
+        let rows: [(&str, &str, bool, Option<&str>); 6] = [
+            ("tool_emit", "te-001", true, None),
+            (
+                "tool_emit",
+                "te-002",
+                false,
+                Some("called 'read_file', expected 'grep'"),
+            ),
+            ("grammar_gap", "gg-te-001", true, None),
+            ("grammar_gap", "gg-te-002", true, None),
+            ("instruction", "if-001", true, Some("loose:pass")),
+            (
+                "instruction",
+                "if-002",
+                false,
+                Some("failed 'fenced_rust_only'; loose:pass"),
+            ),
+        ];
+        for (suite, id, pass, reason) in rows {
+            writer
+                .append(Task {
+                    suite: suite.into(),
+                    task_id: id.into(),
+                    measure: measure(&[20.0, 20.0]),
+                    grade: Some(GradeRow {
+                        pass,
+                        reason: reason.map(str::to_owned),
+                        unavailable: false,
+                    }),
+                })
+                .expect("append");
+        }
+        writer
+    }
+
+    #[test]
+    fn an_unmeasurable_forced_pass_reports_na_not_a_zero_score() {
+        // The engine refusing to constrain the model is not the model failing.
+        // Reporting 0/2 here would publish a gap nobody measured.
+        let eval = scratch("forced-na");
+        let mut writer = RunWriter::create(&eval, "r8-model", &head()).expect("create");
+        let refused = || GradeRow::unavailable("http status: 400".to_owned());
+        let rows = [
+            ("tool_emit", "te-001", GradeRow::pass()),
+            ("tool_emit", "te-002", GradeRow::pass()),
+            ("grammar_gap", "gg-te-001", refused()),
+            ("grammar_gap", "gg-te-002", refused()),
+        ];
+        for (suite, id, grade) in rows {
+            writer
+                .append(Task {
+                    suite: suite.into(),
+                    task_id: id.into(),
+                    measure: measure(&[20.0, 20.0]),
+                    grade: Some(grade),
+                })
+                .expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("grammar_gap  N/A"),
+            "an unmeasurable axis is N/A: {rendered}"
+        );
+        assert!(
+            rendered.contains("http status: 400"),
+            "with its reason: {rendered}"
+        );
+        assert!(
+            !rendered.contains("(gap"),
+            "no gap may be published: {rendered}"
+        );
+        assert!(
+            !rendered.contains("forced —"),
+            "no forced score may be published: {rendered}"
+        );
+        assert!(
+            !rendered.contains("grammar_gap FAIL"),
+            "unavailable is never listed as a failure: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_partly_unavailable_axis_scores_only_what_was_measured() {
+        // Reachable through --resume, which mixes previously-recorded
+        // unavailable rows with freshly graded ones. Leaving the unavailable
+        // ones in the denominator scores the model down for questions it was
+        // never asked — the same fabrication as the all-unavailable case.
+        let eval = scratch("mixed-availability");
+        let mut writer = RunWriter::create(&eval, "r9-model", &head()).expect("create");
+        let rows = [
+            ("tool_emit", "te-001", GradeRow::pass()),
+            ("tool_emit", "te-002", GradeRow::pass()),
+            ("grammar_gap", "gg-te-001", GradeRow::pass()),
+            (
+                "grammar_gap",
+                "gg-te-002",
+                GradeRow::unavailable("http status: 400".to_owned()),
+            ),
+        ];
+        for (suite, id, grade) in rows {
+            writer
+                .append(Task {
+                    suite: suite.into(),
+                    task_id: id.into(),
+                    measure: measure(&[20.0, 20.0]),
+                    grade: Some(grade),
+                })
+                .expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("grammar_gap  1/1 forced"),
+            "only the measured case counts: {rendered}"
+        );
+        assert!(
+            rendered.contains("(1 unavailable, excluded)"),
+            "the exclusion is always printed: {rendered}"
+        );
+        assert!(
+            rendered.contains("unconstrained on the same cases 1/1"),
+            "the comparison set is the forced-measured cases only: {rendered}"
+        );
+        assert!(
+            rendered.contains("(gap +0%)"),
+            "1/1 vs 1/1 is no gap, not -50%: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_agentic_only_run_does_not_claim_a_failed_curve_fit() {
+        // The throughput suite never ran; "insufficient depths" would report a
+        // failure to fit a curve nobody asked for.
+        let eval = scratch("agentic-only");
+        let writer = graded_run(&eval);
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            !rendered.contains("insufficient depths"),
+            "no throughput rows means no curve claim: {rendered}"
+        );
+        assert!(!rendered.contains("decode tok/s"), "{rendered}");
+        assert!(rendered.contains("tool_emit    1/2"), "{rendered}");
+    }
+
+    #[test]
+    fn suite_summaries_carry_both_gaps_and_list_failures() {
+        let eval = scratch("summaries");
+        let writer = graded_run(&eval);
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(rendered.contains("tool_emit    1/2"), "{rendered}");
+        assert!(
+            rendered.contains(
+                "grammar_gap  2/2 forced — unconstrained on the same cases 1/2 (gap +50%)"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("instruction  strict 1/2, loose 2/2 (chattiness gap 1)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("tool_emit FAIL te-002  called 'read_file'"),
+            "failures are listed individually: {rendered}"
+        );
     }
 
     #[test]
@@ -486,10 +885,9 @@ mod tests {
                 suite: "fixture".into(),
                 task_id: "greeting".into(),
                 measure: measure(&[20.0, 20.0]),
-                grade: Some(GradeRow {
-                    pass: false,
-                    reason: Some("missing expected substring \"hello\"".into()),
-                }),
+                grade: Some(GradeRow::fail(
+                    "missing expected substring \"hello\"".to_owned(),
+                )),
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));

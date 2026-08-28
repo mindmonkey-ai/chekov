@@ -84,6 +84,10 @@ pub struct BenchOpts {
     /// Skip the confirm gate that any launch step requires.
     #[arg(long)]
     pub yes: bool,
+    /// Which task sets to measure. Default stays `throughput` until the
+    /// agentic probe set reaches the spec's full case counts.
+    #[arg(long, value_enum, default_value_t = crate::core::bench::lifecycle::Suite::Throughput)]
+    pub suite: crate::core::bench::lifecycle::Suite,
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -676,6 +680,7 @@ struct BenchArgs<'a> {
     models: &'a [String],
     dry_run: bool,
     yes: bool,
+    suite: crate::core::bench::lifecycle::Suite,
 }
 
 impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
@@ -686,6 +691,7 @@ impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
             models: &opts.models,
             dry_run: opts.dry_run,
             yes: opts.yes,
+            suite: opts.suite,
         }
     }
 }
@@ -702,7 +708,7 @@ fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
             weights_bytes: weights_on_disk(ctx, &eff.entry),
         })
         .collect();
-    let estimate = lifecycle::estimate_secs(&steps, &plan);
+    let estimate = lifecycle::estimate_secs(&steps, &plan) + agentic_estimate_secs(args.suite)?;
     if args.dry_run {
         print!("{}", lifecycle::render_plan(&steps, estimate));
         return Ok(ExitCode::SUCCESS);
@@ -775,6 +781,7 @@ fn measure_candidate(
             props,
             plan: &plan,
             fixture: args.fixture,
+            suite: args.suite,
         },
     )?;
     let (mut writer, done) = open_run(ctx, &head, args.resume)?;
@@ -789,6 +796,7 @@ fn measure_candidate(
             upstream: &upstream,
             model: &setup.eff.name,
             fixture: args.fixture,
+            suite: args.suite,
         },
     )?;
     print!("{}", store::render_run(&store::RunLog::load(writer.dir())?));
@@ -850,6 +858,7 @@ struct SuiteInputs<'a> {
     upstream: &'a crate::core::proxy::serve::Upstream,
     model: &'a str,
     fixture: Option<&'a std::path::Path>,
+    suite: crate::core::bench::lifecycle::Suite,
 }
 
 fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<(), ChekovError> {
@@ -864,11 +873,210 @@ fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<()
             seed: ctx.config.file.bench.seed,
         },
     };
-    run_throughput(sink, inputs.plan, &wire)?;
+    if inputs.suite.runs_throughput() {
+        run_throughput(sink, inputs.plan, &wire)?;
+    }
+    if inputs.suite.runs_agentic() {
+        run_agentic(sink, &wire)?;
+    }
     if let Some(path) = inputs.fixture {
         run_fixture(sink, &wire, path)?;
     }
     Ok(())
+}
+
+/// Rough extra seconds for the agentic suites (8s per case), from the
+/// validated set — a suite that will not run costs nothing.
+fn agentic_estimate_secs(suite: crate::core::bench::lifecycle::Suite) -> Result<u64, ChekovError> {
+    if !suite.runs_agentic() {
+        return Ok(0);
+    }
+    let set = crate::core::bench::probeset::agentic_v0()?;
+    let forced = set
+        .tool_emit
+        .iter()
+        .filter(|c| c.expect == crate::core::bench::probeset::Expect::Call)
+        .count();
+    let cases = set.tool_emit.len() + forced + set.instruction.len();
+    Ok(cases as u64 * 8)
+}
+
+/// The agentic suites (spec §7.2 rows 1, 2, 6): every case appended as its
+/// own row, `--resume` skipping recorded ones.
+fn run_agentic(
+    sink: &mut TaskSink,
+    wire: &crate::core::bench::runner::ProbeWire,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::{grade, probes, probeset, runner};
+    let set = probeset::agentic_v0()?;
+    // Once the engine has refused a forced grammar, it will refuse every
+    // one: record the rest as unavailable rather than firing doomed
+    // requests and calling each refusal a model failure.
+    let mut forced = ForcedState {
+        wire,
+        refusal: None,
+    };
+    for case in &set.tool_emit {
+        run_tool_case(sink, &mut forced, case)?;
+    }
+    for case in &set.instruction {
+        if sink.is_done("instruction", &case.id) {
+            continue;
+        }
+        let outcome = runner::cross(wire, &probes::instruction_probe(case)).map(|artifact| {
+            let (strict, loose) = grade::grade_instruction(&artifact.anthropic_body, case);
+            (artifact.timings, instruction_row(strict, &loose))
+        });
+        append_probe(sink, ("instruction", &case.id), outcome)?;
+    }
+    Ok(())
+}
+
+/// One tool case: the unconstrained crossing, and — for call cases — the
+/// grammar-forced one. The gap between the two suites is the §7.2 point.
+/// The forced pass's wire plus the engine's refusal, once it has refused.
+struct ForcedState<'a> {
+    wire: &'a crate::core::bench::runner::ProbeWire<'a>,
+    refusal: Option<String>,
+}
+
+fn run_tool_case(
+    sink: &mut TaskSink,
+    forced: &mut ForcedState,
+    case: &crate::core::bench::probeset::ToolCase,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::{grade, probes, probeset, runner};
+    let wire = forced.wire;
+    if !sink.is_done("tool_emit", &case.id) {
+        let outcome = runner::cross(wire, &probes::tool_probe(case)).map(|artifact| {
+            (
+                artifact.timings,
+                grade_row(grade::grade_tool_emit(&artifact.anthropic_body, case)),
+            )
+        });
+        append_probe(sink, ("tool_emit", &case.id), outcome)?;
+    }
+    if case.expect != probeset::Expect::Call {
+        return Ok(());
+    }
+    run_forced_case(sink, forced, case)
+}
+
+/// The forced half of one call case.
+///
+/// An `Err` from the crossing is the engine refusing to constrain the model,
+/// not the model answering badly (grading failures arrive as `Ok`) — so it is
+/// recorded unavailable, and every later case is too rather than firing more
+/// doomed requests.
+fn run_forced_case(
+    sink: &mut TaskSink,
+    forced: &mut ForcedState,
+    case: &crate::core::bench::probeset::ToolCase,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::{grade, probes, probeset, runner};
+    let forced_id = format!("gg-{}", case.id);
+    if sink.is_done("grammar_gap", &forced_id) {
+        return Ok(());
+    }
+    if let Some(reason) = forced.refusal.clone() {
+        return append_unavailable(sink, &forced_id, reason);
+    }
+    let schema = probeset::forced_schema(case);
+    match runner::cross_forced(forced.wire, &probes::forced_probe(case), &schema) {
+        Ok(artifact) => {
+            let verdict = grade_row(grade::grade_forced(&artifact.anthropic_body, case));
+            append_probe(
+                sink,
+                ("grammar_gap", &forced_id),
+                Ok((artifact.timings, verdict)),
+            )
+        }
+        Err(e) => {
+            let reason = e.to_string();
+            // Latch ONLY on the engine answering with a refusal. A chekov-side
+            // fault (a body we built wrong, a response we could not read) must
+            // not be recorded as an engine limitation — that would turn our
+            // own bug into the engine's exoneration and silently skip the
+            // remaining cases.
+            if matches!(e, ChekovError::EndpointDown { .. }) {
+                eprintln!(
+                    "chekov bench: the engine refused a forced grammar — grammar_gap is \
+                     N/A for this run ({reason})"
+                );
+                forced.refusal = Some(reason.clone());
+            } else {
+                eprintln!("chekov bench: {} could not be measured ({reason})", case.id);
+            }
+            append_unavailable(sink, &forced_id, reason)
+        }
+    }
+}
+
+/// Record a task the engine would not let us measure.
+fn append_unavailable(
+    sink: &mut TaskSink,
+    task_id: &str,
+    reason: String,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::store;
+    sink.writer.append(store::Task {
+        suite: "grammar_gap".into(),
+        task_id: task_id.into(),
+        measure: store::Measure {
+            prompt_n: 0,
+            decode_samples: vec![],
+            prefill_samples: vec![],
+            warmup_dropped: 0,
+            cache_n: 0,
+        },
+        grade: Some(store::GradeRow::unavailable(reason)),
+    })
+}
+
+/// Strict is the row's verdict; the loose result rides in the reason so the
+/// renderer can compute the chattiness gap.
+fn instruction_row(
+    strict: crate::core::bench::grade::Grade,
+    loose: &crate::core::bench::grade::Grade,
+) -> crate::core::bench::store::GradeRow {
+    use crate::core::bench::{grade, store};
+    let loose_tag = match loose {
+        grade::Grade::Pass => "loose:pass".to_owned(),
+        grade::Grade::Fail { reason } => format!("loose:fail {reason}"),
+    };
+    match strict {
+        grade::Grade::Pass => store::GradeRow {
+            reason: Some(loose_tag),
+            ..store::GradeRow::pass()
+        },
+        grade::Grade::Fail { reason } => store::GradeRow::fail(format!("{reason}; {loose_tag}")),
+    }
+}
+
+/// Append one graded probe row; a crossing failure records a FAIL with its
+/// reason and no invented measurement.
+fn append_probe(
+    sink: &mut TaskSink,
+    key: (&str, &str),
+    outcome: Result<
+        (
+            crate::core::bench::runner::Timings,
+            crate::core::bench::store::GradeRow,
+        ),
+        ChekovError,
+    >,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::store;
+    let (measure, verdict) = match outcome {
+        Ok((timings, verdict)) => (probe_measure(&timings), verdict),
+        Err(e) => failed_probe(&e),
+    };
+    sink.writer.append(store::Task {
+        suite: key.0.into(),
+        task_id: key.1.into(),
+        measure,
+        grade: Some(verdict),
+    })
 }
 
 /// Create a fresh run, or reopen one for `--resume` (stamp must match).
@@ -943,7 +1151,7 @@ fn run_fixture(
     wire: &crate::core::bench::runner::ProbeWire,
     path: &std::path::Path,
 ) -> Result<(), ChekovError> {
-    use crate::core::bench::{fixture, grade, probes, runner, store};
+    use crate::core::bench::{fixture, grade, probes, runner};
     let loaded = fixture::load(path)?;
     for probe in &loaded.probes {
         if sink.is_done("fixture", &probe.id) {
@@ -956,25 +1164,20 @@ fn run_fixture(
         let outcome = runner::cross(wire, &probes::fixture_probe(probe)).map(|artifact| {
             (
                 artifact.timings,
-                grade::grade(&artifact.anthropic_body, probe),
+                grade_row(grade::grade(&artifact.anthropic_body, probe)),
             )
         });
-        let (measure, verdict) = match outcome {
-            Ok((timings, graded)) => (probe_measure(&timings), grade_row(graded)),
-            Err(e) => failed_probe(&e),
-        };
-        sink.writer.append(store::Task {
-            suite: "fixture".into(),
-            task_id: probe.id.clone(),
-            measure,
-            grade: Some(verdict),
-        })?;
+        append_probe(sink, ("fixture", &probe.id), outcome)?;
     }
     Ok(())
 }
 
-/// A crossing failure is a FAILED probe with the error as its reason and no
-/// invented measurement — never an empty reply.
+/// A crossing that never completed is UNAVAILABLE, not a failure — for every
+/// suite, not just the forced one.
+///
+/// A server that died mid-run, a context overflow, a refused request: none of
+/// them are the model answering badly. Only a reply chekov actually received
+/// can be graded, and an ungraded task must not sit in a denominator.
 fn failed_probe(
     e: &ChekovError,
 ) -> (
@@ -990,10 +1193,7 @@ fn failed_probe(
             warmup_dropped: 0,
             cache_n: 0,
         },
-        store::GradeRow {
-            pass: false,
-            reason: Some(e.to_string()),
-        },
+        store::GradeRow::unavailable(e.to_string()),
     )
 }
 
@@ -1012,14 +1212,8 @@ fn probe_measure(
 fn grade_row(graded: crate::core::bench::grade::Grade) -> crate::core::bench::store::GradeRow {
     use crate::core::bench::{grade, store};
     match graded {
-        grade::Grade::Pass => store::GradeRow {
-            pass: true,
-            reason: None,
-        },
-        grade::Grade::Fail { reason } => store::GradeRow {
-            pass: false,
-            reason: Some(reason),
-        },
+        grade::Grade::Pass => store::GradeRow::pass(),
+        grade::Grade::Fail { reason } => store::GradeRow::fail(reason),
     }
 }
 
@@ -1028,6 +1222,7 @@ struct HeadInputs<'a> {
     props: crate::core::bench::runner::PropsInfo,
     plan: &'a crate::core::bench::sweep::SweepPlan,
     fixture: Option<&'a std::path::Path>,
+    suite: crate::core::bench::lifecycle::Suite,
 }
 
 /// Who measured: the hashed machine identity, its human-readable brand, and
@@ -1081,8 +1276,8 @@ fn build_head(
         seed: bench_cfg.seed,
         temperature_milli: 0,
         chekov_version: env!("CARGO_PKG_VERSION").to_owned(),
-        prompt_set_hash: probes::prompt_set_hash(inputs.plan, bench_cfg.seed),
-        corpus_id: corpus_id(inputs.fixture)?,
+        prompt_set_hash: probes::suite_prompt_hash(inputs.suite, inputs.plan, bench_cfg.seed),
+        corpus_id: corpus_id(inputs.suite, inputs.fixture)?,
     };
     Ok(store::RunHead {
         model: setup.eff.name.clone(),
@@ -1114,18 +1309,33 @@ fn stamped_flags(launch_args: &[String]) -> StampedFlags {
     }
 }
 
-/// "throughput-v1", plus the fixture file's content hash when one is graded —
-/// runs over different task sets must never compare as the same set.
-fn corpus_id(fixture: Option<&std::path::Path>) -> Result<String, ChekovError> {
-    let Some(path) = fixture else {
-        return Ok("throughput-v1".to_owned());
+/// The task-set identity, from what the run actually measures — runs over
+/// different task sets must never compare as the same set.
+fn corpus_id(
+    suite: crate::core::bench::lifecycle::Suite,
+    fixture: Option<&std::path::Path>,
+) -> Result<String, ChekovError> {
+    use crate::core::bench::lifecycle::Suite;
+    let agentic = || {
+        format!(
+            "agentic-v0:{}",
+            crate::core::bench::probeset::content_hash()
+        )
     };
-    let text = std::fs::read_to_string(path).map_err(|e| ChekovError::FixtureInvalid {
-        path: path.to_path_buf(),
-        reason: e.to_string(),
-    })?;
-    let digest = crate::core::hash::sha256_hex(text.as_bytes());
-    Ok(format!("throughput-v1+fixture:{}", &digest[..12]))
+    let mut id = match suite {
+        Suite::Throughput => "throughput-v1".to_owned(),
+        Suite::Agentic => agentic(),
+        Suite::All => format!("throughput-v1+{}", agentic()),
+    };
+    if let Some(path) = fixture {
+        let text = std::fs::read_to_string(path).map_err(|e| ChekovError::FixtureInvalid {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        let digest = crate::core::hash::sha256_hex(text.as_bytes());
+        id = format!("{id}+fixture:{}", &digest[..12]);
+    }
+    Ok(id)
 }
 
 /// A run argument is a directory path, or a run id under `eval/`.
@@ -1239,6 +1449,62 @@ mod tests {
             },
             _ => panic!("expected capability"),
         }
+    }
+
+    #[test]
+    fn suite_flag_parses_and_defaults_to_throughput() {
+        use crate::core::bench::lifecycle::Suite;
+        use clap::Parser;
+        let cli =
+            crate::cli::Cli::try_parse_from(["chekov", "capability", "bench"]).expect("parses");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Bench(opts)) => {
+                    assert_eq!(
+                        opts.suite,
+                        Suite::Throughput,
+                        "deviation held until full strength"
+                    );
+                }
+                other => panic!("expected Bench, got {other:?}"),
+            },
+            _ => panic!("expected capability"),
+        }
+        let cli = crate::cli::Cli::try_parse_from([
+            "chekov",
+            "capability",
+            "bench",
+            "--suite",
+            "agentic",
+        ])
+        .expect("parses");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Bench(opts)) => assert_eq!(opts.suite, Suite::Agentic),
+                other => panic!("expected Bench, got {other:?}"),
+            },
+            _ => panic!("expected capability"),
+        }
+    }
+
+    #[test]
+    fn the_suite_hash_keeps_throughput_stable_and_separates_the_rest() {
+        use crate::core::bench::lifecycle::Suite;
+        use crate::core::bench::{probes, sweep};
+        let plan = sweep::SweepPlan {
+            depths: vec![1024],
+            repetitions: 5,
+            max_tokens: 128,
+        };
+        assert_eq!(
+            probes::suite_prompt_hash(Suite::Throughput, &plan, 42),
+            probes::prompt_set_hash(&plan, 42),
+            "runs recorded before --suite existed stay comparable"
+        );
+        let agentic = probes::suite_prompt_hash(Suite::Agentic, &plan, 42);
+        let all = probes::suite_prompt_hash(Suite::All, &plan, 42);
+        assert_ne!(agentic, all);
+        assert_ne!(agentic, probes::prompt_set_hash(&plan, 42));
     }
 
     #[test]

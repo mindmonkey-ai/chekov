@@ -155,6 +155,24 @@ pub struct ProbeWire<'a> {
 /// translator rightly drops them); the artifact handed to grading is the
 /// Anthropic body, per `tests/bench_probe_crosses_the_translator.rs`.
 pub fn cross(wire: &ProbeWire, req: &HttpRequest) -> Result<ProbeArtifact, ChekovError> {
+    cross_inner(wire, req, None)
+}
+
+/// `cross` with a JSON schema forced on the wire (`response_format`) — the
+/// `grammar_gap` probe's forced half. The sampling pins still apply.
+pub fn cross_forced(
+    wire: &ProbeWire,
+    req: &HttpRequest,
+    schema: &Value,
+) -> Result<ProbeArtifact, ChekovError> {
+    cross_inner(wire, req, Some(schema))
+}
+
+fn cross_inner(
+    wire: &ProbeWire,
+    req: &HttpRequest,
+    forced: Option<&Value>,
+) -> Result<ProbeArtifact, ChekovError> {
     let forward = match wire.facade.route(req)? {
         Action::Forward(f) => f,
         Action::Reply(_) => {
@@ -168,7 +186,7 @@ pub fn cross(wire: &ProbeWire, req: &HttpRequest) -> Result<ProbeArtifact, Cheko
     let body = String::from_utf8(forward.body).map_err(|e| ChekovError::ProxyBadRequest {
         reason: format!("forwarded body is not UTF-8: {e}"),
     })?;
-    let body = pin_sampling(&body, wire.pins)?;
+    let body = adjust_body(&body, wire.pins, forced)?;
     let upstream_body = wire.http.post_json(&JsonRequest {
         url: format!("{}{}", wire.upstream.base_url, forward.path),
         body,
@@ -182,9 +200,14 @@ pub fn cross(wire: &ProbeWire, req: &HttpRequest) -> Result<ProbeArtifact, Cheko
     })
 }
 
-/// Overwrite the forwarded body's sampling with the pinned values —
-/// whatever the probe asked for, the measurement is greedy and seeded.
-fn pin_sampling(body: &str, pins: SamplingPins) -> Result<String, ChekovError> {
+/// Overwrite the forwarded body's sampling with the pinned values — and,
+/// for a forced probe, the response-format grammar. Whatever the probe asked
+/// for, the measurement is greedy, seeded, and (when forced) shaped.
+fn adjust_body(
+    body: &str,
+    pins: SamplingPins,
+    forced: Option<&Value>,
+) -> Result<String, ChekovError> {
     let mut parsed: Value =
         serde_json::from_str(body).map_err(|e| ChekovError::ProxyBadRequest {
             reason: format!("forwarded body is not JSON: {e}"),
@@ -197,6 +220,15 @@ fn pin_sampling(body: &str, pins: SamplingPins) -> Result<String, ChekovError> {
     object.insert("temperature".to_owned(), Value::from(0));
     object.insert("top_k".to_owned(), Value::from(1));
     object.insert("seed".to_owned(), Value::from(pins.seed));
+    if let Some(schema) = forced {
+        object.insert(
+            "response_format".to_owned(),
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": { "name": "tool_call", "schema": schema },
+            }),
+        );
+    }
     Ok(parsed.to_string())
 }
 
@@ -422,6 +454,28 @@ mod tests {
         assert_eq!(sent["temperature"], 0, "greedy: {sent}");
         assert_eq!(sent["top_k"], 1, "greedy: {sent}");
         assert_eq!(sent["seed"], 42, "seeded: {sent}");
+    }
+
+    #[test]
+    fn the_forced_wire_carries_response_format_beside_the_pins() {
+        let http = CannedUpstream::new(openai_with_timings());
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let schema = serde_json::json!({"oneOf": [{"type": "object"}]});
+        super::cross_forced(
+            &wire(&http, &facade, &up),
+            &anthropic_request("call it"),
+            &schema,
+        )
+        .expect("crossing");
+        let sent = http.sent_body.borrow().clone().expect("a body was sent");
+        let sent: serde_json::Value = serde_json::from_str(&sent).expect("sent body is json");
+        assert_eq!(sent["response_format"]["type"], "json_schema", "{sent}");
+        assert_eq!(
+            sent["response_format"]["json_schema"]["schema"]["oneOf"][0]["type"], "object",
+            "{sent}"
+        );
+        assert_eq!(sent["temperature"], 0, "the pins still hold: {sent}");
     }
 
     #[test]

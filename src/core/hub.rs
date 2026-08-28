@@ -45,23 +45,40 @@ impl HttpClient for UreqClient {
     }
 
     fn post_json(&self, req: &JsonRequest) -> Result<String, ChekovError> {
-        let mut builder = ureq::post(&req.url).header("Content-Type", "application/json");
+        // http_status_as_error(false): ureq's default renders a non-2xx as
+        // "http status: 400" and DISCARDS the body — but llama-server puts the
+        // real cause there ("Failed to initialize samplers", a context
+        // overflow). Taking the status ourselves keeps the explanation, as the
+        // proxy's own upstream call already does.
+        let mut builder = ureq::post(&req.url)
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .header("Content-Type", "application/json");
         if let Some(token) = &req.bearer {
             builder = builder.header("Authorization", &format!("Bearer {token}"));
         }
-        let mut response = builder
+        let response = builder
             .send(&req.body)
             .map_err(|e| ChekovError::EndpointDown {
                 url: req.url.clone(),
                 reason: e.to_string(),
             })?;
-        response
-            .body_mut()
+        let status = response.status().as_u16();
+        let mut body = response.into_body();
+        let text = body
             .read_to_string()
             .map_err(|e| ChekovError::EndpointDown {
                 url: req.url.clone(),
                 reason: e.to_string(),
-            })
+            })?;
+        if (200..300).contains(&status) {
+            return Ok(text);
+        }
+        Err(ChekovError::EndpointDown {
+            url: req.url.clone(),
+            reason: crate::core::proxy::serve::upstream_reason(status, &text),
+        })
     }
 }
 
