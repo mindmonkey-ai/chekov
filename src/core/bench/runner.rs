@@ -468,6 +468,74 @@ fn read_timings(upstream: &str) -> Result<Timings, ChekovError> {
     }
 }
 
+/// One infill task on the wire: the file before and after the mask, and the
+/// gold's line count (to bound `n_predict`).
+pub struct InfillTask<'a> {
+    pub prefix: &'a str,
+    pub suffix: &'a str,
+    pub gold_lines: usize,
+}
+
+/// What `/infill` said: a fill, or that this model cannot infill at all —
+/// a capability, recorded N/A, never a zero (spec §8).
+pub enum InfillOutcome {
+    Answered(ProbeArtifact),
+    Unsupported(String),
+}
+
+/// `POST /infill` with the same pins as every probe.
+///
+/// llama.cpp resolves the FIM sentinels from GGUF metadata; chekov never
+/// writes them. The artifact's `anthropic_body` carries the raw `content` —
+/// there is no Anthropic door for infill, and the graders read it as text.
+pub fn cross_infill(wire: &ProbeWire, task: &InfillTask) -> Result<InfillOutcome, ChekovError> {
+    let posted = wire.http.post_json(&JsonRequest {
+        url: format!("{}/infill", wire.upstream.base_url),
+        body: infill_body(task, wire.pins.seed).to_string(),
+        bearer: Some(wire.upstream.api_key.clone()),
+    });
+    let upstream_body = match posted {
+        Ok(text) => text,
+        Err(ChekovError::UpstreamRefused { reason, .. })
+            if reason.to_lowercase().contains("infill") =>
+        {
+            return Ok(InfillOutcome::Unsupported(reason));
+        }
+        Err(e) => return Err(e),
+    };
+    let timings = read_timings(&upstream_body)?;
+    let parsed: Value =
+        serde_json::from_str(&upstream_body).map_err(|e| ChekovError::ProxyBadRequest {
+            reason: format!("/infill reply is not JSON: {e}"),
+        })?;
+    let content = parsed
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    Ok(InfillOutcome::Answered(ProbeArtifact {
+        anthropic_body: content,
+        timings,
+    }))
+}
+
+/// The `/infill` request body: prefix/suffix, no chat prompt, the pins, and
+/// an `n_predict` bounded by the gold's size (three tokens per twelve
+/// characters of line, floored at 64 so a one-liner still gets room).
+fn infill_body(task: &InfillTask, seed: u32) -> Value {
+    let n_predict = (task.gold_lines * 36).max(64);
+    serde_json::json!({
+        "input_prefix": task.prefix,
+        "input_suffix": task.suffix,
+        "prompt": "",
+        "input_extra": [],
+        "n_predict": n_predict,
+        "temperature": 0,
+        "top_k": 1,
+        "seed": seed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -563,6 +631,7 @@ mod tests {
         body: String,
         bearer_seen: RefCell<Option<String>>,
         sent_body: RefCell<Option<String>>,
+        url_seen: RefCell<Option<String>>,
     }
 
     impl CannedUpstream {
@@ -571,6 +640,7 @@ mod tests {
                 body,
                 bearer_seen: RefCell::new(None),
                 sent_body: RefCell::new(None),
+                url_seen: RefCell::new(None),
             }
         }
     }
@@ -583,6 +653,7 @@ mod tests {
         fn post_json(&self, req: &JsonRequest) -> Result<String, ChekovError> {
             *self.bearer_seen.borrow_mut() = req.bearer.clone();
             *self.sent_body.borrow_mut() = Some(req.body.clone());
+            *self.url_seen.borrow_mut() = Some(req.url.clone());
             Ok(self.body.clone())
         }
     }
@@ -810,6 +881,83 @@ mod tests {
     /// What went up the wire, parsed.
     fn sent(http: &CannedUpstream) -> serde_json::Value {
         serde_json::from_str(&http.sent_body.borrow().clone().expect("posted")).expect("json")
+    }
+
+    #[test]
+    fn an_infill_crossing_posts_prefix_suffix_and_pins_and_returns_the_raw_fill() {
+        let http = CannedUpstream::new(
+            serde_json::json!({
+                "content": "    a + b\n",
+                "tokens_predicted": 6,
+                "timings": final_frame()["timings"]
+            })
+            .to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn add(a: i32, b: i32) -> i32 {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+        };
+        let outcome = super::cross_infill(&wire(&http, &facade, &up), &task).expect("crosses");
+        let super::InfillOutcome::Answered(artifact) = outcome else {
+            panic!("a 200 with content is an answer");
+        };
+        assert_eq!(artifact.anthropic_body, "    a + b\n");
+        assert_eq!(artifact.timings.cache_n, 512);
+        let sent = sent(&http);
+        assert_eq!(sent["input_prefix"], "fn add(a: i32, b: i32) -> i32 {\n");
+        assert_eq!(sent["input_suffix"], "\n}\n");
+        assert_eq!(sent["prompt"], "");
+        assert_eq!(sent["input_extra"], serde_json::json!([]));
+        assert_eq!(sent["temperature"], 0);
+        assert_eq!(sent["top_k"], 1);
+        assert_eq!(sent["seed"], 42);
+        assert_eq!(sent["n_predict"], 64, "max(64, 3*lines*12)");
+        assert!(
+            http.url_seen
+                .borrow()
+                .as_deref()
+                .unwrap_or("")
+                .ends_with("/infill")
+        );
+    }
+
+    #[test]
+    fn a_model_without_fim_tokens_is_a_capability_not_a_failure() {
+        struct Refusing;
+        impl HttpClient for Refusing {
+            fn get(&self, _url: &str) -> Result<String, ChekovError> {
+                unreachable!()
+            }
+            fn post_json(&self, _req: &JsonRequest) -> Result<String, ChekovError> {
+                Err(ChekovError::UpstreamRefused {
+                    url: "http://fake/infill".into(),
+                    status: 400,
+                    reason: "infill is not supported by this model: missing FIM tokens".into(),
+                })
+            }
+        }
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let w = super::ProbeWire {
+            http: &Refusing,
+            facade: &facade,
+            upstream: &up,
+            pins: super::SamplingPins { seed: 42 },
+        };
+        let task = super::InfillTask {
+            prefix: "x",
+            suffix: "y",
+            gold_lines: 1,
+        };
+        match super::cross_infill(&w, &task).expect("a refusal naming infill is an outcome") {
+            super::InfillOutcome::Unsupported(reason) => {
+                assert!(reason.contains("FIM tokens"), "{reason}");
+            }
+            super::InfillOutcome::Answered(_) => panic!("must not be graded"),
+        }
     }
 
     #[test]
