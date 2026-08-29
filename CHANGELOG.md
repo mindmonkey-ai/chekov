@@ -101,6 +101,13 @@ All notable changes to chekov are recorded here. The format follows
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
 
 ### Fixed
+- **The non-streaming translator keeps extracted reasoning, as the streaming
+  one always has.** With `--reasoning-format auto|deepseek` — or the bench's
+  forced pass asking for it per request — the engine puts the reasoning in
+  `message.reasoning_content`; the streaming path turned it into a `thinking`
+  block and the buffered path silently dropped it. It is now the same
+  `thinking` block, ahead of the text and `tool_use` blocks, so a client sees
+  the same content by either transport. Empty or absent adds nothing.
 - **The non-streaming translator now strips the thinking span, as the
   streaming one always has.** `to_anthropic_response` passed `<think>…</think>`
   through verbatim while `ClaudeStream` dropped it, so the two halves of the
