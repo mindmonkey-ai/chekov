@@ -408,7 +408,7 @@ pub fn to_anthropic_response(res: &Value, model: &str) -> Value {
         .and_then(Value::as_array)
         .and_then(|c| c.first());
     let message = choice.and_then(|c| c.get("message"));
-    let mut content = Vec::new();
+    let mut content: Vec<Value> = thinking_block(message).into_iter().collect();
     if let Some(text) = message
         .and_then(|m| m.get("content"))
         .and_then(Value::as_str)
@@ -438,6 +438,19 @@ pub fn to_anthropic_response(res: &Value, model: &str) -> Value {
         "stop_sequence": Value::Null,
         "usage": to_usage(res.get("usage")),
     })
+}
+
+/// Reasoning the engine EXTRACTED (`--reasoning-format auto|deepseek`, or a
+/// request asking for it) arrives in `reasoning_content`; it becomes the
+/// same `thinking` block the streaming translator opens, ahead of the
+/// answer, so a client sees the same content either way. Empty or absent
+/// adds nothing.
+fn thinking_block(message: Option<&Value>) -> Option<Value> {
+    let reasoning = message?
+        .get("reasoning_content")?
+        .as_str()
+        .filter(|s| !s.is_empty())?;
+    Some(json!({ "type": "thinking", "thinking": reasoning, "signature": "" }))
 }
 
 /// `OpenAI` tool call into an Anthropic `tool_use` block. Arguments arrive as a
@@ -669,6 +682,105 @@ mod tests {
             out["content"].as_array().is_some_and(Vec::is_empty),
             "{out}"
         );
+    }
+
+    #[test]
+    fn extracted_reasoning_becomes_a_thinking_block_ahead_of_the_answer() {
+        // With `--reasoning-format auto|deepseek` (or the bench's forced pass
+        // asking for it) the engine puts the reasoning in `reasoning_content`.
+        // The streaming path already turns that into a `thinking` block; the
+        // buffered path must not drop it — nothing degrades silently.
+        let upstream = json!({
+            "choices": [{
+                "message": {
+                    "reasoning_content": "weighing it up",
+                    "content": "The answer is 42.",
+                },
+                "finish_reason": "stop",
+            }],
+        });
+        let out = to_anthropic_response(&upstream, "local");
+        assert_eq!(out["content"][0]["type"], "thinking", "{out}");
+        assert_eq!(out["content"][0]["thinking"], "weighing it up", "{out}");
+        assert_eq!(out["content"][0]["signature"], "", "{out}");
+        assert_eq!(out["content"][1]["type"], "text", "{out}");
+        assert_eq!(out["content"][1]["text"], "The answer is 42.", "{out}");
+    }
+
+    #[test]
+    fn extracted_reasoning_precedes_tool_calls_and_empty_reasoning_adds_nothing() {
+        let with_call = json!({
+            "choices": [{
+                "message": {
+                    "reasoning_content": "need the file",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": { "name": "read", "arguments": r#"{"path":"/x"}"# },
+                    }],
+                },
+                "finish_reason": "tool_calls",
+            }],
+        });
+        let out = to_anthropic_response(&with_call, "local");
+        assert_eq!(out["content"][0]["type"], "thinking", "{out}");
+        assert_eq!(out["content"][1]["type"], "tool_use", "{out}");
+
+        let empty = json!({
+            "choices": [{
+                "message": { "reasoning_content": "", "content": "plain" },
+                "finish_reason": "stop",
+            }],
+        });
+        let out = to_anthropic_response(&empty, "local");
+        assert_eq!(out["content"].as_array().map(Vec::len), Some(1), "{out}");
+        assert_eq!(out["content"][0]["type"], "text", "{out}");
+    }
+
+    #[test]
+    fn the_two_translation_paths_agree_on_the_blocks_of_an_extracted_reply() {
+        use super::super::StreamTranslator;
+        // Same reply through the stream: block types must match the buffered
+        // translation, or a client sees different content by transport.
+        let mut stream = super::ClaudeStream::new("local");
+        let chunks = [
+            json!({ "id": "c1", "choices": [{ "delta": { "reasoning_content": "weighing it up" } }] }),
+            json!({ "id": "c1", "choices": [{ "delta": { "content": "The answer is 42." } }] }),
+            json!({ "id": "c1", "choices": [{ "delta": {}, "finish_reason": "stop" }] }),
+        ];
+        let mut events: Vec<_> = chunks
+            .iter()
+            .flat_map(|c| stream.on_chunk(&c.to_string()))
+            .collect();
+        events.extend(stream.finish());
+        let streamed_types: Vec<String> = events
+            .iter()
+            .filter(|e| e.event == "content_block_start")
+            .map(|e| {
+                let payload: Value = serde_json::from_str(&e.data).expect("json");
+                payload["content_block"]["type"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .collect();
+
+        let buffered = to_anthropic_response(
+            &json!({
+                "choices": [{
+                    "message": { "reasoning_content": "weighing it up", "content": "The answer is 42." },
+                    "finish_reason": "stop",
+                }],
+            }),
+            "local",
+        );
+        let buffered_types: Vec<String> = buffered["content"]
+            .as_array()
+            .expect("blocks")
+            .iter()
+            .map(|b| b["type"].as_str().unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(buffered_types, streamed_types, "{buffered}");
+        assert_eq!(buffered_types, vec!["thinking", "text"]);
     }
 
     #[test]

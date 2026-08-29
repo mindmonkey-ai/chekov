@@ -238,7 +238,14 @@ A model served with `--reasoning-format auto|deepseek` puts its reasoning in
 block and the non-streaming path silently discards (§C.2: nothing degrades
 silently). Not currently reachable — every registry entry uses
 `--reasoning-format none` — which is why it is filed rather than fixed.
-Proposed 2026-08-28 — status: OPEN
+Became reachable 2026-08-29 when the bench's forced pass started asking for
+`reasoning_format: deepseek` per request. FIXED the same day: a non-empty
+`reasoning_content` is the first content block, `{type: thinking, thinking,
+signature: ""}` — the block `ClaudeStream::on_thinking` opens — ahead of the
+text and `tool_use` blocks; a test holds the two paths to the same block
+sequence. Graders read text blocks only, so bench verdicts are unchanged; the
+stored artifact simply stops losing the reasoning.
+Proposed 2026-08-28 — status: FIXED
 
 ## Bench GLM-5.3-Flash — blocked on upstream llama.cpp (2026-08-28)
 `unsloth/GLM-5.3-Flash-GGUF` (arch `glm5_next`, released 2026-08-26) needs
