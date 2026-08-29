@@ -413,6 +413,10 @@ hermes_ctx_floor = 65536  # hard floor when a model is hermes_ok
 canary_max_tokens = 1500
 degenerate_run_len = 30
 replacement_char_max_pct = 5
+
+[engine]
+# git_ref = "b7000"       # pin the engine to a branch, tag, or commit;
+                          # absent = upstream HEAD on the day of setup/update
 ```
 
 Unknown keys are rejected loudly (deny_unknown_fields), never ignored.

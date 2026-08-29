@@ -23,6 +23,11 @@ canary_max_tokens = 1500
 degenerate_run_len = 30
 replacement_char_max_pct = 5
 
+[engine]                       # which llama.cpp `setup` / `update --engine` build
+# git_ref = "b7000"            # branch, tag, or commit to pin to; absent = upstream HEAD
+                               # of the day (fast-forward pull). Weights are revision-
+                               # pinned; without this the binary that runs them is not.
+
 [bench]                        # `chekov capability bench` sweep
 depths = [1024, 4096, 16384]   # prompt depths (approx tokens)
 repetitions = 5                # per depth; the first is dropped as warmup

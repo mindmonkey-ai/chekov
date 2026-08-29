@@ -16,6 +16,40 @@ pub struct FileConfig {
     pub limits: LimitsSection,
     pub doctor: DoctorSection,
     pub bench: BenchSection,
+    pub engine: EngineSection,
+}
+
+/// Which llama.cpp the engine is built from.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EngineSection {
+    /// A branch, tag, or commit to pin the engine to — anything `git fetch
+    /// origin <ref>` accepts. Absent means whatever upstream HEAD is on the
+    /// day `setup` or `update --engine` runs (a fast-forward pull).
+    pub git_ref: Option<String>,
+}
+
+impl EngineSection {
+    /// A ref git would read as an option, or one that would split into
+    /// several arguments, cannot be a pin — refused at load, naming the key.
+    fn validate(&self, path: &Path) -> Result<(), ChekovError> {
+        let Some(git_ref) = self.git_ref.as_deref() else {
+            return Ok(());
+        };
+        let reason = if git_ref.is_empty() {
+            "[engine] git_ref is empty — remove the key to leave the engine unpinned"
+        } else if git_ref.starts_with('-') {
+            "[engine] git_ref starts with '-', which git would read as an option"
+        } else if git_ref.chars().any(char::is_whitespace) {
+            "[engine] git_ref contains whitespace — one branch, tag, or commit only"
+        } else {
+            return Ok(());
+        };
+        Err(ChekovError::ConfigInvalid {
+            path: path.to_path_buf(),
+            reason: reason.to_owned(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -129,7 +163,7 @@ impl Config {
     /// Load `<root>/config.toml` (defaults when absent, loud when invalid).
     pub fn load(root: &Path) -> Result<Self, ChekovError> {
         let path = root.join("config.toml");
-        let file = if path.exists() {
+        let file: FileConfig = if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| ChekovError::io(format!("reading {}", path.display()), e))?;
             toml::from_str(&text).map_err(|e| ChekovError::ConfigInvalid {
@@ -139,6 +173,7 @@ impl Config {
         } else {
             FileConfig::default()
         };
+        file.engine.validate(&path)?;
         Ok(Self {
             root: root.to_path_buf(),
             file,
@@ -299,6 +334,43 @@ mod tests {
             toml::from_str::<super::FileConfig>("[bench]\ntypo = 1\n").is_err(),
             "deny_unknown_fields (§C.7)"
         );
+    }
+
+    #[test]
+    fn engine_section_parses_git_ref_and_defaults_to_unpinned() {
+        assert_eq!(
+            super::FileConfig::default().engine.git_ref,
+            None,
+            "no pin means today's behaviour: whatever upstream HEAD is"
+        );
+        let root = scratch("cfg-engine-ref");
+        std::fs::write(root.join("config.toml"), "[engine]\ngit_ref = \"b7000\"\n").expect("write");
+        let cfg = Config::load(&root).expect("a pinned engine parses");
+        assert_eq!(cfg.file.engine.git_ref.as_deref(), Some("b7000"));
+    }
+
+    #[test]
+    fn an_engine_ref_git_would_read_as_an_option_is_refused_at_load() {
+        // `git fetch origin -x` would parse the ref as a flag; a ref with
+        // whitespace would split into several. Neither can be a pin.
+        for bad in ["-x", "--upload-pack=evil", "v1 v2", ""] {
+            let root = scratch("cfg-engine-bad");
+            std::fs::write(
+                root.join("config.toml"),
+                format!("[engine]\ngit_ref = {bad:?}\n"),
+            )
+            .expect("write");
+            let msg = Config::load(&root).expect_err("must refuse").to_string();
+            assert!(msg.contains("git_ref"), "names the key for {bad:?}: {msg}");
+            assert!(msg.contains("config.toml"), "names the file: {msg}");
+        }
+    }
+
+    #[test]
+    fn engine_section_refuses_unknown_keys() {
+        let root = scratch("cfg-engine-unknown");
+        std::fs::write(root.join("config.toml"), "[engine]\nbranch = \"master\"\n").expect("write");
+        assert!(Config::load(&root).is_err());
     }
 
     #[test]
