@@ -68,7 +68,7 @@ const KEYWORDS: [&str; 52] = [
 
 /// Names any Rust program may use without declaring: the prelude, common
 /// std types and the methods the ladder would otherwise call fabricated.
-const PRELUDE: [&str; 60] = [
+const PRELUDE: &[&str] = &[
     "Some",
     "None",
     "Ok",
@@ -129,6 +129,98 @@ const PRELUDE: [&str; 60] = [
     "chars",
     "new",
     "default",
+    "display",
+    "unwrap_or_else",
+    "ok_or_else",
+    "enumerate",
+    "zip",
+    "rev",
+    "take",
+    "skip",
+    "find",
+    "any",
+    "all",
+    "sum",
+    "count",
+    "min",
+    "max",
+    "sort",
+    "sort_by",
+    "dedup",
+    "extend",
+    "retain",
+    "drain",
+    "split",
+    "starts_with",
+    "ends_with",
+    "strip_prefix",
+    "strip_suffix",
+    "parse",
+    "from",
+    "into",
+    "try_from",
+    "try_into",
+    "as_bytes",
+    "to_vec",
+    "Debug",
+    "Display",
+    "Default",
+    "Clone",
+    "Copy",
+    "PartialEq",
+    "Eq",
+    "Hash",
+    "Path",
+    "PathBuf",
+    "std",
+    "core",
+    "self",
+    "Self",
+    "super",
+    "crate",
+    "Iterator",
+    "IntoIterator",
+    "From",
+    "Into",
+    "AsRef",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "Send",
+    "Sync",
+    "Sized",
+    "Drop",
+    "matches",
+    "assert",
+    "assert_eq",
+    "debug_assert",
+    "todo",
+    "unreachable",
+    "panic",
+    "write",
+    "writeln",
+    "dbg",
+    "env",
+    "fs",
+    "io",
+    "fmt",
+    "mem",
+    "ptr",
+    "cmp",
+    "ops",
+    "collections",
+    "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "BTreeSet",
+    "VecDeque",
+    "Cow",
+    "Cell",
+    "RefCell",
+    "Mutex",
+    "RwLock",
+    "Duration",
+    "Instant",
 ];
 
 #[derive(Debug, Clone, Default)]
@@ -137,11 +229,15 @@ pub struct Symbols(pub BTreeSet<String>);
 /// What a prediction's identifiers are checked against.
 ///
 /// Besides the prelude and the gold's own bindings: the repo's
-/// declarations and the task file's `use` targets. Bundled to keep
-/// `symbols` at 3 parameters.
+/// declarations, the task file's `use` targets, and the task's own context.
+/// Bundled to keep `symbols` at 3 parameters.
 pub struct Known<'a> {
     pub repo: &'a Symbols,
     pub file_uses: &'a [String],
+    /// The prefix and suffix the model was shown. A name already on the page
+    /// trivially exists — the probe is about cross-file and API names, not
+    /// about the local binding two lines up.
+    pub context: &'a str,
 }
 
 pub struct Scored<'a> {
@@ -153,10 +249,12 @@ pub struct Scored<'a> {
 #[must_use]
 pub fn score_all(s: &Scored) -> Vec<(Tier, Score)> {
     let t = s.task;
-    let file_uses = file_use_symbols(&format!("{}{}", t.prefix, t.suffix));
+    let context = format!("{}{}", t.prefix, t.suffix);
+    let file_uses = file_use_symbols(&context);
     let known = Known {
         repo: s.symbols,
         file_uses: &file_uses,
+        context: &context,
     };
     let line_level = t.tier == TaskTier::InFile;
     let gated = |v: f64| {
@@ -227,22 +325,42 @@ fn as_f64(n: usize) -> f64 {
 }
 
 /// `[A-Za-z_][A-Za-z0-9_]*` tokens minus keywords, deduplicated, in order.
+///
+/// Code only: the words inside string and char literals and comments are
+/// prose, not identifiers, and counting them made a comment naming an API
+/// look like a call to it.
 #[must_use]
 pub fn identifiers(text: &str) -> Vec<String> {
+    let code = code_only(text);
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
-    for c in text.chars().chain(std::iter::once(' ')) {
-        let ident_char = c.is_ascii_alphanumeric() || c == '_';
-        if ident_char {
+    for c in code.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_alphanumeric() || c == '_' {
             cur.push(c);
             continue;
         }
         let word = std::mem::take(&mut cur);
         let starts_ok = word.starts_with(|w: char| w.is_ascii_alphabetic() || w == '_');
-        if starts_ok && !KEYWORDS.contains(&word.as_str()) && !out.contains(&word) {
+        if starts_ok && !KEYWORDS.contains(&word.as_str()) && seen.insert(word.clone()) {
             out.push(word);
         }
     }
+    out
+}
+
+/// `text` with every string, char, and comment literal blanked out, so the
+/// tokeniser walks code bytes only. Lengths need not survive — nothing here
+/// maps a token back to an offset.
+fn code_only(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0;
+    for range in super::masker::literal_ranges(text) {
+        out.push_str(&text[pos..range.start]);
+        out.push(' ');
+        pos = range.end;
+    }
+    out.push_str(&text[pos..]);
     out
 }
 
@@ -282,11 +400,13 @@ pub fn symbols(pred: &str, gold: &str, known: &Known) -> f64 {
         return 0.0;
     }
     let gold_bindings = identifiers(gold);
+    let context: BTreeSet<String> = identifiers(known.context).into_iter().collect();
     let exists = |id: &String| {
         known.repo.0.contains(id)
             || known.file_uses.contains(id)
             || PRELUDE.contains(&id.as_str())
             || gold_bindings.contains(id)
+            || context.contains(id)
     };
     as_f64(idents.iter().filter(|id| exists(id)).count()) / as_f64(idents.len())
 }
@@ -324,12 +444,19 @@ fn collect_declarations(line: &str, set: &mut BTreeSet<String>) {
     collect_members(line.trim(), set);
 }
 
+/// Words a line-shaped scan mistakes for a declaration: `Self::x` and
+/// `crate::y` split at their `:` like a field, `Some(v)` and `Ok(v)` read
+/// like enum variants. None of them is a name this repo declares.
+const NOT_DECLARED: [&str; 8] = [
+    "Self", "crate", "self", "super", "Some", "None", "Ok", "Err",
+];
+
 /// A struct field (`name: Type,`) or an enum variant (a capitalised
 /// identifier at line start followed by `,`/`(`/`{`/space).
 fn collect_members(trimmed: &str, set: &mut BTreeSet<String>) {
     if let Some((name, _)) = trimmed.split_once(':') {
         let name = strip_visibility(name).trim();
-        if !name.is_empty() && !name.contains(' ') {
+        if !name.is_empty() && !name.contains(' ') && !NOT_DECLARED.contains(&name) {
             set.insert(name.to_owned());
         }
     }
@@ -338,6 +465,7 @@ fn collect_members(trimmed: &str, set: &mut BTreeSet<String>) {
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect();
     if variant.starts_with(|c: char| c.is_ascii_uppercase())
+        && !NOT_DECLARED.contains(&variant.as_str())
         && trimmed[variant.len()..].starts_with([',', '(', '{', ' '])
     {
         set.insert(variant);
@@ -452,10 +580,15 @@ mod tests {
                 && known.0.contains("owner")
                 && known.0.contains("Credit")
         );
+        assert!(
+            !known.0.contains("Self") && !known.0.contains("Some"),
+            "a line-shaped scan must not call the language's own words declarations"
+        );
         let uses = vec!["HashMap".to_owned()];
         let known_ctx = Known {
             repo: &known,
             file_uses: &uses,
+            context: "",
         };
         assert!(approx(symbols("apply_entry(balance)", "", &known_ctx), 1.0));
         assert!(approx(symbols("frobnicate(l)", "", &known_ctx), 0.0));
@@ -471,6 +604,29 @@ mod tests {
             "a `use` target exists"
         );
         assert!(approx(symbols("Some(1)", "", &known_ctx), 1.0), "prelude");
+    }
+
+    #[test]
+    fn identifiers_are_code_only_never_prose_in_a_literal_or_a_comment() {
+        assert_eq!(
+            identifiers("foo(\"Setting up llama\") // cpp"),
+            vec!["foo"],
+            "a comment naming an API is not a call to it"
+        );
+    }
+
+    #[test]
+    fn a_name_the_model_could_read_in_its_own_context_exists() {
+        let repo = Symbols(BTreeSet::default());
+        let known = Known {
+            repo: &repo,
+            file_uses: &[],
+            context: "let entry = read_dir()?;\nlet dir = entry.path();\n",
+        };
+        assert!(
+            approx(symbols("entry.dir", "", &known), 1.0),
+            "a binding on the same page is not a fabrication"
+        );
     }
 
     #[test]

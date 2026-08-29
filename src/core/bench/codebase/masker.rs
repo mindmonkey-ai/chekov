@@ -105,8 +105,10 @@ fn fn_signatures(text: &str) -> Vec<Range<usize>> {
 
 /// Byte ranges of every string, char, and comment literal in `text` — the
 /// same text the `Scanner` skips when balancing braces, reused here so a
-/// `fn`-shaped line inside one of them is never mistaken for a signature.
-fn literal_ranges(text: &str) -> Vec<Range<usize>> {
+/// `fn`-shaped line inside one of them is never mistaken for a signature,
+/// and by the ladder so prose inside a literal is never mistaken for code.
+/// Ascending and non-overlapping.
+pub(crate) fn literal_ranges(text: &str) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let mut pos = 0;
     while pos < text.len() {
