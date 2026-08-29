@@ -75,7 +75,10 @@ that benign case from a real failure. Proposal: an opt-in `--if-running` flag
 that prints "nothing to stop" and exits 0. Opt-in, not the default — a silent
 no-op by default would weaken the loud-failure creed. A new flag is new
 capability, so it waits here.
-Proposed 2026-08-26 — status: OPEN
+SHIPPED 2026-08-29 exactly as proposed: the flag covers only "no pidfile at
+all"; a stale pidfile is still cleaned and reported (already exit 0), and a
+stop that fails still fails, flag or not.
+Proposed 2026-08-26 — status: SHIPPED
 
 ## `update --accept-license-change` for unattended runs (2026-08-26)
 `update --model` cannot run in cron once a vendor changes their license text:

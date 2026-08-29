@@ -92,7 +92,7 @@ The registry stores the absolute path; everything else works unchanged.
 | Command | What it does |
 |---|---|
 | `run [name] [--foreground]` | Start llama-server (default: active model). Backgrounds by default; `--foreground` blocks the terminal instead. Refuses loudly if: shard missing, port occupied, wired limit below config, engine not built, or a server already running. |
-| `stop` | SIGTERM via pidfile, 20 s grace, SIGKILL escalation with a warning. Detects and cleans stale pidfiles. |
+| `stop [--if-running]` | SIGTERM via pidfile, 20 s grace, SIGKILL escalation with a warning. Detects and cleans stale pidfiles. Stopping a stopped server is an error (exit 1) unless `--if-running`, which prints "nothing to stop" and exits 0 — for idempotent teardown scripts. |
 | `restart [name]` | Stop (if running) then start in the background; swaps models in one motion. |
 | `status` | running/pid, model, revision, port, ctx, uptime, wired-limit actual (with system-default annotation) vs required, log tail path. |
 | `pull <spec> [--name N] [--dry-run] [--model-loc DIR] [--license-url URL]` | Resolve revision, download (or adopt) quant-matching files, snapshot license + provenance, register. Idempotent: same spec+revision is a verified no-op; a NEW revision downloads but never repoints (that is `update`'s gated job). |
