@@ -298,6 +298,13 @@ pub enum ChekovError {
     )]
     ProxyUpstreamFailed { url: String, reason: String },
 
+    #[error(
+        "the upstream stream ended with an error frame ({reason}) — that turn was \
+         never answered, so it is recorded unavailable rather than graded; check \
+         `chekov status` and the tail of logs/llama-server.log"
+    )]
+    BenchStreamFailed { reason: String },
+
     #[error("{context}: {source} — check the path exists and is writable, then retry")]
     Io {
         context: String,

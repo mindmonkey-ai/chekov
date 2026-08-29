@@ -168,7 +168,19 @@ of the same translator disagreed about what the agent receives. Claude Code
 streams; the bench did not — so the bench was grading a path the agent never
 takes. Fixed for thinking, but the asymmetry class remains until probes cross
 `stream_translator()` the way `serve::relay` does.
-Proposed 2026-08-28 — status: OPEN
+SHIPPED 2026-08-28: `runner::cross_streaming` puts `stream: true` on the
+Anthropic request, pumps the SSE body through a fresh `stream_translator()`
+exactly as `serve::relay` does, and reassembles the agent-side events into the
+message an SDK client holds at `message_stop`, so the same graders read it.
+Every unconstrained agentic case now crosses BOTH doors (no flag — Claude
+Code's door is not optional); rows carry `transport`; the report prints
+`asymmetry <suite> <case>: buffered PASS, streamed FAIL — <reason>` for every
+case that disagrees with itself. An `error` frame is `BenchStreamFailed` —
+recorded unavailable, never a forged `end_turn`. Still buffered by design: the
+throughput sweep (its numbers are upstream timings either way) and the
+grammar-forced pass (its axis is the grammar gap). Still out of reach, as §7.1
+states: the socket — `serve.rs`'s HTTP/1.1 framing and chunked encoding.
+Proposed 2026-08-28 — status: SHIPPED
 
 ## `EndpointDown` claims "not answering" for a request that WAS answered (2026-08-28)
 A 400 refusal renders as "endpoint ... is not answering ... restart with
