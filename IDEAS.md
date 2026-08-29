@@ -66,7 +66,14 @@ of the crate's 256 transitive dependencies — including tokio, reqwest, hyper a
 the xet stack. chekov already queries the HF API over ureq at `hub.rs:126`.
 Against it: hf-hub provides resume and Xet-accelerated transfer, which matter for
 100+ GB pulls; hand-rolling means Range-request resume and losing Xet.
-Proposed 2026-08-25 — status: OPEN
+DONE (commit 0bc0b0d, "drop hf-hub for a streaming ureq download — 256 crates
+to 66"): `hub::fetch_to` streams each file over ureq into a `.part` sibling
+and renames it into place; Xet-backed repos redirect to a CAS bridge that
+serves plain HTTPS with a content-length, verified against
+unsloth/MiniMax-M2.7-GGUF. Range-request resume was NOT built — an interrupted
+shard restarts from zero. Recorded here 2026-08-29 because the entry still
+read OPEN.
+Proposed 2026-08-25 — status: DONE (resume of a partial shard still OPEN)
 
 ## `chekov stop --if-running` (2026-08-26)
 A teardown script cannot call `stop` idempotently: stopping an already-stopped
@@ -189,7 +196,8 @@ Note a false-pass hazard for whoever builds this: an EMPTY schema, and
 prose — no grammar is attached at all. A preflight probing with `{}` would
 conclude structured output works and then fabricate passes, the mirror image
 of the failures this N/A change removed. Probe with a non-empty schema only.
-Proposed 2026-08-28 — status: OPEN
+Proposed 2026-08-28 — status: RESOLVED (mechanism (b) shipped 2026-08-29, see
+above); the §7.5 composite question stays open until a composite exists
 
 ## Streaming probes for bench (2026-08-28)
 Spec §7.1 asked for probes over the STREAMING seam as well ("what makes
