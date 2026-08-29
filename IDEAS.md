@@ -126,6 +126,11 @@ machine where the engine reports 228065 MiB — chekov understates its own budge
 Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 `MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)`.
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
+`--codebase` leftover: a crash between the worktree add and its removal leaves
+`<eval>/.scratch/codebase-tree-<head12>` on disk, registered in the target repo.
+It is hidden, so nothing that enumerates the eval dir reads it, and the next run
+removes and re-adds it itself — the manual cleanup, if you want the space back
+now, is `git worktree prune` in the target repo plus deleting that directory.
 Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) v0 SHIPPED 2026-08-28 (--suite agentic: tool_emit/grammar_gap/instruction seed set, growing toward 30/40; deferred: diff_fidelity+tool_loop+long_ctx_trace+hallucination need the §8/§9 corpora, think_leak waits on §13 Q5); slice-5 "`--metric tok-s` upgrades from predicted to measured" SHIPPED 2026-08-28 (fixed bands, deepest-depth median, exact-match + stale footer); fixture-v1 content release-gated; slice 6 OPEN (`--svg` SHIPPED 2026-08-28; --codebase slice A SHIPPED 2026-08-29 (Rust, same-file, tiers 1-5); slices B (cross-file + exec tiers) and C (--judge) OPEN)**
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)

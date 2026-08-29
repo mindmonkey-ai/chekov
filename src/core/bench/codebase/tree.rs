@@ -48,15 +48,27 @@ pub fn head_sha(repo: &Path) -> Result<String, ChekovError> {
 pub struct Worktree {
     pub path: PathBuf,
     repo: PathBuf,
+    removed: bool,
 }
 
 impl Worktree {
+    /// A leftover at `dest` — from a crash, a ctrl-C, a kill — must not
+    /// refuse the next run: it is cleared (as a worktree first, then as a
+    /// directory) and the registration pruned before `add`.
     pub fn add(repo: &Path, dest: &Path) -> Result<Self, ChekovError> {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| ChekovError::io(format!("creating {}", parent.display()), e))?;
         }
         let dest_s = dest.display().to_string();
+        if dest.exists() {
+            let _ = git(repo, &["worktree", "remove", "--force", &dest_s], "");
+            if dest.exists() {
+                std::fs::remove_dir_all(dest)
+                    .map_err(|e| ChekovError::io(format!("clearing {dest_s}"), e))?;
+            }
+        }
+        git(repo, &["worktree", "prune"], "git worktree prune")?;
         git(
             repo,
             &["worktree", "add", "--detach", &dest_s, "HEAD"],
@@ -65,10 +77,13 @@ impl Worktree {
         Ok(Self {
             path: dest.to_path_buf(),
             repo: repo.to_path_buf(),
+            removed: false,
         })
     }
 
-    pub fn remove(self) -> Result<(), ChekovError> {
+    /// The explicit removal: its failure is the caller's to report.
+    pub fn remove(mut self) -> Result<(), ChekovError> {
+        self.removed = true;
         let path = self.path.display().to_string();
         git(
             &self.repo,
@@ -77,6 +92,20 @@ impl Worktree {
         )?;
         git(&self.repo, &["worktree", "prune"], "git worktree prune")?;
         Ok(())
+    }
+}
+
+/// The removal a panic or an early `?` between `add` and `remove` would
+/// otherwise skip. Best-effort and silent — `remove` is the path that
+/// reports, and a `Drop` that failed loudly would bury the real error.
+impl Drop for Worktree {
+    fn drop(&mut self) {
+        if self.removed {
+            return;
+        }
+        let path = self.path.display().to_string();
+        let _ = git(&self.repo, &["worktree", "remove", "--force", &path], "");
+        let _ = git(&self.repo, &["worktree", "prune"], "");
     }
 }
 
@@ -209,6 +238,30 @@ mod tests {
         assert_eq!(head_sha(&dest).expect("head of the copy"), sha);
         wt.remove().expect("remove");
         assert!(!dest.exists());
+        assert_clean(&dir).expect("the repo is untouched");
+    }
+
+    #[test]
+    fn a_leftover_directory_at_the_destination_does_not_block_the_next_run() {
+        let dir = repo("leftover");
+        let dest = dir.join("scratch").join("codebase-tree-abc123");
+        std::fs::create_dir_all(&dest).expect("mkdir");
+        std::fs::write(dest.join("stale.txt"), "from a run that crashed").expect("write");
+        let wt = Worktree::add(&dir, &dest).expect("a leftover is cleared, not a refusal");
+        assert!(dest.join("src/lib.rs").exists());
+        assert!(!dest.join("stale.txt").exists(), "the leftover is gone");
+        wt.remove().expect("remove");
+    }
+
+    #[test]
+    fn a_worktree_dropped_without_remove_cleans_up_after_itself() {
+        let dir = repo("dropped");
+        let dest = dir.join("scratch").join("codebase-tree-def456");
+        {
+            let _wt = Worktree::add(&dir, &dest).expect("add");
+            assert!(dest.join("src/lib.rs").exists());
+        }
+        assert!(!dest.exists(), "Drop removes what `?` or a panic skipped");
         assert_clean(&dir).expect("the repo is untouched");
     }
 

@@ -819,6 +819,10 @@ fn codebase_corpus_id(head: &str, set_hash: &str) -> String {
 
 /// `--codebase`'s gate-through-sample step, or nothing when it wasn't asked
 /// for — the one call that touches the user's repository.
+///
+/// The scratch worktree lives under `<eval>/.scratch/`: a hidden directory,
+/// so every enumerator of the eval dir walks past it instead of trying to
+/// read a checkout as a bench run.
 fn prepare_codebase(
     ctx: &Ctx,
     args: &BenchArgs,
@@ -826,7 +830,7 @@ fn prepare_codebase(
     match args.codebase {
         Some(repo) => Ok(Some(crate::core::bench::codebase::prepare(
             repo,
-            &ctx.config.eval_dir().join("codebase-tree"),
+            &ctx.config.eval_dir().join(".scratch"),
             ctx.config.file.bench.codebase_tasks,
         )?)),
         None => Ok(None),

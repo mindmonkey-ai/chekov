@@ -93,6 +93,10 @@ pub fn pick<'a>(speeds: &'a [MeasuredSpeed], key: &SpeedKey) -> Option<(&'a Meas
 
 /// Every run directory under `eval_dir`. A directory that will not load is a
 /// note for the footer — not a crash, and not a silent skip.
+///
+/// A dot-directory is not a run and never was: `.scratch/` holds the codebase
+/// worktree, and reading a checkout as a bench run would file a note about
+/// chekov's own working space every time the grid is drawn.
 #[must_use]
 pub fn load_all(eval_dir: &Path) -> Loaded {
     let Ok(entries) = std::fs::read_dir(eval_dir) else {
@@ -101,7 +105,7 @@ pub fn load_all(eval_dir: &Path) -> Loaded {
     let mut dirs: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
+        .filter(|path| path.is_dir() && !is_hidden(path))
         .collect();
     dirs.sort();
     let mut loaded = Loaded::default();
@@ -115,6 +119,12 @@ pub fn load_all(eval_dir: &Path) -> Loaded {
         }
     }
     loaded
+}
+
+fn is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.'))
 }
 
 /// What `attach_row` matches against.
@@ -386,11 +396,18 @@ mod tests {
         std::fs::create_dir_all(&broken).expect("broken dir");
         std::fs::write(broken.join("stamp.json"), "{ not json").expect("garbage");
         std::fs::write(eval.join("stray-file.txt"), "ignored").expect("stray");
+        // chekov's own working space: a checkout, never a run.
+        std::fs::create_dir_all(eval.join(".scratch/codebase-tree-4818813deeaa/src"))
+            .expect("scratch");
 
         let loaded = load_all(&eval);
         assert_eq!(loaded.speeds.len(), 1, "{loaded:?}");
         assert_eq!(loaded.speeds[0].speed.run_id, id);
-        assert_eq!(loaded.notes.len(), 1, "{loaded:?}");
+        assert_eq!(
+            loaded.notes.len(),
+            1,
+            "the hidden scratch dir is not a run that failed to load: {loaded:?}"
+        );
         assert!(
             loaded.notes[0].contains("20260828T999999Z-broken")
                 && loaded.notes[0].contains("excluded"),

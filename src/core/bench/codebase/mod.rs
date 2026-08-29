@@ -65,6 +65,12 @@ pub struct Prepared {
     pub symbols: ladder::Symbols,
 }
 
+/// The short HEAD every codebase-mode name is keyed by.
+#[must_use]
+pub fn head12(head: &str) -> &str {
+    &head[..12.min(head.len())]
+}
+
 /// Assembled tasks for the picked spans, matched back to their file text.
 fn assembled_tasks(files: &[(String, String)], picked: &[sample::Picked]) -> Vec<CodebaseTask> {
     let by_path: std::collections::HashMap<&str, &str> = files
@@ -84,11 +90,16 @@ fn assembled_tasks(files: &[(String, String)], picked: &[sample::Picked]) -> Vec
 /// Gate, worktree, walk, mask, sample, assemble, symbol set — then the
 /// worktree is removed. Everything the run needs is in memory, and the
 /// user's checkout was never read directly.
-pub fn prepare(repo: &Path, scratch_tree: &Path, tasks: u32) -> Result<Prepared, ChekovError> {
+///
+/// The scratch tree is `<scratch_root>/codebase-tree-<head12>`: keyed by the
+/// HEAD it checks out, so two runs of different commits never share one, and
+/// derived here rather than by the caller, which does not know the HEAD yet.
+pub fn prepare(repo: &Path, scratch_root: &Path, tasks: u32) -> Result<Prepared, ChekovError> {
     use masker::MaskSource;
     tree::assert_clean(repo)?;
     let head = tree::head_sha(repo)?;
-    let worktree = tree::Worktree::add(repo, scratch_tree)?;
+    let scratch_tree = scratch_root.join(format!("codebase-tree-{}", head12(&head)));
+    let worktree = tree::Worktree::add(repo, &scratch_tree)?;
     let files = tree::rust_sources(&worktree.path);
     let candidates: Vec<sample::FileCandidates> = files
         .iter()
