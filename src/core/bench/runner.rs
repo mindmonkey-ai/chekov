@@ -424,9 +424,25 @@ fn adjust_body(
                 "json_schema": { "name": "tool_call", "schema": schema },
             }),
         );
+        object.insert(
+            "reasoning_format".to_owned(),
+            Value::from(FORCED_REASONING_FORMAT),
+        );
     }
     Ok(parsed.to_string())
 }
+
+/// Per-request reasoning extraction on the forced wire ONLY.
+///
+/// A thinking-prefill template (ornith, the Qwen/Hermes family) is refused a
+/// forced grammar by llama.cpp's specialized chat handler: it builds the
+/// grammar root without a `<think>` alternative while the prefill carries the
+/// template's own `<think>\n`, and sampler init throws (HTTP 400). Asking the
+/// engine to extract reasoning admits the `<think>` span ahead of the
+/// schema-constrained JSON — validated live 2026-08-29 (IDEAS, mechanism b).
+/// It is one more difference from the unconstrained arm, so the report names
+/// it; the unconstrained and streamed wires never carry it.
+pub const FORCED_REASONING_FORMAT: &str = "deepseek";
 
 /// The four numbers the sweep records. All-or-nothing: a partial timings
 /// object must not become a partial measurement.
@@ -789,6 +805,57 @@ mod tests {
                 .expect("json");
         assert_eq!(sent["stream"], true, "{sent}");
         assert_eq!(parsed(&artifact)["content"][0]["text"], "hello there");
+    }
+
+    /// What went up the wire, parsed.
+    fn sent(http: &CannedUpstream) -> serde_json::Value {
+        serde_json::from_str(&http.sent_body.borrow().clone().expect("posted")).expect("json")
+    }
+
+    #[test]
+    fn only_the_forced_wire_asks_the_engine_to_extract_reasoning() {
+        // A thinking-prefill template (ornith) 400s on a forced grammar unless
+        // the engine extracts reasoning: the specialized chat handler builds
+        // the grammar root without a <think> alternative while the prefill
+        // carries the template's own `<think>\n`. `reasoning_format: deepseek`
+        // on the forced wire ONLY is the validated way through (IDEAS,
+        // mechanism b); the unconstrained arms must stay byte-identical.
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let schema = serde_json::json!({ "type": "object" });
+
+        let forced = CannedUpstream::new(openai_with_timings());
+        super::cross_forced(
+            &wire(&forced, &facade, &up),
+            &anthropic_request("go"),
+            &schema,
+        )
+        .expect("forced crossing");
+        assert_eq!(
+            sent(&forced)["reasoning_format"],
+            "deepseek",
+            "{}",
+            sent(&forced)
+        );
+        assert_eq!(sent(&forced)["response_format"]["type"], "json_schema");
+
+        let plain = CannedUpstream::new(openai_with_timings());
+        super::cross(&wire(&plain, &facade, &up), &anthropic_request("go")).expect("buffered");
+        assert!(
+            sent(&plain).get("reasoning_format").is_none(),
+            "{}",
+            sent(&plain)
+        );
+
+        let streamed = CannedUpstream::new(sse(&[text_frame("hi"), final_frame()]));
+        super::cross_streaming(&wire(&streamed, &facade, &up), &anthropic_request("go"))
+            .expect("streamed");
+        assert!(
+            sent(&streamed).get("reasoning_format").is_none(),
+            "{}",
+            sent(&streamed)
+        );
+        assert_eq!(super::FORCED_REASONING_FORMAT, "deepseek");
     }
 
     #[test]
