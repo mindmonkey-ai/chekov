@@ -29,3 +29,24 @@ impl TaskTier {
         }
     }
 }
+
+/// What the leakage filter removed from this task's context, per rule. Slice
+/// A has no cross-file context, and says so rather than claiming a count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Excluded {
+    pub doc_comment: u8,
+    pub cross_file: String,
+}
+
+/// One assembled task: what the model sees, what was hidden, and the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodebaseTask {
+    pub id: String,
+    pub tier: TaskTier,
+    pub file: String,
+    pub line: usize,
+    pub gold: String,
+    pub prefix: String,
+    pub suffix: String,
+    pub excluded: Excluded,
+}
