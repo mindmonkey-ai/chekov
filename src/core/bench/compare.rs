@@ -150,6 +150,7 @@ mod tests {
                 model: model.into(),
                 machine_brand: None,
                 launch_args: vec![],
+                forced_reasoning_format: None,
                 stamp,
             },
             rows: vec![TaskRow {

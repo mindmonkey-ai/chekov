@@ -7,6 +7,15 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- The bench's grammar-forced pass asks the engine to extract reasoning
+  (`reasoning_format: deepseek`) on that wire only, so `grammar_gap` is
+  measurable on thinking-prefill templates (ornith, the Qwen/Hermes family)
+  that llama.cpp's specialized chat handler otherwise refuses with `Failed to
+  initialize samplers` — validated live. The unconstrained and streamed wires
+  are byte-identical to before. The run head records the mode and the
+  `grammar_gap` line prints `forced pass ran with reasoning extracted
+  (deepseek)`: the one extra difference from the unconstrained arm is named,
+  never hidden. Runs recorded before the field load unchanged.
 - `setup` and `update --engine` verify the binary they just built: a fourth
   engine step runs `llama-server --version`, so a llama.cpp change that
   breaks the build's output fails right there as `EngineStepFailed` naming

@@ -1429,10 +1429,16 @@ fn build_head(
         prompt_set_hash: probes::suite_prompt_hash(inputs.suite, inputs.plan, bench_cfg.seed),
         corpus_id: corpus_id(inputs.suite, inputs.fixture)?,
     };
+    // Only a run with a forced pass has a forced reasoning mode to record.
+    let forced_reasoning_format = inputs
+        .suite
+        .runs_agentic()
+        .then(|| crate::core::bench::runner::FORCED_REASONING_FORMAT.to_owned());
     Ok(store::RunHead {
         model: setup.eff.name.clone(),
         machine_brand,
         launch_args,
+        forced_reasoning_format,
         stamp: head_stamp,
     })
 }

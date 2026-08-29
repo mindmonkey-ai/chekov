@@ -239,6 +239,7 @@ mod tests {
                 model: "ornith-1.5-35b-a3b".into(),
                 machine_brand: Some("Apple M3 Ultra".into()),
                 launch_args: vec!["-m".into(), "model.gguf".into()],
+                forced_reasoning_format: None,
                 stamp: stamp("8d41f0c2a917", "Q8_0", 262_144),
             },
             rows,

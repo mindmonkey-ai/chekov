@@ -38,6 +38,12 @@ pub struct RunHead {
     pub machine_brand: Option<String>,
     /// The exact argv the measured server was launched with (flag hygiene).
     pub launch_args: Vec<String>,
+    /// The `reasoning_format` the forced (grammar) arm asked the engine for,
+    /// when the run had one — the one way that arm differs from the
+    /// unconstrained arm beyond the grammar itself. Absent on runs recorded
+    /// before the field, and on runs without a forced pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced_reasoning_format: Option<String>,
     pub stamp: Stamp,
 }
 
@@ -582,13 +588,26 @@ fn grammar_gap_line(log: &RunLog) -> Option<String> {
     let pct = |pass: usize, total: usize| i64::try_from(pass * 100 / total.max(1)).unwrap_or(0);
     let gap = pct(passed(&kept), kept.len()) - pct(passed(&paired), paired.len());
     Some(format!(
-        "grammar_gap  {}/{} forced — unconstrained on the same cases {}/{} (gap {gap:+}%){}\n",
+        "grammar_gap  {}/{} forced — unconstrained on the same cases {}/{} (gap {gap:+}%){}{}\n",
         passed(&kept),
         kept.len(),
         passed(&paired),
         paired.len(),
-        excluded_note(excluded)
+        excluded_note(excluded),
+        forced_mode_note(log),
     ))
+}
+
+/// `; forced pass ran with reasoning extracted (<mode>)` when the forced arm
+/// asked the engine to extract reasoning — the one extra difference from the
+/// unconstrained arm, printed rather than hidden.
+fn forced_mode_note(log: &RunLog) -> String {
+    log.head
+        .forced_reasoning_format
+        .as_deref()
+        .map_or_else(String::new, |mode| {
+            format!("; forced pass ran with reasoning extracted ({mode})")
+        })
 }
 
 fn instruction_line(log: &RunLog, transport: Transport) -> Option<String> {
@@ -702,6 +721,7 @@ mod tests {
             model: "ornith-1.5-35b-a3b".into(),
             machine_brand: Some("Apple M3 Ultra".into()),
             launch_args: vec!["-m".into(), "model.gguf".into()],
+            forced_reasoning_format: None,
             stamp: stamp(),
         }
     }
@@ -1006,6 +1026,46 @@ mod tests {
             ),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn the_grammar_gap_line_names_the_forced_arms_reasoning_mode() {
+        // The forced arm differs from the unconstrained one in one more way
+        // when the engine extracted reasoning for it — printed, never hidden.
+        let eval = scratch("forced-mode");
+        let mut with_mode = head();
+        with_mode.forced_reasoning_format = Some("deepseek".into());
+        let mut writer = RunWriter::create(&eval, "r9-model", &with_mode).expect("create");
+        for (suite, id) in [
+            ("tool_emit", "te-001"),
+            ("tool_emit", "te-002"),
+            ("grammar_gap", "gg-te-001"),
+            ("grammar_gap", "gg-te-002"),
+        ] {
+            writer
+                .append(graded(suite, id, GradeRow::pass()))
+                .expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains(
+                "grammar_gap  2/2 forced — unconstrained on the same cases 2/2 (gap +0%); \
+                 forced pass ran with reasoning extracted (deepseek)"
+            ),
+            "{rendered}"
+        );
+
+        // A run recorded before the field, or without extraction, says nothing.
+        let plain =
+            render_run(&RunLog::load(graded_run(&scratch("forced-plain")).dir()).expect("load"));
+        assert!(!plain.contains("reasoning extracted"), "{plain}");
+        let old_head = r#"{"model":"m","machine_brand":null,"launch_args":[],"stamp":"#;
+        let old = format!(
+            "{old_head}{}}}",
+            serde_json::to_string(&stamp()).expect("stamp")
+        );
+        let loaded: RunHead = serde_json::from_str(&old).expect("an old stamp.json still loads");
+        assert_eq!(loaded.forced_reasoning_format, None);
     }
 
     #[test]

@@ -141,13 +141,25 @@ Candidate mechanisms, and where each stands:
     reasons freely — a confound injected into the very number designed to
     detect self-deception.
 
-(b) **per-request `"reasoning_format":"deepseek"` — plausible, NOT validated.**
+(b) **per-request `"reasoning_format":"deepseek"` — VALIDATED 2026-08-29, SHIPPED.**
     Returns 200 on the same schema that 400s, because that flag gates whether
     the `<think>` alternative enters the grammar (`chat.cpp:1187`
-    `extract_reasoning`). Unproven: at `max_tokens=30` the whole budget went to
-    `reasoning_content` and schema-constrained JSON was never observed. It also
-    changes how the response is PARSED, so the forced arm would stop being
-    apples-to-apples with the unconstrained one. Validate before believing.
+    `extract_reasoning`). Live on engine 0f194b907 with `max_tokens=200`:
+    `content` = `{"name": "get_weather", "arguments": {"location": "Paris"}}`,
+    the reasoning in `reasoning_content`, `finish_reason: stop`. The earlier
+    doubt was only the 30-token budget. Built as `runner::FORCED_REASONING_FORMAT`
+    on the forced wire ONLY (the unconstrained and streamed wires are
+    byte-identical to before); the run head records it and the `grammar_gap`
+    line prints `forced pass ran with reasoning extracted (deepseek)`, so the
+    one extra difference from the unconstrained arm is named, not hidden.
+    Also established 2026-08-29: the human's cherry-picked fix (0f194b907,
+    `chat-auto-parser-generator.cpp`) is correct for AUTOPARSER templates
+    (MiniMax-M2) but ornith's template (`<tool_call>` + `<think>` +
+    `<|im_start|>`) is routed to the SPECIALIZED handler at `chat.cpp:1166-1300`
+    (hardcoded `GEN_PREFIX`), whose grammar root the server logged as
+    `root ::= "<|im_start|>assistant\n" space response-format` — no `<think>`
+    alternative. The upstream re-port belongs at `chat.cpp:1233-1239`; chekov
+    does not wait for it.
 
 (c) **Patch llama.cpp upstream — worth a PR, but sequence nothing behind it.**
     The narrow fix is in `chat.cpp`'s specialized handlers: build the prefix
