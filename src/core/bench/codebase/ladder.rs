@@ -327,11 +327,11 @@ fn collect_declarations(line: &str, set: &mut BTreeSet<String>) {
 /// A struct field (`name: Type,`) or an enum variant (a capitalised
 /// identifier at line start followed by `,`/`(`/`{`/space).
 fn collect_members(trimmed: &str, set: &mut BTreeSet<String>) {
-    if let Some((name, _)) = trimmed.split_once(':')
-        && !name.contains(' ')
-        && !name.is_empty()
-    {
-        set.insert(name.trim_start_matches("pub ").to_owned());
+    if let Some((name, _)) = trimmed.split_once(':') {
+        let name = strip_visibility(name).trim();
+        if !name.is_empty() && !name.contains(' ') {
+            set.insert(name.to_owned());
+        }
     }
     let variant: String = trimmed
         .chars()
@@ -344,8 +344,29 @@ fn collect_members(trimmed: &str, set: &mut BTreeSet<String>) {
     }
 }
 
-/// The last path segment of each `use` line: `use std::collections::HashMap;`
-/// → `HashMap`; `use a::{B, C};` → `B`, `C`.
+/// Strips a leading `pub` / `pub(crate)` / `pub(super)` / … visibility
+/// keyword, so a field name split off `pub balance: i64,` isn't rejected
+/// for containing a space. Guards against `public_key` false-matching
+/// `pub` by requiring the keyword be followed by whitespace or `(`.
+fn strip_visibility(s: &str) -> &str {
+    let s = s.trim_start();
+    let Some(after_pub) = s.strip_prefix("pub") else {
+        return s;
+    };
+    if !after_pub.starts_with([' ', '(']) {
+        return s;
+    }
+    let after_paren = after_pub
+        .strip_prefix('(')
+        .and_then(|rest| rest.split_once(')'))
+        .map_or(after_pub, |(_, tail)| tail);
+    after_paren.trim_start()
+}
+
+/// The last token of each `use` line's segments, alias included.
+///
+/// `use std::collections::HashMap;` → `HashMap`; `use a::{B, C};` → `B`,
+/// `C`; `use foo::Bar as Baz;` → `Baz`; `use a::{B as C, D};` → `C`, `D`.
 #[must_use]
 pub fn file_use_symbols(text: &str) -> Vec<String> {
     text.lines()
@@ -353,11 +374,23 @@ pub fn file_use_symbols(text: &str) -> Vec<String> {
         .flat_map(|rest| {
             rest.trim_end_matches(';')
                 .split(['{', '}', ','])
-                .map(|seg| seg.rsplit("::").next().unwrap_or(seg).trim().to_owned())
+                .map(use_target_name)
                 .filter(|s| !s.is_empty() && s != "self" && s != "*")
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// The bound name a single `use` segment introduces: the last `::`
+/// segment, then the last whitespace-separated token of that (so an
+/// `as` alias wins over the original path name).
+fn use_target_name(seg: &str) -> String {
+    let after_path = seg.rsplit("::").next().unwrap_or(seg).trim();
+    after_path
+        .split_whitespace()
+        .last()
+        .unwrap_or(after_path)
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -365,8 +398,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        Known, Score, Scored, Symbols, Tier, edit_sim, exact, ident_f1, identifiers, parse,
-        repo_symbols, score_all, symbols,
+        Known, Score, Scored, Symbols, Tier, edit_sim, exact, file_use_symbols, ident_f1,
+        identifiers, parse, repo_symbols, score_all, symbols,
     };
     use crate::core::bench::codebase::{CodebaseTask, Excluded, TaskTier};
 
@@ -411,11 +444,12 @@ mod tests {
     fn symbols_scores_a_fabricated_identifier_down_and_a_gold_binding_up() {
         let known = repo_symbols(&[(
             "src/a.rs".into(),
-            "pub struct Ledger {\n    balance: i64,\n}\npub fn apply_entry(l: &Ledger) {}\nenum E {\n    Credit,\n    Debit,\n}\n".into(),
+            "pub struct Ledger {\n    balance: i64,\n    pub owner: String,\n}\npub fn apply_entry(l: &Ledger) {}\nenum E {\n    Credit,\n    Debit,\n}\n".into(),
         )]);
         assert!(
             known.0.contains("apply_entry")
                 && known.0.contains("balance")
+                && known.0.contains("owner")
                 && known.0.contains("Credit")
         );
         let uses = vec!["HashMap".to_owned()];
@@ -437,6 +471,16 @@ mod tests {
             "a `use` target exists"
         );
         assert!(approx(symbols("Some(1)", "", &known_ctx), 1.0), "prelude");
+    }
+
+    #[test]
+    fn file_use_symbols_resolves_to_the_alias_when_one_is_given() {
+        assert_eq!(file_use_symbols("use foo::Bar as Baz;"), vec!["Baz"]);
+        assert_eq!(file_use_symbols("use a::{B as C, D};"), vec!["C", "D"]);
+        assert_eq!(
+            file_use_symbols("use std::collections::HashMap;"),
+            vec!["HashMap"]
+        );
     }
 
     fn task(tier: TaskTier) -> CodebaseTask {
