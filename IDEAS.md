@@ -276,7 +276,14 @@ glyph and the arithmetic. The SVG's per-cell tooltip prints each part's own
 provenance, which is the honest version; the glyph is the lossy summary.
 Noticed while building `--svg`; not changed there, because it would alter
 shipped terminal output and its tests.
-Proposed 2026-08-28 — status: OPEN
+RESOLVED 2026-08-29 (human's call: fix the legend, keep the glyph). The
+second character now says what it encodes — `#  kv measured   ·  kv
+predicted` — and the legend line ends with what it does not cover, derived
+from the cells: `overhead is a flat predicted 3.0 GiB in every cell`. A third
+"mixed" mark was rejected: with the overhead predicted everywhere it would
+replace every `#` and carry no information, whereas the legend line adds the
+fact the reader lacked. `Cell::inputs` is `kv_inputs` now, reading KV alone.
+Proposed 2026-08-28 — status: RESOLVED
 
 ## Throughput dots in the SVG (2026-08-28)
 Spec §5 wants the SVG to carry measured throughput as filled dots with p10-p90

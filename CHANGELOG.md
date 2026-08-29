@@ -7,6 +7,11 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Changed
+- `capability graph`'s inputs legend says what the second character encodes
+  — `#  kv measured   ·  kv predicted` — and ends with what it does not
+  cover, derived from the cells: `overhead is a flat predicted 3.0 GiB in
+  every cell`. Before, `#` read as "measured" for a sum with a guessed
+  summand. The glyphs are unchanged; both renderers share the legend.
 - A request the server ANSWERED with a non-2xx is `UpstreamRefused` — "the
   server at <url> answered HTTP <status> instead of a result (<the server's
   own words>) — it is up and reachable; the request is what

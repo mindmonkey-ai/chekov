@@ -115,9 +115,9 @@ impl Cell {
     pub fn glyphs(&self, budget_mib: u64, metric: Metric) -> [char; 2] {
         let fit = fit_for(self.total_bytes(), budget_mib);
         match (metric, &self.speed) {
-            (Metric::Fit, _) => [fit.glyph(), self.inputs()],
+            (Metric::Fit, _) => [fit.glyph(), self.kv_inputs()],
             (Metric::TokS, Some(speed)) if fit != Fit::Unknown => {
-                [band_for(speed.decode.median), self.inputs()]
+                [band_for(speed.decode.median), self.kv_inputs()]
             }
             (Metric::TokS, _) => ['?', '?'],
         }
@@ -129,12 +129,18 @@ impl Cell {
         Some(self.weights_bytes? + self.kv_bytes.value? + self.overhead_bytes.value?)
     }
 
-    /// Second character: are the inputs measured, or predicted?
+    /// Second character: was KV measured (GGUF header read), or predicted?
+    ///
+    /// KV only — deliberately. It is the term that varies with context and
+    /// dominates the total; the overhead is a flat prediction in every cell,
+    /// so folding it in would make every mark identical and carry nothing.
+    /// The legend says exactly this, and the SVG tooltip prints each part's
+    /// own provenance.
     #[must_use]
-    pub const fn inputs(&self) -> char {
-        match (self.kv_bytes.provenance, self.overhead_bytes.provenance) {
-            (Provenance::Measured | Provenance::EngineReported, _) => '#',
-            _ => '\u{b7}',
+    pub const fn kv_inputs(&self) -> char {
+        match self.kv_bytes.provenance {
+            Provenance::Measured | Provenance::EngineReported => '#',
+            Provenance::Predicted => '\u{b7}',
         }
     }
 }
@@ -284,8 +290,39 @@ fn legend(f: &Frontier) -> String {
         }
         Metric::TokS => format!("{}\n", band_legend()),
     };
-    out.push_str("             inputs   #  measured   \u{b7}  predicted   ?  unknown");
+    let _ = write!(
+        out,
+        "             inputs   #  kv measured   \u{b7}  kv predicted   ?  unknown   — {}",
+        overhead_note(f)
+    );
     out
+}
+
+/// What the second character does NOT cover, said in the legend: the
+/// overhead's provenance. Today it is one flat prediction in every cell, and
+/// the legend names the number; should that ever vary, the legend says so
+/// rather than letting `#` pass for "all measured".
+fn overhead_note(f: &Frontier) -> String {
+    let overheads: Vec<Probed<Option<u64>>> = f
+        .rows
+        .iter()
+        .flat_map(|row| row.cells.iter().map(|cell| cell.overhead_bytes))
+        .collect();
+    let all_predicted = overheads
+        .iter()
+        .all(|o| o.provenance == Provenance::Predicted);
+    let flat = overheads.first().and_then(|first| {
+        overheads
+            .iter()
+            .all(|o| o.value == first.value)
+            .then_some(first.value)
+            .flatten()
+    });
+    match (all_predicted, flat) {
+        (true, Some(bytes)) => format!("overhead is a flat predicted {} in every cell", gib(bytes)),
+        (true, None) => "overhead is predicted in every cell".to_owned(),
+        (false, _) => "overhead provenance varies by cell (hover the SVG cells)".to_owned(),
+    }
 }
 
 /// The terminal grid.
@@ -486,7 +523,7 @@ fn svg_cell(row: &Row, index: usize, sheet: &Sheet) -> String {
     let fit = fit_for(cell.total_bytes(), f.budget.value);
     let (x, y) = (sheet.lay.left + index * CELL_W, 0);
     let [first, second] = cell.glyphs(f.budget.value, f.metric);
-    let hatched = cell.inputs() != '#';
+    let hatched = cell.kv_inputs() != '#';
     let hatch = if hatched {
         format!(
             "<rect x=\"{x}\" y=\"{y}\" width=\"{}\" height=\"{}\" fill=\"url(#predicted)\"/>",
@@ -960,6 +997,33 @@ mod tests {
             svg.contains("xml:space=\"preserve\""),
             "legend spacing survives: {svg}"
         );
+    }
+
+    #[test]
+    fn the_inputs_legend_says_what_the_glyph_encodes_and_names_the_guessed_overhead() {
+        // The second character reports KV's provenance only; the overhead is a
+        // flat prediction in every cell. A legend that says "measured" for a
+        // sum with a guessed summand is the lie; the fix is to say exactly
+        // what the glyph encodes and what is guessed everywhere.
+        let f = frontier(Provenance::EngineReported);
+        let out = super::render_ascii(&f);
+        assert!(out.contains("#  kv measured"), "{out}");
+        assert!(out.contains("\u{b7}  kv predicted"), "{out}");
+        assert!(
+            out.contains("overhead is a flat predicted 0.2 GiB in every cell"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("#  measured   "),
+            "the old wording is gone: {out}"
+        );
+        // One legend function feeds both renderers.
+        let svg = super::render_svg(&f);
+        assert!(
+            svg.contains("overhead is a flat predicted 0.2 GiB in every cell"),
+            "{svg}"
+        );
+        assert_eq!(f.rows[0].cells[0].kv_inputs(), '\u{b7}');
     }
 
     #[test]
