@@ -56,9 +56,9 @@ mod tests {
 
     const SRC: &str = "/// Doc line.\npub fn f(a: i32) -> i32 {\n    let b = a + 1;\n    let c = b * 2;\n    c\n}\n";
 
-    fn pick(tier: TaskTier) -> Picked {
+    fn pick_from(src: &str, tier: TaskTier) -> Picked {
         let c = RustBraceMasker
-            .candidates(SRC)
+            .candidates(src)
             .into_iter()
             .find(|c| c.tier == tier)
             .expect("candidate");
@@ -67,6 +67,10 @@ mod tests {
             id: task_id("src/x.rs", &c),
             candidate: c,
         }
+    }
+
+    fn pick(tier: TaskTier) -> Picked {
+        pick_from(SRC, tier)
     }
 
     #[test]
@@ -83,6 +87,31 @@ mod tests {
         assert_eq!(task.excluded.cross_file, "n/a: same-file");
         assert_eq!(task.file, "src/x.rs");
         assert_eq!(task.tier, TaskTier::FunctionBody);
+    }
+
+    /// An attribute between the doc block and the signature must not save the
+    /// doc from the cut: `#[must_use]` is not a blank line, and the doc still
+    /// names the answer.
+    #[test]
+    fn an_attribute_between_the_doc_and_the_signature_does_not_defeat_the_cut() {
+        const ATTRIBUTED: &str = "/// Returns a plus one.\n#[must_use]\npub fn f(a: i32) -> i32 {\n    let b = a + 1;\n    let c = b * 2;\n    c\n}\n";
+        let task = assemble(
+            "src/x.rs",
+            ATTRIBUTED,
+            &pick_from(ATTRIBUTED, TaskTier::FunctionBody),
+        );
+        assert!(
+            !task.prefix.contains("Returns a plus one"),
+            "{:?}",
+            task.prefix
+        );
+        assert!(
+            task.prefix
+                .ends_with("#[must_use]\npub fn f(a: i32) -> i32 {"),
+            "the attribute stays in the prefix: {:?}",
+            task.prefix
+        );
+        assert_eq!(task.excluded.doc_comment, 1);
     }
 
     #[test]

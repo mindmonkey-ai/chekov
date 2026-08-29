@@ -275,29 +275,54 @@ fn line_of(text: &str, at: usize) -> usize {
     text[..at].matches('\n').count() + 1
 }
 
-/// The `///` block whose last line is directly above `sig_start` (blank
-/// lines break adjacency).
+/// The `///` block above `sig_start`, across any attributes between the two.
+///
+/// `#[must_use]` sitting between the doc and the `fn` does not make the doc
+/// something else — it still names the answer — so the walk upward steps over
+/// attribute lines. A blank line still breaks adjacency, wherever it falls.
+/// The returned range covers ONLY the `///` lines: the attributes are code
+/// the model is entitled to see, and stay in the prefix.
 fn doc_comment_before(text: &str, sig_start: usize) -> Option<Range<usize>> {
-    let head = &text[..sig_start];
-    let mut lines: Vec<(usize, &str)> = Vec::new();
-    // `head` ends with the `\n` that terminates its last line (guaranteed by
-    // `line_start`, which only ever hands us a line boundary); that `\n` is
-    // consumed by `rsplit_terminator` rather than yielded, so line offsets
-    // start one byte short of `head.len()`.
-    let mut end = head.len().saturating_sub(1);
-    for line in head.rsplit_terminator('\n') {
-        let start = end - line.len();
-        if line.trim_start().starts_with("///") {
-            lines.push((start, line));
-            end = start.saturating_sub(1);
-        } else if line.trim().is_empty() && lines.is_empty() {
-            return None;
-        } else {
+    let mut end = sig_start;
+    while let Some(above) = attribute_above(text, end) {
+        end = above;
+    }
+    let doc_end = end;
+    let mut first = None;
+    while let Some((start, line)) = line_above(text, end) {
+        if !line.trim_start().starts_with("///") {
             break;
         }
+        first = Some(start);
+        end = start;
     }
-    let first = lines.last()?.0;
-    Some(first..head.len())
+    Some(first?..doc_end)
+}
+
+/// The line directly above the line boundary `at`: where it starts, and its
+/// text without the terminating newline. `None` at the top of the file.
+fn line_above(text: &str, at: usize) -> Option<(usize, &str)> {
+    let end = at.checked_sub(1)?;
+    let start = text[..end].rfind('\n').map_or(0, |i| i + 1);
+    Some((start, &text[start..end]))
+}
+
+/// Walking upward from the line boundary `at`, the boundary above one whole
+/// attribute — its continuation lines included, so a multi-line `#[derive(…)]`
+/// is stepped over in one go. `None` when the line above is not an
+/// attribute's last line.
+fn attribute_above(text: &str, at: usize) -> Option<usize> {
+    let (mut start, mut line) = line_above(text, at)?;
+    if !line.trim_end().ends_with(']') {
+        return None;
+    }
+    while !line.trim_start().starts_with('#') {
+        if line.trim_start().starts_with("///") {
+            return None;
+        }
+        (start, line) = line_above(text, start)?;
+    }
+    Some(start)
 }
 
 /// Balance of `{}`/`[]`/`()` outside strings, chars and comments. `None`
