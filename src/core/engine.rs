@@ -93,7 +93,22 @@ pub fn setup_steps(engine_dir: &Path, git_ref: Option<&str>) -> Vec<EngineStep> 
     );
     steps.push(configure_step(engine_dir));
     steps.push(compile_step(engine_dir));
+    steps.push(verify_step(engine_dir));
     steps
+}
+
+/// Run the binary that was just built. A build whose output cannot print its
+/// own version fails HERE, as a named step, before the commit is recorded as
+/// built — never later, as a failed `run`. There is deliberately no rollback:
+/// a silent multi-minute rebuild of the previous commit is the opposite of a
+/// loud failure, and `logs/chekov.engine` names the commit to go back to.
+fn verify_step(engine_dir: &Path) -> EngineStep {
+    EngineStep {
+        desc: "verify the built llama-server runs".into(),
+        program: server_binary(engine_dir).display().to_string(),
+        args: vec!["--version".into()],
+        cwd: None,
+    }
 }
 
 fn configure_step(engine_dir: &Path) -> EngineStep {
@@ -265,6 +280,30 @@ mod tests {
             steps[1].contains("checkout --detach FETCH_HEAD"),
             "{steps:?}"
         );
+    }
+
+    #[test]
+    fn the_last_step_runs_the_binary_it_just_built() {
+        // A build whose output cannot even print its version must fail HERE,
+        // named, not later as a failed `run` — pinned or not.
+        for pin in [None, Some("b7000")] {
+            let dir = scratch("eng-verify");
+            let steps = setup_steps(&dir, pin);
+            let last = steps.last().expect("steps");
+            assert_eq!(
+                last.program,
+                super::server_binary(&dir).display().to_string(),
+                "{last:?}"
+            );
+            assert_eq!(last.args, vec!["--version".to_owned()], "{last:?}");
+            assert!(last.desc.contains("verify"), "{last:?}");
+            let build = steps.len() - 2;
+            assert!(
+                steps[build].render().contains("--build"),
+                "the verify step follows the build: {:?}",
+                rendered(&steps)
+            );
+        }
     }
 
     #[test]

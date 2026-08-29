@@ -53,7 +53,11 @@ Auto-rollback was considered and rejected — `git checkout <before>` plus a ful
 rebuild is a multi-minute silent side effect, the opposite of the loud-failure
 creed. With the commit now recorded in `logs/chekov.engine`, a manual revert has
 something to name.
-Proposed 2026-08-25 — status: OPEN
+SHIPPED 2026-08-29: `setup_steps` ends with `<engine>/build/bin/llama-server
+--version` as its own `EngineStep` ("verify the built llama-server runs"), on
+both the pinned and the unpinned path; it prints under `--dry-run` and fails
+as `EngineStepFailed` naming the step. No rollback, as decided above.
+Proposed 2026-08-25 — status: SHIPPED
 
 ## Replace hf-hub with the ureq already in the tree (2026-08-25)
 `hf_hub` appears at exactly one call site (`core/hub.rs:363`) and its three-call
