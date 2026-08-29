@@ -72,13 +72,7 @@ impl HttpClient for UreqClient {
                 url: req.url.clone(),
                 reason: e.to_string(),
             })?;
-        if (200..300).contains(&status) {
-            return Ok(text);
-        }
-        Err(ChekovError::EndpointDown {
-            url: req.url.clone(),
-            reason: crate::core::proxy::serve::upstream_reason(status, &text),
-        })
+        crate::core::proxy::serve::answered(&req.url, status, text)
     }
 }
 

@@ -203,32 +203,46 @@ pub fn get_bearer(upstream: &Upstream, path: &str) -> Result<String, ChekovError
     let mut text = String::new();
     // A body we cannot read is not a reason to lose the status.
     let _ = res.into_body().into_reader().read_to_string(&mut text);
+    answered(&url, status, text)
+}
+
+/// A response the server DID send: the body on 2xx, `UpstreamRefused` with
+/// the status and the server's own words otherwise. Never `EndpointDown` —
+/// a 400 is an answer, and telling the user to restart a server that just
+/// answered sends the diagnosis the wrong way. Shared by `hub::post_json`
+/// (the bench path) and `get_bearer`.
+pub(crate) fn answered(url: &str, status: u16, body: String) -> Result<String, ChekovError> {
     if (200..300).contains(&status) {
-        Ok(text)
-    } else {
-        Err(ChekovError::EndpointDown {
-            url,
-            reason: upstream_reason(status, &text),
-        })
+        return Ok(body);
     }
+    Err(ChekovError::UpstreamRefused {
+        url: url.to_owned(),
+        status,
+        reason: upstream_detail(&body),
+    })
 }
 
 /// Why an upstream call failed, in words the user can act on.
 ///
 /// ureq renders a non-2xx as `http status: 400` and drops the body, but the
 /// body is the only thing that says WHY — llama-server puts the real cause
-/// (context overflow, a bad sampler value) in `error.message` there. Shared
-/// with `hub::post_json`, which reaches the same server on the bench path.
+/// (context overflow, a bad sampler value) in `error.message` there.
 pub(crate) fn upstream_reason(status: u16, body: &str) -> String {
-    /// Error strings are logged and shown to the user; a runaway body must not
-    /// become a 20 KB log line.
+    format!("http status: {status}: {}", upstream_detail(body))
+}
+
+/// The server's own explanation out of a non-2xx body: `error.message` when
+/// the body is llama-server's JSON, the trimmed body otherwise, clipped —
+/// error strings are logged and shown, and a runaway body must not become a
+/// 20 KB log line.
+fn upstream_detail(body: &str) -> String {
     const MAX: usize = 400;
     let detail = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("error")?.get("message")?.as_str().map(str::to_owned))
         .unwrap_or_else(|| body.trim().to_owned());
     if detail.is_empty() {
-        return format!("http status: {status} (upstream sent no explanation)");
+        return "upstream sent no explanation".to_owned();
     }
     let clipped: String = detail.chars().take(MAX).collect();
     let ellipsis = if detail.chars().count() > MAX {
@@ -236,7 +250,7 @@ pub(crate) fn upstream_reason(status: u16, body: &str) -> String {
     } else {
         ""
     };
-    format!("http status: {status}: {clipped}{ellipsis}")
+    format!("{clipped}{ellipsis}")
 }
 
 fn read_all<R: Read>(mut reader: R) -> Result<String, ChekovError> {
@@ -250,6 +264,41 @@ fn read_all<R: Read>(mut reader: R) -> Result<String, ChekovError> {
 #[cfg(test)]
 mod tests {
     use super::upstream_reason;
+
+    #[test]
+    fn an_answered_request_is_classified_by_its_status_not_called_down() {
+        use crate::error::ChekovError;
+        let url = "http://127.0.0.1:8080/v1/chat/completions";
+        assert_eq!(
+            super::answered(url, 200, "{\"ok\":true}".to_owned()).expect("2xx is the body"),
+            "{\"ok\":true}"
+        );
+        let refused = super::answered(
+            url,
+            400,
+            r#"{"error":{"code":400,"message":"Failed to initialize samplers: std::exception"}}"#
+                .to_owned(),
+        )
+        .expect_err("a 400 is a refusal");
+        match refused {
+            ChekovError::UpstreamRefused { status, reason, .. } => {
+                assert_eq!(status, 400);
+                assert_eq!(reason, "Failed to initialize samplers: std::exception");
+            }
+            other => panic!("expected UpstreamRefused, got {other}"),
+        }
+        // A plain-text body still reaches the user; an empty one says so.
+        let loading = super::answered(url, 503, "Loading model".to_owned()).expect_err("503");
+        assert!(
+            matches!(&loading, ChekovError::UpstreamRefused { status: 503, reason, .. } if reason == "Loading model"),
+            "{loading}"
+        );
+        let silent = super::answered(url, 500, String::new()).expect_err("500");
+        assert!(
+            matches!(&silent, ChekovError::UpstreamRefused { reason, .. } if reason.contains("no explanation")),
+            "{silent}"
+        );
+    }
 
     #[test]
     fn an_upstream_failure_keeps_the_servers_own_explanation() {

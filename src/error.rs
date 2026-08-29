@@ -141,6 +141,18 @@ pub enum ChekovError {
     EndpointDown { url: String, reason: String },
 
     #[error(
+        "the server at {url} answered HTTP {status} instead of a result ({reason}) — \
+         it is up and reachable; the request is what to fix, not the server. \
+         `chekov show` prints the flags and template in effect, and \
+         logs/llama-server.log has the server's own words"
+    )]
+    UpstreamRefused {
+        url: String,
+        status: u16,
+        reason: String,
+    },
+
+    #[error(
         "llama-server (pid {pid}) exited while chekov waited for it to become \
          ready — read the tail of logs/llama-server.log"
     )]
@@ -326,6 +338,31 @@ impl ChekovError {
 #[cfg(test)]
 mod tests {
     use super::ChekovError;
+
+    #[test]
+    fn a_refusal_says_the_server_answered_and_never_prescribes_a_restart() {
+        // A 400 is an answer. "not answering … restart" sent a whole
+        // diagnosis the wrong way once; the message must carry the status,
+        // the server's own words, and a remediation aimed at the REQUEST.
+        let msg = ChekovError::UpstreamRefused {
+            url: "http://127.0.0.1:8080/v1/chat/completions".into(),
+            status: 400,
+            reason: "Failed to initialize samplers: std::exception".into(),
+        }
+        .to_string();
+        assert!(msg.contains("400"), "no status in: {msg}");
+        assert!(
+            msg.contains("Failed to initialize samplers"),
+            "no server words in: {msg}"
+        );
+        assert!(
+            !msg.contains("restart"),
+            "must not prescribe a restart: {msg}"
+        );
+        assert!(!msg.contains("not answering"), "it DID answer: {msg}");
+        assert!(msg.contains("chekov show"), "no remediation in: {msg}");
+        assert!(msg.contains("llama-server.log"), "no log pointer in: {msg}");
+    }
 
     #[test]
     fn missing_shard_names_pull_remediation() {
