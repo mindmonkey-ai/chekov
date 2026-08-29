@@ -72,7 +72,7 @@ sudo.**
 chekov pull unsloth/MiniMax-M2.7-GGUF:UD-Q5_K_XL
 chekov use minimax-m2.7
 chekov run                # starts in the background by default
-chekov doctor            # five health checks; non-zero exit on any failure
+chekov doctor            # six health checks; non-zero exit on any failure
 ```
 
 Already have the weights on an external drive (huggingface-cli layout)?
@@ -100,7 +100,7 @@ The registry stores the absolute path; everything else works unchanged.
 | `use <name>` | Set the active model. Never auto-restarts — prints the restart hint. |
 | `rm <name> [--yes]` | Remove a model and its files. Confirmation required; refuses the active or currently running model. |
 | `show [name]` | Fully resolved server invocation + license provenance — zero mystery about what will run. |
-| `doctor` | Five checks (below) — four probe the server, one compares configuration. Skipped is reported as SKIP, never PASS. |
+| `doctor` | Six checks (below) — five probe the server, one compares configuration. Skipped is reported as SKIP, never PASS. |
 | `capability recommend [--ctx N] [--role agent\|chat] [--refresh] [--limit N]` | Ranks the registered models for this machine. Gates first — anything that exceeds the budget, or cannot be sized, is listed with its reason rather than dropped. Then sorts: under `--role agent` a model whose chat template has no dedicated llama.cpp tool parser is **downranked with a note, not refused**; under `--role chat` the tool parser is ignored. `--refresh` is the **only** networked path — without it chekov ranks registered models only and never reaches out. |
 | `capability explain [name] [--ctx N]` | Read one model's GGUF header and print its fit arithmetic line by line: block count, the MTP/interval layer ladder, padded context, cache type, KV bytes, weights on disk. Local file read; no network. |
 | `capability graph [--ctx N]...` | Grid of registered models against context lengths. Each cell is two characters: the fit verdict, then whether its inputs were measured or predicted. A predicted GPU ceiling is announced in the header and changes the legend, because every verdict below it is then measured against a guess. |
@@ -112,7 +112,7 @@ The registry stores the absolute path; everything else works unchanged.
 | `env` | Stdout-only `ANTHROPIC_*` exports; diagnostics to stderr; safe for `eval "$(chekov env)"`. |
 | `launch <agent> [--model N] [--print] [--proxy-only [--port N]] [-- args]` | Start the agent wired to the local model: proxy in-thread, generated config dir, agent as a child (auto-starts the server if it isn't running). `--print` emits the command instead of running it. `--proxy-only` runs just the foreground protocol translator (Anthropic `/v1/messages` → the server's OpenAI endpoint) on `--port` (default 8787), with no child and no generated settings — for hand-wiring a different client. |
 
-### The five doctor checks
+### The six doctor checks
 
 1. **OpenAI door** — `POST /v1/chat/completions` returns content
 2. **Anthropic door** — `POST /v1/messages` returns content
@@ -122,7 +122,11 @@ The registry stores the absolute path; everything else works unchanged.
    consecutive tokens or U+FFFD density over threshold (guards the known
    GGUF `blk.61` corruption class)
 5. **Context floor** — effective ctx ≥ 65536 when `hermes_ok = true`
-   (hard fail); advisory SKIP otherwise
+   (hard fail); advisory SKIP otherwise. Compares `models.toml` to
+   `config.toml` only — the one row that can pass with the server down
+6. **Context loaded** — the server's `/props` per-slot `n_ctx` equals the
+   effective `ctx_size`; the same assertion the bench makes before it records
+   a run. A mismatch names both numbers; an unreachable server is a FAIL
 
 ## Runbook
 
