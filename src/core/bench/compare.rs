@@ -158,6 +158,7 @@ mod tests {
                 seq: 0,
                 suite: "throughput".into(),
                 task_id: "depth-1024".into(),
+                transport: crate::core::bench::store::Transport::Buffered,
                 measure: Measure {
                     prompt_n: 1000,
                     decode_samples: decode.to_vec(),
@@ -219,6 +220,7 @@ mod tests {
             seq: 1,
             suite: "throughput".into(),
             task_id: "depth-4096".into(),
+            transport: crate::core::bench::store::Transport::Buffered,
             measure: Measure {
                 prompt_n: 4100,
                 decode_samples: vec![15.0, 16.0, 17.0],

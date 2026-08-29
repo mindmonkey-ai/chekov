@@ -981,8 +981,9 @@ fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<()
     Ok(())
 }
 
-/// Rough extra seconds for the agentic suites (8s per case), from the
-/// validated set — a suite that will not run costs nothing.
+/// Rough extra seconds for the agentic suites (8s per crossing), from the
+/// validated set — a suite that will not run costs nothing. Unconstrained
+/// cases cross twice (both doors); the forced pass once.
 fn agentic_estimate_secs(suite: crate::core::bench::lifecycle::Suite) -> Result<u64, ChekovError> {
     if !suite.runs_agentic() {
         return Ok(0);
@@ -993,69 +994,106 @@ fn agentic_estimate_secs(suite: crate::core::bench::lifecycle::Suite) -> Result<
         .iter()
         .filter(|c| c.expect == crate::core::bench::probeset::Expect::Call)
         .count();
-    let cases = set.tool_emit.len() + forced + set.instruction.len();
-    Ok(cases as u64 * 8)
+    let crossings = 2 * set.tool_emit.len() + forced + 2 * set.instruction.len();
+    Ok(crossings as u64 * 8)
 }
 
 /// The agentic suites (spec §7.2 rows 1, 2, 6): every case appended as its
 /// own row, `--resume` skipping recorded ones.
+///
+/// Every unconstrained case crosses through BOTH doors — buffered, and the
+/// streamed one Claude Code actually takes — so a translation defect that
+/// exists in only one of them shows up as the same case disagreeing with
+/// itself. The grammar-forced pass stays buffered: its axis is the grammar
+/// gap, not the transport.
 fn run_agentic(
     sink: &mut TaskSink,
     wire: &crate::core::bench::runner::ProbeWire,
 ) -> Result<(), ChekovError> {
-    use crate::core::bench::{grade, probes, probeset, runner};
-    let set = probeset::agentic_v0()?;
+    use crate::core::bench::store::Transport;
+    let set = crate::core::bench::probeset::agentic_v0()?;
     // Once the engine has refused a forced grammar, it will refuse every
     // one: record the rest as unavailable rather than firing doomed
     // requests and calling each refusal a model failure.
-    let mut forced = ForcedState {
-        wire,
-        refusal: None,
-    };
-    for case in &set.tool_emit {
-        run_tool_case(sink, &mut forced, case)?;
-    }
-    for case in &set.instruction {
-        if sink.is_done("instruction", &case.id) {
-            continue;
+    let mut refusal = None;
+    for transport in [Transport::Buffered, Transport::Streamed] {
+        let mut pass = AgenticPass {
+            wire,
+            transport,
+            refusal: refusal.take(),
+        };
+        for case in &set.tool_emit {
+            run_tool_case(sink, &mut pass, case)?;
         }
-        let outcome = runner::cross(wire, &probes::instruction_probe(case)).map(|artifact| {
-            let (strict, loose) = grade::grade_instruction(&artifact.anthropic_body, case);
-            (artifact.timings, instruction_row(strict, &loose))
-        });
-        append_probe(sink, ("instruction", &case.id), outcome)?;
+        for case in &set.instruction {
+            run_instruction_case(sink, &pass, case)?;
+        }
+        refusal = pass.refusal;
     }
     Ok(())
 }
 
-/// One tool case: the unconstrained crossing, and — for call cases — the
-/// grammar-forced one. The gap between the two suites is the §7.2 point.
-/// The forced pass's wire plus the engine's refusal, once it has refused.
-struct ForcedState<'a> {
+/// One door's pass over the agentic set: the wire, which door, and the
+/// engine's refusal of forced grammars once it has refused.
+struct AgenticPass<'a> {
     wire: &'a crate::core::bench::runner::ProbeWire<'a>,
+    transport: crate::core::bench::store::Transport,
     refusal: Option<String>,
 }
 
+/// One tool case: the unconstrained crossing through this door, and — for
+/// call cases, buffered only — the grammar-forced one. The gap between the
+/// two suites is the §7.2 point.
 fn run_tool_case(
     sink: &mut TaskSink,
-    forced: &mut ForcedState,
+    pass: &mut AgenticPass,
     case: &crate::core::bench::probeset::ToolCase,
 ) -> Result<(), ChekovError> {
+    use crate::core::bench::store::{TaskKey, Transport};
     use crate::core::bench::{grade, probes, probeset, runner};
-    let wire = forced.wire;
-    if !sink.is_done("tool_emit", &case.id) {
-        let outcome = runner::cross(wire, &probes::tool_probe(case)).map(|artifact| {
-            (
-                artifact.timings,
-                grade_row(grade::grade_tool_emit(&artifact.anthropic_body, case)),
-            )
-        });
-        append_probe(sink, ("tool_emit", &case.id), outcome)?;
+    let key = TaskKey {
+        suite: "tool_emit",
+        task_id: &case.id,
+        transport: pass.transport,
+    };
+    if !sink.is_done(&key) {
+        let outcome = runner::cross_via(pass.wire, &probes::tool_probe(case), pass.transport).map(
+            |artifact| {
+                (
+                    artifact.timings,
+                    grade_row(grade::grade_tool_emit(&artifact.anthropic_body, case)),
+                )
+            },
+        );
+        append_probe(sink, key, outcome)?;
     }
-    if case.expect != probeset::Expect::Call {
+    if case.expect != probeset::Expect::Call || pass.transport != Transport::Buffered {
         return Ok(());
     }
-    run_forced_case(sink, forced, case)
+    run_forced_case(sink, pass, case)
+}
+
+fn run_instruction_case(
+    sink: &mut TaskSink,
+    pass: &AgenticPass,
+    case: &crate::core::bench::probeset::InstructionCase,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::store::TaskKey;
+    use crate::core::bench::{grade, probes, runner};
+    let key = TaskKey {
+        suite: "instruction",
+        task_id: &case.id,
+        transport: pass.transport,
+    };
+    if sink.is_done(&key) {
+        return Ok(());
+    }
+    let outcome = runner::cross_via(pass.wire, &probes::instruction_probe(case), pass.transport)
+        .map(|artifact| {
+            let (strict, loose) = grade::grade_instruction(&artifact.anthropic_body, case);
+            (artifact.timings, instruction_row(strict, &loose))
+        });
+    append_probe(sink, key, outcome)
 }
 
 /// The forced half of one call case.
@@ -1066,12 +1104,13 @@ fn run_tool_case(
 /// doomed requests.
 fn run_forced_case(
     sink: &mut TaskSink,
-    forced: &mut ForcedState,
+    forced: &mut AgenticPass,
     case: &crate::core::bench::probeset::ToolCase,
 ) -> Result<(), ChekovError> {
+    use crate::core::bench::store::TaskKey;
     use crate::core::bench::{grade, probes, probeset, runner};
     let forced_id = format!("gg-{}", case.id);
-    if sink.is_done("grammar_gap", &forced_id) {
+    if sink.is_done(&TaskKey::buffered("grammar_gap", &forced_id)) {
         return Ok(());
     }
     if let Some(reason) = forced.refusal.clone() {
@@ -1083,7 +1122,7 @@ fn run_forced_case(
             let verdict = grade_row(grade::grade_forced(&artifact.anthropic_body, case));
             append_probe(
                 sink,
-                ("grammar_gap", &forced_id),
+                TaskKey::buffered("grammar_gap", &forced_id),
                 Ok((artifact.timings, verdict)),
             )
         }
@@ -1126,6 +1165,7 @@ fn append_unavailable(
             cache_n: 0,
         },
         grade: Some(store::GradeRow::unavailable(reason)),
+        transport: store::Transport::Buffered,
     })
 }
 
@@ -1153,7 +1193,7 @@ fn instruction_row(
 /// reason and no invented measurement.
 fn append_probe(
     sink: &mut TaskSink,
-    key: (&str, &str),
+    key: crate::core::bench::store::TaskKey,
     outcome: Result<
         (
             crate::core::bench::runner::Timings,
@@ -1168,10 +1208,11 @@ fn append_probe(
         Err(e) => failed_probe(&e),
     };
     sink.writer.append(store::Task {
-        suite: key.0.into(),
-        task_id: key.1.into(),
+        suite: key.suite.into(),
+        task_id: key.task_id.into(),
         measure,
         grade: Some(verdict),
+        transport: key.transport,
     })
 }
 
@@ -1180,7 +1221,7 @@ fn open_run(
     ctx: &Ctx,
     head: &crate::core::bench::store::RunHead,
     resume: Option<&str>,
-) -> Result<(crate::core::bench::store::RunWriter, Vec<(String, String)>), ChekovError> {
+) -> Result<(crate::core::bench::store::RunWriter, Vec<Done>), ChekovError> {
     use crate::core::bench::store::RunWriter;
     let eval = ctx.config.eval_dir();
     if let Some(run_id) = resume {
@@ -1188,7 +1229,7 @@ fn open_run(
         let done = log
             .rows
             .iter()
-            .map(|r| (r.suite.clone(), r.task_id.clone()))
+            .map(|r| (r.suite.clone(), r.task_id.clone(), r.transport))
             .collect();
         return Ok((writer, done));
     }
@@ -1196,16 +1237,27 @@ fn open_run(
     Ok((RunWriter::create(&eval, &run_id, head)?, Vec::new()))
 }
 
+/// One recorded crossing of a resumed run: suite, case, door.
+type Done = (String, String, crate::core::bench::store::Transport);
+
 /// Where task rows land, plus what a resumed run already holds.
 struct TaskSink<'a> {
     writer: &'a mut crate::core::bench::store::RunWriter,
-    done: &'a [(String, String)],
+    done: &'a [Done],
 }
 
 impl TaskSink<'_> {
-    fn is_done(&self, suite: &str, task_id: &str) -> bool {
-        self.done.iter().any(|(s, t)| s == suite && t == task_id)
+    fn is_done(&self, key: &crate::core::bench::store::TaskKey) -> bool {
+        already_done(self.done, key)
     }
+}
+
+/// The `--resume` skip test: the same case through the same door. The other
+/// door's crossing is still owed.
+fn already_done(done: &[Done], key: &crate::core::bench::store::TaskKey) -> bool {
+    done.iter().any(|(suite, task_id, transport)| {
+        suite == key.suite && task_id == key.task_id && *transport == key.transport
+    })
 }
 
 /// Measure each depth and append its row as soon as it completes — a crash
@@ -1218,7 +1270,7 @@ fn run_throughput(
     use crate::core::bench::{runner, store, sweep};
     for &depth in &plan.depths {
         let task_id = format!("depth-{depth}");
-        if sink.is_done("throughput", &task_id) {
+        if sink.is_done(&store::TaskKey::buffered("throughput", &task_id)) {
             eprintln!("chekov: {task_id} already recorded — skipped (--resume)");
             continue;
         }
@@ -1235,6 +1287,7 @@ fn run_throughput(
                 cache_n: result.cache_n,
             },
             grade: None,
+            transport: store::Transport::Buffered,
         })?;
     }
     Ok(())
@@ -1247,10 +1300,11 @@ fn run_fixture(
     wire: &crate::core::bench::runner::ProbeWire,
     path: &std::path::Path,
 ) -> Result<(), ChekovError> {
+    use crate::core::bench::store::TaskKey;
     use crate::core::bench::{fixture, grade, probes, runner};
     let loaded = fixture::load(path)?;
     for probe in &loaded.probes {
-        if sink.is_done("fixture", &probe.id) {
+        if sink.is_done(&TaskKey::buffered("fixture", &probe.id)) {
             eprintln!(
                 "chekov: fixture {} already recorded — skipped (--resume)",
                 probe.id
@@ -1263,7 +1317,7 @@ fn run_fixture(
                 grade_row(grade::grade(&artifact.anthropic_body, probe)),
             )
         });
-        append_probe(sink, ("fixture", &probe.id), outcome)?;
+        append_probe(sink, TaskKey::buffered("fixture", &probe.id), outcome)?;
     }
     Ok(())
 }
@@ -1648,6 +1702,51 @@ mod tests {
             crate::cli::Cli::try_parse_from(["chekov", "capability", "graph", "--metric", "speed"])
                 .is_err(),
             "only the spec's two values parse"
+        );
+    }
+
+    #[test]
+    fn a_resumed_run_still_owes_the_other_door() {
+        use crate::core::bench::store::{TaskKey, Transport};
+        let done = vec![(
+            "tool_emit".to_owned(),
+            "te-001".to_owned(),
+            Transport::Buffered,
+        )];
+        assert!(super::already_done(
+            &done,
+            &TaskKey::buffered("tool_emit", "te-001")
+        ));
+        assert!(!super::already_done(
+            &done,
+            &TaskKey::streamed("tool_emit", "te-001")
+        ));
+        assert!(!super::already_done(
+            &done,
+            &TaskKey::buffered("tool_emit", "te-002")
+        ));
+    }
+
+    #[test]
+    fn the_agentic_estimate_counts_both_doors() {
+        use crate::core::bench::lifecycle::Suite;
+        use crate::core::bench::probeset::{Expect, agentic_v0};
+        let set = agentic_v0().expect("the compiled-in set is valid");
+        let forced = set
+            .tool_emit
+            .iter()
+            .filter(|c| c.expect == Expect::Call)
+            .count();
+        // Every unconstrained case crosses twice (buffered and streamed); the
+        // forced pass crosses once.
+        let cases = 2 * set.tool_emit.len() + forced + 2 * set.instruction.len();
+        assert_eq!(
+            super::agentic_estimate_secs(Suite::Agentic).expect("estimate"),
+            cases as u64 * 8
+        );
+        assert_eq!(
+            super::agentic_estimate_secs(Suite::Throughput).expect("estimate"),
+            0
         );
     }
 

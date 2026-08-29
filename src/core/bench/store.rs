@@ -21,6 +21,14 @@ use crate::error::ChekovError;
 /// What this chekov writes and reads.
 pub const SCHEMA_VERSION: u32 = 1;
 
+pub use crate::core::bench::runner::Transport;
+
+/// The suites whose rows are graded per case.
+const AGENTIC: [&str; 3] = ["tool_emit", "grammar_gap", "instruction"];
+
+/// The suites crossed through both doors, so a case can disagree with itself.
+const PAIRED: [&str; 2] = ["tool_emit", "instruction"];
+
 /// Everything `stamp.json` records about a run, once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +50,10 @@ pub struct TaskRow {
     pub seq: u32,
     pub suite: String,
     pub task_id: String,
+    /// Which door the probe took. Rows written before the field exist only
+    /// from the buffered door, so absent means buffered.
+    #[serde(default)]
+    pub transport: Transport,
     pub measure: Measure,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade: Option<GradeRow>,
@@ -110,6 +122,7 @@ pub struct Task {
     pub task_id: String,
     pub measure: Measure,
     pub grade: Option<GradeRow>,
+    pub transport: Transport,
 }
 
 /// An open run directory being written.
@@ -173,6 +186,7 @@ impl RunWriter {
             seq: self.seq,
             suite: task.suite,
             task_id: task.task_id,
+            transport: task.transport,
             measure: task.measure,
             grade: task.grade,
         };
@@ -232,12 +246,41 @@ impl RunLog {
         Ok(Self { head, rows })
     }
 
-    /// Whether a task is already recorded (the `--resume` skip test).
+    /// Whether a task is already recorded through this door (the `--resume`
+    /// skip test) — the other door's crossing of the same case is still owed.
     #[must_use]
-    pub fn is_done(&self, suite: &str, task_id: &str) -> bool {
-        self.rows
-            .iter()
-            .any(|r| r.suite == suite && r.task_id == task_id)
+    pub fn is_done(&self, key: &TaskKey) -> bool {
+        self.rows.iter().any(|r| {
+            r.suite == key.suite && r.task_id == key.task_id && r.transport == key.transport
+        })
+    }
+}
+
+/// What identifies one recorded crossing: the case and the door it took.
+#[derive(Debug, Clone, Copy)]
+pub struct TaskKey<'a> {
+    pub suite: &'a str,
+    pub task_id: &'a str,
+    pub transport: Transport,
+}
+
+impl<'a> TaskKey<'a> {
+    #[must_use]
+    pub const fn buffered(suite: &'a str, task_id: &'a str) -> Self {
+        Self {
+            suite,
+            task_id,
+            transport: Transport::Buffered,
+        }
+    }
+
+    #[must_use]
+    pub const fn streamed(suite: &'a str, task_id: &'a str) -> Self {
+        Self {
+            suite,
+            task_id,
+            transport: Transport::Streamed,
+        }
     }
 }
 
@@ -319,20 +362,17 @@ fn suite_summaries(log: &RunLog) -> String {
     let failures: String = log
         .rows
         .iter()
-        .filter(|r| ["tool_emit", "grammar_gap", "instruction"].contains(&r.suite.as_str()))
+        .filter(|r| AGENTIC.contains(&r.suite.as_str()))
         .filter(|r| r.grade.as_ref().is_some_and(|g| !g.pass && !g.unavailable))
         .map(agentic_fail_line)
         .collect();
     out.push_str(&failures);
-    if let Some(line) = tool_emit_line(log) {
-        out.push_str(&line);
-    }
-    if let Some(line) = grammar_gap_line(log) {
-        out.push_str(&line);
-    }
-    if let Some(line) = instruction_line(log) {
-        out.push_str(&line);
-    }
+    out.extend(tool_emit_line(log, Transport::Buffered));
+    out.extend(grammar_gap_line(log));
+    out.extend(instruction_line(log, Transport::Buffered));
+    out.extend(tool_emit_line(log, Transport::Streamed));
+    out.extend(instruction_line(log, Transport::Streamed));
+    out.push_str(&asymmetry_lines(log));
     out
 }
 
@@ -342,11 +382,95 @@ fn agentic_fail_line(row: &TaskRow) -> String {
         .as_ref()
         .and_then(|g| g.reason.as_deref())
         .unwrap_or("");
-    format!("{} FAIL {}  {reason}\n", row.suite, row.task_id)
+    format!(
+        "{} FAIL {}{}  {reason}\n",
+        row.suite,
+        row.task_id,
+        door_tag(row.transport)
+    )
+}
+
+/// The buffered door is the unmarked one — every earlier run went through it.
+const fn door_tag(transport: Transport) -> &'static str {
+    match transport {
+        Transport::Buffered => "",
+        Transport::Streamed => " [streamed]",
+    }
+}
+
+const fn door_label(transport: Transport) -> &'static str {
+    match transport {
+        Transport::Buffered => "",
+        Transport::Streamed => "streamed ",
+    }
+}
+
+/// The same case answered differently through the two doors — the finding
+/// the streamed pass exists to surface. Only cases measured both ways
+/// compare; a run that never streamed says nothing here.
+fn asymmetry_lines(log: &RunLog) -> String {
+    if !log.rows.iter().any(|r| r.transport == Transport::Streamed) {
+        return String::new();
+    }
+    let lines: String = PAIRED
+        .iter()
+        .flat_map(|suite| both_ways(log, suite))
+        .filter_map(disagreement)
+        .collect();
+    if lines.is_empty() {
+        return "asymmetry    none — buffered and streamed agree on every case measured both \
+                ways\n"
+            .to_owned();
+    }
+    lines
+}
+
+/// (buffered, streamed) rows of the cases measured through both doors.
+fn both_ways<'a>(
+    log: &'a RunLog,
+    suite: &'a str,
+) -> impl Iterator<Item = (&'a TaskRow, &'a TaskRow)> {
+    rows_via(log, suite, Transport::Streamed)
+        .filter(|row| !is_unavailable(row))
+        .filter_map(move |streamed| {
+            let buffered = rows_via(log, suite, Transport::Buffered)
+                .find(|row| row.task_id == streamed.task_id && !is_unavailable(row))?;
+            Some((buffered, streamed))
+        })
+}
+
+fn disagreement((buffered, streamed): (&TaskRow, &TaskRow)) -> Option<String> {
+    let passed_one = |row: &TaskRow| row.grade.as_ref().is_some_and(|g| g.pass);
+    let word = |pass: bool| if pass { "PASS" } else { "FAIL" };
+    let (b, s) = (passed_one(buffered), passed_one(streamed));
+    if b == s {
+        return None;
+    }
+    let failing = if b { streamed } else { buffered };
+    let reason = failing
+        .grade
+        .as_ref()
+        .and_then(|g| g.reason.as_deref())
+        .unwrap_or("");
+    Some(format!(
+        "asymmetry    {} {}: buffered {}, streamed {} — {reason}\n",
+        buffered.suite,
+        buffered.task_id,
+        word(b),
+        word(s)
+    ))
 }
 
 fn rows_of<'a>(log: &'a RunLog, suite: &'a str) -> impl Iterator<Item = &'a TaskRow> {
     log.rows.iter().filter(move |r| r.suite == suite)
+}
+
+fn rows_via<'a>(
+    log: &'a RunLog,
+    suite: &'a str,
+    transport: Transport,
+) -> impl Iterator<Item = &'a TaskRow> {
+    rows_of(log, suite).filter(move |r| r.transport == transport)
 }
 
 fn passed(rows: &[&TaskRow]) -> usize {
@@ -394,20 +518,21 @@ fn unavailable_reason(rows: &[&TaskRow]) -> String {
         .to_owned()
 }
 
-fn tool_emit_line(log: &RunLog) -> Option<String> {
-    let rows: Vec<&TaskRow> = rows_of(log, "tool_emit").collect();
+fn tool_emit_line(log: &RunLog, transport: Transport) -> Option<String> {
+    let rows: Vec<&TaskRow> = rows_via(log, "tool_emit", transport).collect();
     if rows.is_empty() {
         return None;
     }
+    let label = door_label(transport);
     let (kept, excluded) = measured(&rows);
     if kept.is_empty() {
         return Some(format!(
-            "tool_emit    N/A — nothing was measured ({})\n",
+            "tool_emit    {label}N/A — nothing was measured ({})\n",
             unavailable_reason(&rows)
         ));
     }
     Some(format!(
-        "tool_emit    {}/{}{}\n",
+        "tool_emit    {label}{}/{}{}\n",
         passed(&kept),
         kept.len(),
         excluded_note(excluded)
@@ -440,7 +565,9 @@ fn grammar_gap_line(log: &RunLog) -> Option<String> {
         .iter()
         .filter_map(|r| r.task_id.strip_prefix("gg-"))
         .collect();
-    let unconstrained: Vec<&TaskRow> = rows_of(log, "tool_emit")
+    // The forced pass is buffered, so it pairs against buffered rows only —
+    // adding the streamed crossings to one side would invent a gap.
+    let unconstrained: Vec<&TaskRow> = rows_via(log, "tool_emit", Transport::Buffered)
         .filter(|r| base_ids.contains(&r.task_id.as_str()))
         .collect();
     let (paired, _) = measured(&unconstrained);
@@ -464,15 +591,16 @@ fn grammar_gap_line(log: &RunLog) -> Option<String> {
     ))
 }
 
-fn instruction_line(log: &RunLog) -> Option<String> {
-    let rows: Vec<&TaskRow> = rows_of(log, "instruction").collect();
+fn instruction_line(log: &RunLog, transport: Transport) -> Option<String> {
+    let rows: Vec<&TaskRow> = rows_via(log, "instruction", transport).collect();
     if rows.is_empty() {
         return None;
     }
+    let label = door_label(transport);
     let (kept, excluded) = measured(&rows);
     if kept.is_empty() {
         return Some(format!(
-            "instruction  N/A — nothing was measured ({})\n",
+            "instruction  {label}N/A — nothing was measured ({})\n",
             unavailable_reason(&rows)
         ));
     }
@@ -489,7 +617,7 @@ fn instruction_line(log: &RunLog) -> Option<String> {
         })
         .count();
     Some(format!(
-        "instruction  strict {strict}/{}, loose {loose}/{} (chattiness gap {}){}\n",
+        "instruction  {label}strict {strict}/{}, loose {loose}/{} (chattiness gap {}){}\n",
         kept.len(),
         kept.len(),
         loose.saturating_sub(strict),
@@ -532,7 +660,9 @@ fn probe_line(row: &TaskRow) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{GradeRow, Measure, RunHead, RunLog, RunWriter, Task, render_run};
+    use super::{
+        GradeRow, Measure, RunHead, RunLog, RunWriter, Task, TaskRow, Transport, render_run,
+    };
     use crate::core::bench::stamp::Stamp;
     use crate::error::ChekovError;
 
@@ -626,6 +756,7 @@ mod tests {
                         reason: reason.map(str::to_owned),
                         unavailable: false,
                     }),
+                    transport: Transport::Buffered,
                 })
                 .expect("append");
         }
@@ -646,14 +777,7 @@ mod tests {
             ("grammar_gap", "gg-te-002", refused()),
         ];
         for (suite, id, grade) in rows {
-            writer
-                .append(Task {
-                    suite: suite.into(),
-                    task_id: id.into(),
-                    measure: measure(&[20.0, 20.0]),
-                    grade: Some(grade),
-                })
-                .expect("append");
+            writer.append(graded(suite, id, grade)).expect("append");
         }
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
@@ -697,14 +821,7 @@ mod tests {
             ),
         ];
         for (suite, id, grade) in rows {
-            writer
-                .append(Task {
-                    suite: suite.into(),
-                    task_id: id.into(),
-                    measure: measure(&[20.0, 20.0]),
-                    grade: Some(grade),
-                })
-                .expect("append");
+            writer.append(graded(suite, id, grade)).expect("append");
         }
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
@@ -762,6 +879,135 @@ mod tests {
         );
     }
 
+    fn graded(suite: &str, id: &str, grade: GradeRow) -> Task {
+        Task {
+            suite: suite.into(),
+            task_id: id.into(),
+            measure: measure(&[20.0, 20.0]),
+            grade: Some(grade),
+            transport: Transport::Buffered,
+        }
+    }
+
+    fn streamed(suite: &str, id: &str, grade: GradeRow) -> Task {
+        Task {
+            transport: Transport::Streamed,
+            ..graded(suite, id, grade)
+        }
+    }
+
+    /// `graded_run` plus the streamed crossings of the same cases: te-001
+    /// agrees (PASS), te-002 flips to PASS, if-001 flips to FAIL, if-002
+    /// fails both ways.
+    fn with_streamed(name: &str) -> String {
+        let eval = scratch(name);
+        let mut writer = graded_run(&eval);
+        for task in [
+            streamed("tool_emit", "te-001", GradeRow::pass()),
+            streamed("tool_emit", "te-002", GradeRow::pass()),
+            streamed(
+                "instruction",
+                "if-001",
+                GradeRow::fail("failed 'max_lines'; loose:pass".to_owned()),
+            ),
+            streamed(
+                "instruction",
+                "if-002",
+                GradeRow::fail("failed 'fenced_rust_only'; loose:pass".to_owned()),
+            ),
+        ] {
+            writer.append(task).expect("append");
+        }
+        render_run(&RunLog::load(writer.dir()).expect("load"))
+    }
+
+    #[test]
+    fn a_row_written_before_transport_loads_as_buffered() {
+        let line = r#"{"schema":1,"run_id":"r","seq":0,"suite":"tool_emit","task_id":"te-001",
+            "measure":{"prompt_n":4,"decode_samples":[1.0],"prefill_samples":[1.0],"warmup_dropped":0}}"#;
+        let row: TaskRow = serde_json::from_str(line).expect("an old row still loads");
+        assert_eq!(row.transport, Transport::Buffered);
+    }
+
+    #[test]
+    fn is_done_is_transport_aware() {
+        let eval = scratch("done-transport");
+        let writer = graded_run(&eval);
+        let log = RunLog::load(writer.dir()).expect("load");
+        assert!(log.is_done(&super::TaskKey::buffered("tool_emit", "te-001")));
+        assert!(
+            !log.is_done(&super::TaskKey::streamed("tool_emit", "te-001")),
+            "the streamed crossing of the same case is still owed"
+        );
+    }
+
+    #[test]
+    fn streamed_rows_render_beside_buffered_and_disagreements_are_named() {
+        let rendered = with_streamed("asymmetry");
+        // The buffered lines keep their shape; streamed ones sit beside them.
+        assert!(rendered.contains("tool_emit    1/2\n"), "{rendered}");
+        assert!(
+            rendered.contains("tool_emit    streamed 2/2\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("instruction  streamed strict 0/2, loose 2/2 (chattiness gap 2)"),
+            "{rendered}"
+        );
+        // The finding: the same case answered differently through the two doors.
+        assert!(
+            rendered.contains("asymmetry    tool_emit te-002: buffered FAIL, streamed PASS"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "asymmetry    instruction if-001: buffered PASS, streamed FAIL — failed 'max_lines'"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("asymmetry    instruction if-002"),
+            "a case that fails both ways is not an asymmetry: {rendered}"
+        );
+        // Individual failure lines say which door.
+        assert!(
+            rendered.contains("instruction FAIL if-001 [streamed]  failed 'max_lines'"),
+            "{rendered}"
+        );
+        // The grammar gap pairs the forced pass against BUFFERED unconstrained
+        // rows only — the forced pass is buffered, and doubling the other side
+        // would invent a gap.
+        assert!(
+            rendered.contains("unconstrained on the same cases 1/2 (gap +50%)"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn agreeing_transports_say_so_and_a_buffered_only_run_says_nothing() {
+        let eval = scratch("agree");
+        let mut writer = graded_run(&eval);
+        let buffered_only = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(!buffered_only.contains("asymmetry"), "{buffered_only}");
+        writer
+            .append(streamed("tool_emit", "te-001", GradeRow::pass()))
+            .expect("append");
+        writer
+            .append(streamed(
+                "tool_emit",
+                "te-002",
+                GradeRow::fail("called 'read_file', expected 'grep'".to_owned()),
+            ))
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains(
+                "asymmetry    none — buffered and streamed agree on every case measured both ways"
+            ),
+            "{rendered}"
+        );
+    }
+
     #[test]
     fn a_hot_cache_is_visible_in_the_rendering() {
         let eval = scratch("cache-n");
@@ -774,6 +1020,7 @@ mod tests {
                 task_id: "depth-1024".into(),
                 measure: warm,
                 grade: None,
+                transport: Transport::Buffered,
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
@@ -791,6 +1038,7 @@ mod tests {
                     task_id: id.into(),
                     measure: measure(&[19.0, 21.0, 22.0 + bump]),
                     grade: None,
+                    transport: Transport::Buffered,
                 })
                 .expect("append");
         }
@@ -812,18 +1060,20 @@ mod tests {
                 task_id: "depth-1024".into(),
                 measure: measure(&[19.0, 21.0]),
                 grade: None,
+                transport: Transport::Buffered,
             })
             .expect("append");
         drop(writer);
         let (mut resumed, log) = RunWriter::resume(&eval, "r2-model", &head()).expect("resume");
-        assert!(log.is_done("throughput", "depth-1024"));
-        assert!(!log.is_done("throughput", "depth-4096"));
+        assert!(log.is_done(&super::TaskKey::buffered("throughput", "depth-1024")));
+        assert!(!log.is_done(&super::TaskKey::buffered("throughput", "depth-4096")));
         resumed
             .append(Task {
                 suite: "throughput".into(),
                 task_id: "depth-4096".into(),
                 measure: measure(&[15.0, 16.0]),
                 grade: None,
+                transport: Transport::Buffered,
             })
             .expect("append after resume");
         let reloaded = RunLog::load(resumed.dir()).expect("reload");
@@ -858,6 +1108,7 @@ mod tests {
                 task_id: "depth-1024".into(),
                 measure: measure(&[19.0, 21.0]),
                 grade: None,
+                transport: Transport::Buffered,
             })
             .expect("append");
         let results = writer.dir().join("results.jsonl");
@@ -878,6 +1129,7 @@ mod tests {
                 task_id: "depth-1024".into(),
                 measure: measure(&[19.0, 21.0, 22.0, 22.4]),
                 grade: None,
+                transport: Transport::Buffered,
             })
             .expect("append");
         writer
@@ -888,6 +1140,7 @@ mod tests {
                 grade: Some(GradeRow::fail(
                     "missing expected substring \"hello\"".to_owned(),
                 )),
+                transport: Transport::Buffered,
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
