@@ -147,6 +147,12 @@ pub struct CodebaseRow {
     /// score, and `0.0` would read as one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbols_score: Option<f64>,
+    /// The engine said this model cannot infill at all — recorded where the
+    /// outcome is known, so the report never has to guess from an error's
+    /// wording. Rows written before the field load as `false`: an outage was
+    /// the commoner case, and claiming a capability gap is the worse error.
+    #[serde(default)]
+    pub unsupported: bool,
 }
 
 /// One task to append: its identity plus what was measured.
@@ -582,7 +588,7 @@ pub fn render_codebase(log: &RunLog) -> String {
     }
     let (kept, excluded) = measured(&rows);
     if kept.is_empty() {
-        return codebase_na_line(&unavailable_reason(&rows));
+        return codebase_na_line(&rows);
     }
     let count = |tier: TaskTier| {
         kept.iter()
@@ -607,11 +613,18 @@ pub fn render_codebase(log: &RunLog) -> String {
 }
 
 /// The whole-suite N/A line, which only a run where NOTHING was answered
-/// earns. A missing FIM capability is named as such; anything else — a dead
-/// server, a timeout — is reported in its own words rather than blamed on
-/// infill support the run never established.
-fn codebase_na_line(reason: &str) -> String {
-    if reason.to_lowercase().contains("infill") {
+/// earns.
+///
+/// A missing FIM capability is named as such only when every row was recorded
+/// as one at the crossing. Nothing here reads the reason: a refusal's own
+/// words carry the URL it was refused at, and that URL ends in `/infill`, so
+/// a dead server would otherwise be reported as a model that cannot infill.
+fn codebase_na_line(rows: &[&TaskRow]) -> String {
+    let reason = unavailable_reason(rows);
+    let unsupported = rows
+        .iter()
+        .all(|r| r.codebase.as_ref().is_some_and(|c| c.unsupported));
+    if unsupported {
         format!("codebase     N/A — infill unsupported by this model ({reason})\n")
     } else {
         format!("codebase     N/A — {reason}\n")
@@ -1288,12 +1301,14 @@ mod tests {
                     cross_file: "n/a: same-file".into(),
                 },
                 symbols_score: Some(1.0),
+                unsupported: false,
             }),
         }
     }
 
-    /// A codebase row nobody could answer: unavailable, with no tier-5 score.
-    fn unavailable_codebase_task(id: &str, reason: &str) -> Task {
+    /// A codebase row nobody could answer: unavailable, with no tier-5 score
+    /// and the crossing's own verdict on whether the model can infill at all.
+    fn unavailable_codebase_task(id: &str, reason: &str, unsupported: bool) -> Task {
         let mut task = codebase_task(CodebaseFixture {
             id,
             tier: TaskTier::InFile,
@@ -1303,6 +1318,7 @@ mod tests {
         task.task_id = id.into();
         if let Some(row) = task.codebase.as_mut() {
             row.symbols_score = None;
+            row.unsupported = unsupported;
         }
         task.grade = Some(GradeRow::unavailable(reason.into()));
         task
@@ -1345,6 +1361,7 @@ mod tests {
             .append(unavailable_codebase_task(
                 "in_file-abc123-L11",
                 "the server stopped answering",
+                false,
             ))
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
@@ -1362,24 +1379,37 @@ mod tests {
         );
     }
 
+    /// The reason an outage at the infill endpoint actually records: the
+    /// error's own words, URL and all — and that URL ends in `/infill`.
     #[test]
-    fn an_all_unavailable_run_that_is_not_about_infill_says_what_actually_happened() {
+    fn an_outage_at_the_infill_endpoint_is_not_a_missing_capability() {
         let eval = scratch("codebase-na-generic");
         let mut writer = RunWriter::create(&eval, "r13-model", &head()).expect("create");
+        let outage = ChekovError::UpstreamRefused {
+            url: "http://fake/infill".into(),
+            status: 500,
+            reason: "internal error".into(),
+        }
+        .to_string();
+        assert!(
+            outage.to_lowercase().contains("infill"),
+            "the URL is in the words, which is exactly the trap: {outage}"
+        );
         writer
             .append(unavailable_codebase_task(
                 "in_file-abc123-L7",
-                "the server stopped answering",
+                &outage,
+                false,
             ))
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
-            rendered.contains("codebase     N/A — the server stopped answering"),
+            rendered.contains("codebase     N/A — the server at http://fake/infill"),
             "{rendered}"
         );
         assert!(
             !rendered.contains("infill unsupported"),
-            "nothing established that infill is the problem: {rendered}"
+            "a 500 is not a model that cannot infill: {rendered}"
         );
         assert!(
             !rendered.contains("symbols 0.00"),
@@ -1395,6 +1425,7 @@ mod tests {
             .append(unavailable_codebase_task(
                 "in_file-abc123-L7",
                 "infill is not supported by this model",
+                true,
             ))
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));

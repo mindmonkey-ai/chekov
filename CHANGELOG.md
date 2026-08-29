@@ -133,8 +133,11 @@ All notable changes to chekov are recorded here. The format follows
   `/infill` windows the prompt at its batch size, so a long file reaches the
   model only in part and the header says so rather than implying otherwise.
   `N/A — infill unsupported by this model` is reserved for a run where NOTHING
-  was answered and the reason names infill; a run that failed for another
-  reason reports that reason, and a run where only some tasks failed excludes
+  was answered and every crossing recorded that verdict as it happened (never
+  inferred later from an error's wording — a refusal names the URL it was
+  refused at, and that URL ends in `/infill`, so an outage would read as a
+  missing capability); a run that failed for another reason reports that
+  reason, and a run where only some tasks failed excludes
   them from every mean and counts them in the header (`(k unavailable,
   excluded)`). A task nobody answered stores no tier-5 score at all — the
   symbols cell reads `n/a` rather than averaging in a zero.

@@ -1488,10 +1488,10 @@ fn infill_or_latch(
     wire: &crate::core::bench::runner::ProbeWire,
     task: &crate::core::bench::codebase::CodebaseTask,
     latch: &mut Option<String>,
-) -> Result<crate::core::bench::runner::ProbeArtifact, String> {
+) -> Result<crate::core::bench::runner::ProbeArtifact, Unavailable> {
     use crate::core::bench::runner::{InfillOutcome, InfillTask, cross_infill};
     if let Some(reason) = latch {
-        return Err(reason.clone());
+        return Err(Unavailable::unsupported(reason.clone()));
     }
     let infill_task = InfillTask {
         prefix: &task.prefix,
@@ -1505,7 +1505,7 @@ fn infill_or_latch(
                 "chekov bench: infill unsupported by this model — codebase is N/A ({reason})"
             );
             *latch = Some(reason.clone());
-            Err(reason)
+            Err(Unavailable::unsupported(reason))
         }
         Err(e) => {
             let reason = e.to_string();
@@ -1513,7 +1513,37 @@ fn infill_or_latch(
                 "chekov bench: codebase task {} unavailable: {reason}",
                 task.id
             );
-            Err(reason)
+            Err(Unavailable::outage(reason))
+        }
+    }
+}
+
+/// Why a codebase task has no answer.
+///
+/// The two cases are told apart HERE, where the engine's own outcome says
+/// which it is — never later by reading the reason. A refusal's words carry
+/// the URL it was refused at, and that URL ends in `/infill`, so any
+/// after-the-fact substring test reports a dead server as a model that
+/// cannot infill.
+struct Unavailable {
+    reason: String,
+    unsupported: bool,
+}
+
+impl Unavailable {
+    /// The engine says this model has no FIM capability at all.
+    const fn unsupported(reason: String) -> Self {
+        Self {
+            reason,
+            unsupported: true,
+        }
+    }
+
+    /// Everything else: a timeout, a 5xx, a reply chekov could not read.
+    const fn outage(reason: String) -> Self {
+        Self {
+            reason,
+            unsupported: false,
         }
     }
 }
@@ -1521,7 +1551,7 @@ fn infill_or_latch(
 /// What one codebase task's outcome needs to become a row (§4 — keeps
 /// `record_codebase_task` at 3 params).
 struct Recorded<'a> {
-    outcome: Result<crate::core::bench::runner::ProbeArtifact, String>,
+    outcome: Result<crate::core::bench::runner::ProbeArtifact, Unavailable>,
     symbols: &'a crate::core::bench::codebase::ladder::Symbols,
 }
 
@@ -1555,27 +1585,17 @@ fn record_codebase_task(
     recorded: Recorded,
 ) -> Result<(), ChekovError> {
     use crate::core::bench::store;
-    let (measure, grade, prediction) = match recorded.outcome {
-        Ok(artifact) => (
-            probe_measure(&artifact.timings),
-            None,
-            artifact.anthropic_body,
-        ),
-        Err(reason) => (
-            empty_measure(),
-            Some(store::GradeRow::unavailable(reason)),
-            String::new(),
-        ),
-    };
-    let symbols_score = grade
+    let parts = row_parts(recorded.outcome);
+    let symbols_score = parts
+        .grade
         .is_none()
-        .then(|| symbols_tier_score(task, &prediction, recorded.symbols))
+        .then(|| symbols_tier_score(task, &parts.prediction, recorded.symbols))
         .flatten();
     sink.writer.append(store::Task {
         suite: "codebase".into(),
         task_id: task.id.clone(),
-        measure,
-        grade,
+        measure: parts.measure,
+        grade: parts.grade,
         transport: store::Transport::Buffered,
         codebase: Some(store::CodebaseRow {
             tier: task.tier,
@@ -1583,13 +1603,39 @@ fn record_codebase_task(
             line: task.line,
             label: crate::core::bench::codebase::MASK_LABEL.to_owned(),
             gold: task.gold.clone(),
-            prediction,
+            prediction: parts.prediction,
             prefix: task.prefix.clone(),
             suffix: task.suffix.clone(),
             excluded: task.excluded.clone(),
             symbols_score,
+            unsupported: parts.unsupported,
         }),
     })
+}
+
+/// One outcome flattened into the fields a row is built from.
+struct RowParts {
+    measure: crate::core::bench::store::Measure,
+    grade: Option<crate::core::bench::store::GradeRow>,
+    prediction: String,
+    unsupported: bool,
+}
+
+fn row_parts(outcome: Result<crate::core::bench::runner::ProbeArtifact, Unavailable>) -> RowParts {
+    match outcome {
+        Ok(artifact) => RowParts {
+            measure: probe_measure(&artifact.timings),
+            grade: None,
+            prediction: artifact.anthropic_body,
+            unsupported: false,
+        },
+        Err(u) => RowParts {
+            measure: empty_measure(),
+            grade: Some(crate::core::bench::store::GradeRow::unavailable(u.reason)),
+            prediction: String::new(),
+            unsupported: u.unsupported,
+        },
+    }
 }
 
 /// Every sampled task through `/infill`, recorded with its raw prediction. A
@@ -2366,6 +2412,11 @@ mod tests {
                 .is_some_and(|c| c.symbols_score.is_none())),
             "an unanswered task has no tier-5 score"
         );
+        assert!(
+            rows.iter()
+                .all(|r| r.codebase.as_ref().is_some_and(|c| c.unsupported)),
+            "the capability verdict is recorded at the crossing — the latched row too"
+        );
     }
 
     #[test]
@@ -2380,6 +2431,11 @@ mod tests {
             unavailable_reason(&rows[0]).contains("out of context"),
             "{:?}",
             rows[0].grade
+        );
+        let failed = rows[0].codebase.as_ref().expect("a codebase row");
+        assert!(
+            !failed.unsupported,
+            "a refusal at the /infill URL is an outage, not a missing capability"
         );
         assert!(rows[1].grade.is_none(), "task 2 answered: {:?}", rows[1]);
         let answered = rows[1].codebase.as_ref().expect("a codebase row");
