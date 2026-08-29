@@ -7,6 +7,22 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Bench probes cross the STREAMING translator too — the door Claude Code
+  actually takes. Every unconstrained agentic case (`tool_emit`,
+  `instruction`) now runs through both doors: buffered, and streamed with
+  `stream: true` on the Anthropic request, the SSE body pumped through a fresh
+  `stream_translator()` exactly as the proxy's relay does, and the agent-side
+  events reassembled into the message an SDK client holds at `message_stop`,
+  so the same graders read it. Rows record their `transport` (older rows load
+  as `buffered`; schema unchanged), `--resume` keys on the door too, and the
+  report adds `streamed …` lines beside the unchanged buffered ones plus the
+  finding this exists for: `asymmetry <suite> <case>: buffered PASS, streamed
+  FAIL — <reason>` for every case that answered differently through the two
+  doors, or `asymmetry none` when they all agree. An upstream `error` frame
+  mid-stream fails the crossing as `BenchStreamFailed` — recorded
+  unavailable, never graded, never a forged `end_turn`. The throughput sweep
+  and the grammar-forced pass stay buffered by design; the socket itself
+  (HTTP framing) is still not exercised, as spec §7.1 states.
 - `chekov capability graph --metric tok-s` — the grid's first character
   becomes a band digit 1–9 of the MEASURED decode median from stored bench
   runs (`eval/`), and every cell without a run stays `??`: predicted and
