@@ -214,7 +214,16 @@ help when the request itself is unacceptable. Surfaced by the grammar_gap N/A
 message, whose remediation advice is actively misleading. Wants a distinct
 variant for "the upstream refused this request" carrying the server's own
 explanation, now that `hub::post_json` preserves it.
-Proposed 2026-08-28 — status: OPEN
+SHIPPED 2026-08-29 as `ChekovError::UpstreamRefused { url, status, reason }`
+via one classifier, `serve::answered`, used by `hub::post_json` and
+`get_bearer`: 2xx is the body, anything else is a refusal carrying the
+status and the server's own words, and the message says the server is up and
+the request is what to fix (`chekov show`, logs/llama-server.log).
+`EndpointDown` keeps its meaning — connect/send/read failures, readiness
+timeouts, an unparseable `/props`. The bench's forced-pass latch now fires
+on `UpstreamRefused` only; before, a dead socket mid-run would have been
+written off as an engine limitation.
+Proposed 2026-08-28 — status: SHIPPED
 
 ## The non-streaming translator drops `reasoning_content` (2026-08-28)
 `to_anthropic_response` reads `message.content` and `message.tool_calls` only.

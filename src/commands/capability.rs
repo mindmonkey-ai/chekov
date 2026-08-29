@@ -1128,12 +1128,12 @@ fn run_forced_case(
         }
         Err(e) => {
             let reason = e.to_string();
-            // Latch ONLY on the engine answering with a refusal. A chekov-side
-            // fault (a body we built wrong, a response we could not read) must
-            // not be recorded as an engine limitation — that would turn our
-            // own bug into the engine's exoneration and silently skip the
-            // remaining cases.
-            if matches!(e, ChekovError::EndpointDown { .. }) {
+            // Latch ONLY on the engine ANSWERING with a refusal. A chekov-side
+            // fault (a body we built wrong, a response we could not read) or a
+            // dead socket must not be recorded as an engine limitation — that
+            // would turn our own bug, or an outage, into the engine's
+            // exoneration and silently skip the remaining cases.
+            if matches!(e, ChekovError::UpstreamRefused { .. }) {
                 eprintln!(
                     "chekov bench: the engine refused a forced grammar — grammar_gap is \
                      N/A for this run ({reason})"

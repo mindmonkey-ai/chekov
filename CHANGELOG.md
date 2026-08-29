@@ -6,6 +6,15 @@ All notable changes to chekov are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- A request the server ANSWERED with a non-2xx is `UpstreamRefused` — "the
+  server at <url> answered HTTP <status> instead of a result (<the server's
+  own words>) — it is up and reachable; the request is what
+  to fix" — instead of `EndpointDown`'s "not answering … restart", which sent
+  a diagnosis the wrong way. `EndpointDown` keeps its meaning: connect, send,
+  and read failures, readiness timeouts. The bench's forced-pass latch fires
+  only on a real refusal now, never on a dead socket.
+
 ### Added
 - The bench's grammar-forced pass asks the engine to extract reasoning
   (`reasoning_format: deepseek`) on that wire only, so `grammar_gap` is
