@@ -1126,6 +1126,7 @@ fn append_unavailable(
             cache_n: 0,
         },
         grade: Some(store::GradeRow::unavailable(reason)),
+        transport: store::Transport::Buffered,
     })
 }
 
@@ -1172,6 +1173,7 @@ fn append_probe(
         task_id: key.1.into(),
         measure,
         grade: Some(verdict),
+        transport: store::Transport::Buffered,
     })
 }
 
@@ -1235,6 +1237,7 @@ fn run_throughput(
                 cache_n: result.cache_n,
             },
             grade: None,
+            transport: store::Transport::Buffered,
         })?;
     }
     Ok(())
