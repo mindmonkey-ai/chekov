@@ -448,6 +448,13 @@ pub const FORCED_REASONING_FORMAT: &str = "deepseek";
 /// object must not become a partial measurement.
 fn read_timings(upstream: &str) -> Result<Timings, ChekovError> {
     let parsed: Value = serde_json::from_str(upstream).map_err(|_| ChekovError::BenchNoTimings)?;
+    timings_from(&parsed)
+}
+
+/// `read_timings` for a body that is already parsed — the infill crossing
+/// needs the same object for its `content`, and one parse cannot disagree
+/// with itself.
+fn timings_from(parsed: &Value) -> Result<Timings, ChekovError> {
     let timings = parsed.get("timings").ok_or(ChekovError::BenchNoTimings)?;
     let float = |key: &str| timings.get(key).and_then(Value::as_f64);
     let count = |key: &str| timings.get(key).and_then(Value::as_u64);
@@ -503,18 +510,19 @@ pub fn cross_infill(wire: &ProbeWire, task: &InfillTask) -> Result<InfillOutcome
         }
         Err(e) => return Err(e),
     };
-    let timings = read_timings(&upstream_body)?;
     let parsed: Value =
-        serde_json::from_str(&upstream_body).map_err(|e| ChekovError::ProxyBadRequest {
-            reason: format!("/infill reply is not JSON: {e}"),
-        })?;
+        serde_json::from_str(&upstream_body).map_err(|_| ChekovError::BenchNoTimings)?;
+    let timings = timings_from(&parsed)?;
+    // A 200 with no `content` is a broken reply, not an empty answer: graded
+    // as "" it would score a silent zero on every tier.
     let content = parsed
         .get("content")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+        .ok_or_else(|| ChekovError::ProxyBadRequest {
+            reason: "/infill reply has no string `content`".to_owned(),
+        })?;
     Ok(InfillOutcome::Answered(ProbeArtifact {
-        anthropic_body: content,
+        anthropic_body: content.to_owned(),
         timings,
     }))
 }
@@ -921,6 +929,27 @@ mod tests {
                 .as_deref()
                 .unwrap_or("")
                 .ends_with("/infill")
+        );
+    }
+
+    #[test]
+    fn a_200_without_content_is_an_error_not_an_empty_fill() {
+        let http = CannedUpstream::new(
+            serde_json::json!({ "timings": final_frame()["timings"] }).to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn f() {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+        };
+        let Err(err) = super::cross_infill(&wire(&http, &facade, &up), &task) else {
+            panic!("a reply with no fill is not an answer");
+        };
+        assert!(
+            matches!(&err, ChekovError::ProxyBadRequest { reason } if reason.contains("no string `content`")),
+            "{err}"
         );
     }
 

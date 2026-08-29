@@ -142,8 +142,11 @@ pub struct CodebaseRow {
     pub prefix: String,
     pub suffix: String,
     pub excluded: Excluded,
-    /// Tier 5 against the worktree's symbol set, scored at run time.
-    pub symbols_score: f64,
+    /// Tier 5 against the worktree's symbol set, scored at run time — and
+    /// absent when the task was never answered. A task nobody asked has no
+    /// score, and `0.0` would read as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbols_score: Option<f64>,
 }
 
 /// One task to append: its identity plus what was measured.
@@ -577,29 +580,42 @@ pub fn render_codebase(log: &RunLog) -> String {
     if rows.is_empty() {
         return String::new();
     }
-    if rows.iter().any(|r| is_unavailable(r)) {
-        let reason = unavailable_reason(&rows);
-        return format!("codebase     N/A — infill unsupported by this model ({reason})\n");
+    let (kept, excluded) = measured(&rows);
+    if kept.is_empty() {
+        return codebase_na_line(&unavailable_reason(&rows));
     }
     let count = |tier: TaskTier| {
-        rows.iter()
+        kept.iter()
             .filter(|r| r.codebase.as_ref().is_some_and(|c| c.tier == tier))
             .count()
     };
     let mut out = format!(
         "codebase     {} tasks from {} files ({} in_file, {} function_body) — {}; \
-         context: same-file (engine window ≤ n_batch)\n",
-        rows.len(),
-        distinct_files(&rows),
+         context: same-file (engine window ≤ n_batch){}\n",
+        kept.len(),
+        distinct_files(&kept),
         count(TaskTier::InFile),
         count(TaskTier::FunctionBody),
         crate::core::bench::codebase::MASK_LABEL,
+        excluded_note(excluded),
     );
     for tier in [TaskTier::InFile, TaskTier::FunctionBody] {
-        out.push_str(&tier_line(&rows, tier));
+        out.push_str(&tier_line(&kept, tier));
     }
     out.push_str("             tiers 6-7 skipped: slice B (--allow-exec)\n");
     out
+}
+
+/// The whole-suite N/A line, which only a run where NOTHING was answered
+/// earns. A missing FIM capability is named as such; anything else — a dead
+/// server, a timeout — is reported in its own words rather than blamed on
+/// infill support the run never established.
+fn codebase_na_line(reason: &str) -> String {
+    if reason.to_lowercase().contains("infill") {
+        format!("codebase     N/A — infill unsupported by this model ({reason})\n")
+    } else {
+        format!("codebase     N/A — {reason}\n")
+    }
 }
 
 fn tier_line(rows: &[&TaskRow], tier: TaskTier) -> String {
@@ -617,14 +633,24 @@ fn tier_line(rows: &[&TaskRow], tier: TaskTier) -> String {
             cells.push(format!("{} {mean:.2}", t.label()));
         }
     }
-    let symbols_mean = group.iter().map(|c| c.symbols_score).sum::<f64>() / as_f64(group.len());
-    cells.push(format!("symbols {symbols_mean:.2} (scored at run time)"));
+    cells.push(symbols_cell(&group));
     format!(
         "             {:<14} {}   (n={})\n",
         tier.label(),
         cells.join("   "),
         group.len()
     )
+}
+
+/// Tier 5's cell: the mean of the rows that carry a score, or `n/a` when none
+/// of them does — an unscored group is not a zero-scoring one.
+fn symbols_cell(group: &[&CodebaseRow]) -> String {
+    let scored: Vec<f64> = group.iter().filter_map(|c| c.symbols_score).collect();
+    if scored.is_empty() {
+        return "symbols n/a (scored at run time)".to_owned();
+    }
+    let mean = scored.iter().sum::<f64>() / as_f64(scored.len());
+    format!("symbols {mean:.2} (scored at run time)")
 }
 
 /// The mean of the values that tier recomputes for this group — `None` when
@@ -1262,9 +1288,25 @@ mod tests {
                     doc_comment: 0,
                     cross_file: "n/a: same-file".into(),
                 },
-                symbols_score: 1.0,
+                symbols_score: Some(1.0),
             }),
         }
+    }
+
+    /// A codebase row nobody could answer: unavailable, with no tier-5 score.
+    fn unavailable_codebase_task(id: &str, reason: &str) -> Task {
+        let mut task = codebase_task(CodebaseFixture {
+            id,
+            tier: TaskTier::InFile,
+            gold: "let a = 1;",
+            prediction: "",
+        });
+        task.task_id = id.into();
+        if let Some(row) = task.codebase.as_mut() {
+            row.symbols_score = None;
+        }
+        task.grade = Some(GradeRow::unavailable(reason.into()));
+        task
     }
 
     #[test]
@@ -1294,19 +1336,68 @@ mod tests {
     }
 
     #[test]
+    fn a_partly_unavailable_codebase_run_scores_what_was_answered_and_says_how_many_were_not() {
+        let eval = scratch("codebase-partial");
+        let mut writer = RunWriter::create(&eval, "r12-model", &head()).expect("create");
+        for task in codebase_fixtures().into_iter().take(2).map(codebase_task) {
+            writer.append(task).expect("append");
+        }
+        writer
+            .append(unavailable_codebase_task(
+                "in_file-abc123-L11",
+                "the server stopped answering",
+            ))
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("codebase     2 tasks from 1 files (2 in_file, 0 function_body)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("(engine window ≤ n_batch) (1 unavailable, excluded)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("exact 0.50") && rendered.contains("(n=2)"),
+            "the means run over the two that answered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_all_unavailable_run_that_is_not_about_infill_says_what_actually_happened() {
+        let eval = scratch("codebase-na-generic");
+        let mut writer = RunWriter::create(&eval, "r13-model", &head()).expect("create");
+        writer
+            .append(unavailable_codebase_task(
+                "in_file-abc123-L7",
+                "the server stopped answering",
+            ))
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("codebase     N/A — the server stopped answering"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("infill unsupported"),
+            "nothing established that infill is the problem: {rendered}"
+        );
+        assert!(
+            !rendered.contains("symbols 0.00"),
+            "an unscored row is not a zero: {rendered}"
+        );
+    }
+
+    #[test]
     fn an_infill_unsupported_run_reports_na_not_zero() {
         let eval = scratch("codebase-na");
         let mut writer = RunWriter::create(&eval, "r11-model", &head()).expect("create");
-        let mut task = codebase_task(CodebaseFixture {
-            id: "in_file-abc123-L7",
-            tier: TaskTier::InFile,
-            gold: "let a = 1;",
-            prediction: "",
-        });
-        task.grade = Some(GradeRow::unavailable(
-            "infill is not supported by this model".into(),
-        ));
-        writer.append(task).expect("append");
+        writer
+            .append(unavailable_codebase_task(
+                "in_file-abc123-L7",
+                "infill is not supported by this model",
+            ))
+            .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
             rendered.contains(
