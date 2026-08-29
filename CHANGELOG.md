@@ -7,6 +7,16 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `[engine] git_ref` in `config.toml` — pin the llama.cpp engine to a branch,
+  tag, or commit. Weights were already revision-pinned; the binary that runs
+  them was whatever upstream HEAD was on the day of `setup` / `update
+  --engine`. Absent, nothing changes. Pinned, `setup` and `update --engine`
+  run `git fetch origin <ref>` and `git checkout --detach FETCH_HEAD` instead
+  of a fast-forward pull (no `--branch` on the clone, so a sha works), print
+  the steps under `--dry-run` like every other step, and `update --engine`
+  reports `engine: <old> → <new> (pinned to <ref>)`. A ref git would read as
+  an option (`-…`) or that would split into several arguments is refused at
+  config load, naming the key.
 - `chekov capability graph --metric tok-s` — the grid's first character
   becomes a band digit 1–9 of the MEASURED decode median from stored bench
   runs (`eval/`), and every cell without a run stays `??`: predicted and

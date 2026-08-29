@@ -142,6 +142,8 @@ mod tests {
     fn update_flags_parse_independently() {
         let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "update", "--all", "--dry-run"])
             .expect("parse");
-        assert!(matches!(cli.cmd, Cmd::Update(ref c) if c.all && c.dry_run && !c.engine));
+        assert!(
+            matches!(cli.cmd, Cmd::Update(ref c) if c.target.all && c.dry_run && !c.target.engine)
+        );
     }
 }

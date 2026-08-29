@@ -33,7 +33,16 @@ weights are revision-pinned; the binary that runs them is not. Proposal: an
 FETCH_HEAD` instead of `pull --ff-only`, and `--branch <ref>` on the clone.
 Deferred from the provenance work, which only records the built commit — pinning
 adds config surface and changes what `setup` does on every machine.
-Proposed 2026-08-25 — status: OPEN
+SHIPPED 2026-08-29 as `[engine] git_ref` (branch, tag, or commit). Absent means
+today's behaviour exactly — nothing changes until a machine opts in. Pinned:
+`git fetch origin <ref>` + `checkout --detach FETCH_HEAD` (never a pull; no
+`--branch` on the clone, so a sha is a valid pin); `update --engine` prints
+`(pinned to <ref>)`. A ref starting with `-` or containing whitespace is
+refused at config load naming the key — git would read the first as an option.
+Why it earned its place: on 2026-08-28 the engine had to be moved to a
+master-plus-one-cherry-pick branch by hand to gain `qwen4exp`, and `update
+--engine` on the old fix branch reported `dda1b0d67 → dda1b0d67`.
+Proposed 2026-08-25 — status: SHIPPED
 
 ## Verify the engine binary after building it (2026-08-25)
 `update --engine` never runs the binary it just built: a llama.cpp change that

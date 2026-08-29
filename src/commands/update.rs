@@ -10,11 +10,18 @@ use super::{Command, Ctx};
 use crate::error::ChekovError;
 
 #[derive(Debug, clap::Args)]
-// Four independent CLI switches, not a state machine — clap flags are the
-// one place a bool-per-option struct is the correct shape.
-#[allow(clippy::struct_excessive_bools)]
 pub struct UpdateCmd {
-    /// Update the llama.cpp engine (git pull + rebuild).
+    #[command(flatten)]
+    pub target: UpdateTarget,
+    /// Preview without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// What to update — independent CLI switches, each its own flag.
+#[derive(Debug, clap::Args)]
+pub struct UpdateTarget {
+    /// Update the llama.cpp engine (fetch the pinned ref, or pull; rebuild).
     #[arg(long)]
     pub engine: bool,
     /// Re-resolve the active model's repo revision.
@@ -23,9 +30,20 @@ pub struct UpdateCmd {
     /// Both.
     #[arg(long)]
     pub all: bool,
-    /// Preview without changing anything.
-    #[arg(long)]
-    pub dry_run: bool,
+}
+
+impl UpdateTarget {
+    const fn wants_engine(&self) -> bool {
+        self.engine || self.all
+    }
+
+    const fn wants_model(&self) -> bool {
+        self.model || self.all
+    }
+
+    const fn is_empty(&self) -> bool {
+        !(self.engine || self.model || self.all)
+    }
 }
 
 /// STOP-4 arming rule: gate whenever a previously snapshotted license text is
@@ -43,10 +61,12 @@ pub fn license_gate_needed(old: Option<&str>, new: Option<&str>) -> bool {
 fn update_engine(ctx: &Ctx, dry_run: bool) -> Result<(), ChekovError> {
     use crate::core::engine;
     let dir = ctx.config.engine_dir();
+    let pin = ctx.config.file.engine.git_ref.as_deref();
     let before = engine::current_commit(&dir).unwrap_or_else(|| "none".into());
-    engine::run_steps(&engine::setup_steps(&dir), dry_run)?;
+    engine::run_steps(&engine::setup_steps(&dir, pin), dry_run)?;
     let after = engine::current_commit(&dir).unwrap_or_else(|| "none".into());
-    println!("engine: {before} → {after}");
+    let pinned = pin.map_or_else(String::new, |r| format!(" (pinned to {r})"));
+    println!("engine: {before} → {after}{pinned}");
     if dry_run {
         return Ok(());
     }
@@ -183,13 +203,13 @@ fn update_model(ctx: &Ctx, dry_run: bool) -> Result<(), ChekovError> {
 
 impl Command for UpdateCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
-        if !(self.engine || self.model || self.all) {
+        if self.target.is_empty() {
             return Err(ChekovError::UpdateFlagsMissing);
         }
-        if self.engine || self.all {
+        if self.target.wants_engine() {
             update_engine(ctx, self.dry_run)?;
         }
-        if self.model || self.all {
+        if self.target.wants_model() {
             update_model(ctx, self.dry_run)?;
         }
         Ok(ExitCode::SUCCESS)

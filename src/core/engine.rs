@@ -47,13 +47,59 @@ fn git_step(engine_dir: &Path) -> EngineStep {
     }
 }
 
+/// Pinned: fetch the ref by name and check it out detached. No `--branch` on
+/// the clone (a sha cannot be cloned by name) and never a pull — the pin, not
+/// upstream's HEAD of the day, decides what gets built.
+fn pinned_steps(engine_dir: &Path, git_ref: &str) -> Vec<EngineStep> {
+    let dir = engine_dir.display().to_string();
+    let git = |desc: &str, args: &[&str]| EngineStep {
+        desc: desc.into(),
+        program: "git".into(),
+        args: ["-C", &dir]
+            .into_iter()
+            .chain(args.iter().copied())
+            .map(String::from)
+            .collect(),
+        cwd: None,
+    };
+    let mut steps = Vec::new();
+    if !engine_dir.join(".git").exists() {
+        steps.push(EngineStep {
+            desc: "clone llama.cpp".into(),
+            program: "git".into(),
+            args: ["clone", LLAMA_CPP_GIT, &dir].map(String::from).to_vec(),
+            cwd: None,
+        });
+    }
+    steps.push(git(
+        &format!("fetch llama.cpp ref {git_ref}"),
+        &["fetch", "origin", git_ref],
+    ));
+    steps.push(git(
+        &format!("check out {git_ref} (detached)"),
+        &["checkout", "--detach", "FETCH_HEAD"],
+    ));
+    steps
+}
+
 /// The steps to bring the engine to a built state: clone (first time) or
-/// pull (thereafter), cmake configure with Metal, cmake build the targets.
+/// pull (thereafter) — or, pinned, fetch and detach the ref — then cmake
+/// configure with Metal and cmake build the targets.
 #[must_use]
-pub fn setup_steps(engine_dir: &Path) -> Vec<EngineStep> {
+pub fn setup_steps(engine_dir: &Path, git_ref: Option<&str>) -> Vec<EngineStep> {
+    let mut steps = git_ref.map_or_else(
+        || vec![git_step(engine_dir)],
+        |git_ref| pinned_steps(engine_dir, git_ref),
+    );
+    steps.push(configure_step(engine_dir));
+    steps.push(compile_step(engine_dir));
+    steps
+}
+
+fn configure_step(engine_dir: &Path) -> EngineStep {
     let dir = engine_dir.display().to_string();
     let build = engine_dir.join("build").display().to_string();
-    let configure = EngineStep {
+    EngineStep {
         desc: "configure cmake (Metal)".into(),
         program: "cmake".into(),
         args: [
@@ -67,7 +113,11 @@ pub fn setup_steps(engine_dir: &Path) -> Vec<EngineStep> {
         .map(String::from)
         .to_vec(),
         cwd: None,
-    };
+    }
+}
+
+fn compile_step(engine_dir: &Path) -> EngineStep {
+    let build = engine_dir.join("build").display().to_string();
     // Bare `-j` reaches make with no number: unbounded jobs and no jobserver.
     // One job per logical core is what a reader already assumes it means.
     let jobs = format!(
@@ -81,13 +131,12 @@ pub fn setup_steps(engine_dir: &Path) -> Vec<EngineStep> {
         build_args.push("--target".into());
         build_args.push(target.into());
     }
-    let compile = EngineStep {
+    EngineStep {
         desc: "build llama.cpp targets".into(),
         program: "cmake".into(),
         args: build_args,
         cwd: None,
-    };
-    vec![git_step(engine_dir), configure, compile]
+    }
 }
 
 /// Where the built server binary lands.
@@ -175,10 +224,53 @@ mod tests {
         dir
     }
 
+    fn rendered(steps: &[super::EngineStep]) -> Vec<String> {
+        steps.iter().map(super::EngineStep::render).collect()
+    }
+
+    #[test]
+    fn a_pinned_fresh_dir_clones_then_fetches_and_detaches_the_ref() {
+        let dir = scratch("eng-pinned-fresh");
+        let steps = rendered(&setup_steps(&dir, Some("b7000")));
+        assert!(steps[0].starts_with("git clone"), "{steps:?}");
+        // No `--branch`: a sha is a valid pin and clone cannot take one.
+        assert!(!steps[0].contains("--branch"), "{steps:?}");
+        assert!(
+            steps[1].contains("fetch origin b7000"),
+            "the ref is fetched by name: {steps:?}"
+        );
+        assert!(
+            steps[2].contains("checkout --detach FETCH_HEAD"),
+            "and checked out detached: {steps:?}"
+        );
+        assert!(
+            !steps.iter().any(|s| s.contains("pull")),
+            "a pinned engine never pulls: {steps:?}"
+        );
+        assert!(
+            steps.iter().any(|s| s.contains("-DGGML_METAL=ON")),
+            "{steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_existing_checkout_fetches_and_detaches_without_pulling() {
+        let dir = scratch("eng-pinned-existing");
+        std::fs::create_dir_all(dir.join(".git")).expect("fake checkout");
+        let steps = rendered(&setup_steps(&dir, Some("v1.2.3")));
+        assert!(!steps.iter().any(|s| s.contains("clone")), "{steps:?}");
+        assert!(!steps.iter().any(|s| s.contains("pull")), "{steps:?}");
+        assert!(steps[0].contains("fetch origin v1.2.3"), "{steps:?}");
+        assert!(
+            steps[1].contains("checkout --detach FETCH_HEAD"),
+            "{steps:?}"
+        );
+    }
+
     #[test]
     fn fresh_dir_clones_then_builds_metal() {
         let dir = scratch("eng-fresh");
-        let steps = setup_steps(&dir);
+        let steps = setup_steps(&dir, None);
         let rendered: Vec<String> = steps.iter().map(super::EngineStep::render).collect();
         assert!(rendered[0].starts_with("git clone"), "{rendered:?}");
         assert!(
@@ -210,7 +302,7 @@ mod tests {
 
     #[test]
     fn the_build_bounds_its_job_count() {
-        let steps = setup_steps(&scratch("jobs").join("llama.cpp"));
+        let steps = setup_steps(&scratch("jobs").join("llama.cpp"), None);
         let build = steps
             .iter()
             .map(super::EngineStep::render)
@@ -239,7 +331,7 @@ mod tests {
     fn existing_checkout_pulls_instead_of_cloning() {
         let dir = scratch("eng-existing");
         std::fs::create_dir_all(dir.join(".git")).expect("fake checkout");
-        let steps = setup_steps(&dir);
+        let steps = setup_steps(&dir, None);
         assert!(steps[0].render().starts_with("git "), "{:?}", steps[0]);
         assert!(steps[0].render().contains("pull"), "{:?}", steps[0]);
     }

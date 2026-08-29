@@ -17,7 +17,8 @@ impl Command for SetupCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
         use crate::core::{checks, engine};
         let cfg = &ctx.config;
-        engine::run_steps(&engine::setup_steps(&cfg.engine_dir()), self.dry_run)?;
+        let pin = cfg.file.engine.git_ref.as_deref();
+        engine::run_steps(&engine::setup_steps(&cfg.engine_dir(), pin), self.dry_run)?;
         for dir in [cfg.models_dir(), cfg.logs_dir()] {
             std::fs::create_dir_all(&dir)
                 .map_err(|e| ChekovError::io(format!("creating {}", dir.display()), e))?;
