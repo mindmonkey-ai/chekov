@@ -127,6 +127,17 @@ All notable changes to chekov are recorded here. The format follows
   is over-claimed: slice B (`cross_file_first` tasks with `input_extra`
   context, and tiers 6–7 behind `--allow-exec`), slice C (`--judge`), other
   languages behind the same `MaskSource` trait, and any composite score.
+  The report's header reads `{n} tasks from {files} files ({a} in_file,
+  {b} function_body) — boundary-scanned (not AST); context: same-file (engine
+  window ≤ n_batch)`: chekov sends and grades the whole file, but llama.cpp's
+  `/infill` windows the prompt at its batch size, so a long file reaches the
+  model only in part and the header says so rather than implying otherwise.
+  `N/A — infill unsupported by this model` is reserved for a run where NOTHING
+  was answered and the reason names infill; a run that failed for another
+  reason reports that reason, and a run where only some tasks failed excludes
+  them from every mean and counts them in the header (`(k unavailable,
+  excluded)`). A task nobody answered stores no tier-5 score at all — the
+  symbols cell reads `n/a` rather than averaging in a zero.
 
 ### Fixed
 - **The non-streaming translator keeps extracted reasoning, as the streaming
