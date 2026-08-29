@@ -115,10 +115,15 @@ pub struct BenchOpts {
     /// Skip the confirm gate that any launch step requires.
     #[arg(long)]
     pub yes: bool,
-    /// Which task sets to measure. Default stays `throughput` until the
-    /// agentic probe set reaches the spec's full case counts.
-    #[arg(long, value_enum, default_value_t = crate::core::bench::lifecycle::Suite::Throughput)]
-    pub suite: crate::core::bench::lifecycle::Suite,
+    /// Which task sets to measure. Default `throughput`; unset with
+    /// `--codebase` means only the codebase set.
+    #[arg(long, value_enum)]
+    pub suite: Option<crate::core::bench::lifecycle::Suite>,
+    /// The user's own Rust repository as graded infill tasks (spec §8, slice
+    /// A). Refuses a dirty tree; reads from a detached worktree. Given alone,
+    /// only the codebase set runs.
+    #[arg(long, conflicts_with = "fixture")]
+    pub codebase: Option<std::path::PathBuf>,
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -776,7 +781,8 @@ struct BenchArgs<'a> {
     models: &'a [String],
     dry_run: bool,
     yes: bool,
-    suite: crate::core::bench::lifecycle::Suite,
+    suite: Option<crate::core::bench::lifecycle::Suite>,
+    codebase: Option<&'a std::path::Path>,
 }
 
 impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
@@ -787,26 +793,133 @@ impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
             models: &opts.models,
             dry_run: opts.dry_run,
             yes: opts.yes,
-            suite: opts.suite,
+            suite: effective_suite(opts.suite, opts.codebase.is_some()),
+            codebase: opts.codebase.as_deref(),
         }
     }
+}
+
+/// `--suite` not passed means `throughput` — unless `--codebase` is given, in
+/// which case nothing beyond the codebase set runs.
+fn effective_suite(
+    passed: Option<crate::core::bench::lifecycle::Suite>,
+    codebase: bool,
+) -> Option<crate::core::bench::lifecycle::Suite> {
+    use crate::core::bench::lifecycle::Suite;
+    passed.or(if codebase {
+        None
+    } else {
+        Some(Suite::Throughput)
+    })
+}
+
+fn codebase_corpus_id(head: &str, set_hash: &str) -> String {
+    format!("codebase:{}:{set_hash}", &head[..12.min(head.len())])
+}
+
+/// `--codebase`'s gate-through-sample step, or nothing when it wasn't asked
+/// for — the one call that touches the user's repository.
+fn prepare_codebase(
+    ctx: &Ctx,
+    args: &BenchArgs,
+) -> Result<Option<crate::core::bench::codebase::Prepared>, ChekovError> {
+    match args.codebase {
+        Some(repo) => Ok(Some(crate::core::bench::codebase::prepare(
+            repo,
+            &ctx.config.eval_dir().join("codebase-tree"),
+            ctx.config.file.bench.codebase_tasks,
+        )?)),
+        None => Ok(None),
+    }
+}
+
+/// One candidate's launch inputs, bundled so no callee below grows past 3
+/// params (§4).
+struct RunInputs<'a> {
+    args: &'a BenchArgs<'a>,
+    prepared: Option<&'a crate::core::bench::codebase::Prepared>,
+}
+
+/// `codebase: {n} tasks from {repo} @ {head[..12]}`, with the shortfall
+/// parenthetical appended only when sampling actually fell short.
+fn codebase_plan_line(
+    prepared: &crate::core::bench::codebase::Prepared,
+    repo: &std::path::Path,
+) -> String {
+    let head12 = &prepared.head[..12.min(prepared.head.len())];
+    let shortfall = if prepared.shortfall.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", prepared.shortfall.join(", "))
+    };
+    format!(
+        "codebase: {} tasks from {} @ {head12}{shortfall}\n",
+        prepared.tasks.len(),
+        repo.display()
+    )
+}
+
+/// The plan's steps, one per candidate.
+fn bench_steps(
+    ctx: &Ctx,
+    candidates: &[(
+        crate::core::registry::Effective,
+        crate::core::bench::lifecycle::StepAction,
+    )],
+) -> Vec<crate::core::bench::lifecycle::BenchStep> {
+    candidates
+        .iter()
+        .map(|(eff, action)| crate::core::bench::lifecycle::BenchStep {
+            model: eff.name.clone(),
+            action: *action,
+            weights_bytes: weights_on_disk(ctx, &eff.entry),
+        })
+        .collect()
+}
+
+/// The wall-clock estimate: the sweep, the agentic crossings, and the
+/// codebase set (6s per sampled task).
+fn bench_estimate(
+    steps: &[crate::core::bench::lifecycle::BenchStep],
+    plan: &crate::core::bench::sweep::SweepPlan,
+    inputs: &RunInputs,
+) -> Result<u64, ChekovError> {
+    use crate::core::bench::lifecycle;
+    let codebase_secs = inputs.prepared.map_or(0, |p| p.tasks.len() as u64 * 6);
+    Ok(lifecycle::estimate_secs(steps, plan)
+        + agentic_estimate_secs(inputs.args.suite)?
+        + codebase_secs)
+}
+
+/// The dry-run plan: the codebase line (when prepared) ahead of the step
+/// table.
+fn render_dry_run(
+    steps: &[crate::core::bench::lifecycle::BenchStep],
+    estimate: u64,
+    inputs: &RunInputs,
+) -> String {
+    use crate::core::bench::lifecycle::render_plan;
+    let mut out = String::new();
+    if let (Some(p), Some(repo)) = (inputs.prepared, inputs.args.codebase) {
+        out.push_str(&codebase_plan_line(p, repo));
+    }
+    out.push_str(&render_plan(steps, estimate));
+    out
 }
 
 fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
     use crate::core::bench::{lifecycle, sweep};
     let candidates = resolve_candidates(ctx, args)?;
+    let prepared = prepare_codebase(ctx, args)?;
+    let inputs = RunInputs {
+        args,
+        prepared: prepared.as_ref(),
+    };
     let plan: sweep::SweepPlan = (&ctx.config.file.bench).into();
-    let steps: Vec<lifecycle::BenchStep> = candidates
-        .iter()
-        .map(|(eff, action)| lifecycle::BenchStep {
-            model: eff.name.clone(),
-            action: *action,
-            weights_bytes: weights_on_disk(ctx, &eff.entry),
-        })
-        .collect();
-    let estimate = lifecycle::estimate_secs(&steps, &plan) + agentic_estimate_secs(args.suite)?;
+    let steps = bench_steps(ctx, &candidates);
+    let estimate = bench_estimate(&steps, &plan, &inputs)?;
     if args.dry_run {
-        print!("{}", lifecycle::render_plan(&steps, estimate));
+        print!("{}", render_dry_run(&steps, estimate, &inputs));
         return Ok(ExitCode::SUCCESS);
     }
     if lifecycle::needs_confirm(&steps) {
@@ -820,7 +933,7 @@ fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
         )?;
     }
     for candidate in &candidates {
-        let dir = run_candidate(ctx, candidate, args)?;
+        let dir = run_candidate(ctx, candidate, &inputs)?;
         println!("run: {}", dir.display());
     }
     Ok(ExitCode::SUCCESS)
@@ -834,7 +947,7 @@ fn run_candidate(
         crate::core::registry::Effective,
         crate::core::bench::lifecycle::StepAction,
     ),
-    args: &BenchArgs,
+    inputs: &RunInputs,
 ) -> Result<std::path::PathBuf, ChekovError> {
     use crate::core::bench::lifecycle::StepAction;
     let (eff, action) = candidate;
@@ -848,38 +961,48 @@ fn run_candidate(
         eff: eff.clone(),
         pid,
     };
-    let dir = measure_candidate(ctx, &setup, args)?;
+    let dir = measure_candidate(ctx, &setup, inputs)?;
     if *action == StepAction::Launch {
         teardown_candidate(ctx, pid)?;
     }
     Ok(dir)
 }
 
+/// `HeadInputs` from the candidate's props plus the run's own bundle (§4 —
+/// keeps `measure_candidate` under the line limit).
+fn head_inputs<'a>(
+    props: crate::core::bench::runner::PropsInfo,
+    plan: &'a crate::core::bench::sweep::SweepPlan,
+    inputs: &'a RunInputs,
+) -> HeadInputs<'a> {
+    HeadInputs {
+        props,
+        plan,
+        fixture: inputs.args.fixture,
+        suite: inputs.args.suite,
+        codebase: inputs
+            .prepared
+            .map(|p| (p.head.as_str(), p.set_hash.as_str())),
+    }
+}
+
 /// Readiness through rendering for one already-up server.
 fn measure_candidate(
     ctx: &Ctx,
     setup: &BenchSetup,
-    args: &BenchArgs,
+    inputs: &RunInputs,
 ) -> Result<std::path::PathBuf, ChekovError> {
     use crate::core::bench::{store, sweep};
     use crate::core::proxy::serve::Upstream;
     let cfg = &ctx.config;
+    let args = inputs.args;
     let upstream = Upstream {
         base_url: cfg.base_url(),
         api_key: cfg.file.server.api_key.clone(),
     };
     let props = ensure_ready(ctx, &upstream, setup)?;
     let plan: sweep::SweepPlan = (&cfg.file.bench).into();
-    let head = build_head(
-        ctx,
-        setup,
-        &HeadInputs {
-            props,
-            plan: &plan,
-            fixture: args.fixture,
-            suite: args.suite,
-        },
-    )?;
+    let head = build_head(ctx, setup, &head_inputs(props, &plan, inputs))?;
     let (mut writer, done) = open_run(ctx, &head, args.resume)?;
     run_suites(
         &mut TaskSink {
@@ -893,6 +1016,7 @@ fn measure_candidate(
             model: &setup.eff.name,
             fixture: args.fixture,
             suite: args.suite,
+            prepared: inputs.prepared,
         },
     )?;
     print!("{}", store::render_run(&store::RunLog::load(writer.dir())?));
@@ -954,10 +1078,12 @@ struct SuiteInputs<'a> {
     upstream: &'a crate::core::proxy::serve::Upstream,
     model: &'a str,
     fixture: Option<&'a std::path::Path>,
-    suite: crate::core::bench::lifecycle::Suite,
+    suite: Option<crate::core::bench::lifecycle::Suite>,
+    prepared: Option<&'a crate::core::bench::codebase::Prepared>,
 }
 
 fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<(), ChekovError> {
+    use crate::core::bench::lifecycle::Suite;
     use crate::core::bench::runner;
     use crate::core::proxy::claude::ClaudeFacade;
     let facade = ClaudeFacade::new(inputs.model);
@@ -969,14 +1095,17 @@ fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<()
             seed: ctx.config.file.bench.seed,
         },
     };
-    if inputs.suite.runs_throughput() {
+    if inputs.suite.is_some_and(Suite::runs_throughput) {
         run_throughput(sink, inputs.plan, &wire)?;
     }
-    if inputs.suite.runs_agentic() {
+    if inputs.suite.is_some_and(Suite::runs_agentic) {
         run_agentic(sink, &wire)?;
     }
     if let Some(path) = inputs.fixture {
         run_fixture(sink, &wire, path)?;
+    }
+    if let Some(prepared) = inputs.prepared {
+        run_codebase(sink, &wire, prepared)?;
     }
     Ok(())
 }
@@ -984,8 +1113,11 @@ fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<()
 /// Rough extra seconds for the agentic suites (8s per crossing), from the
 /// validated set — a suite that will not run costs nothing. Unconstrained
 /// cases cross twice (both doors); the forced pass once.
-fn agentic_estimate_secs(suite: crate::core::bench::lifecycle::Suite) -> Result<u64, ChekovError> {
-    if !suite.runs_agentic() {
+fn agentic_estimate_secs(
+    suite: Option<crate::core::bench::lifecycle::Suite>,
+) -> Result<u64, ChekovError> {
+    use crate::core::bench::lifecycle::Suite;
+    if !suite.is_some_and(Suite::runs_agentic) {
         return Ok(0);
     }
     let set = crate::core::bench::probeset::agentic_v0()?;
@@ -1325,6 +1457,145 @@ fn run_fixture(
     Ok(())
 }
 
+/// The zeroed `Measure` a task that never ran records — nothing was timed,
+/// so nothing is invented.
+const fn empty_measure() -> crate::core::bench::store::Measure {
+    crate::core::bench::store::Measure {
+        prompt_n: 0,
+        decode_samples: vec![],
+        prefill_samples: vec![],
+        warmup_dropped: 0,
+        cache_n: 0,
+    }
+}
+
+/// One codebase task through `/infill`, or the sticky "unsupported" reason
+/// once this model has refused FIM once — a capability gap, never fired
+/// twice.
+fn infill_or_latch(
+    wire: &crate::core::bench::runner::ProbeWire,
+    task: &crate::core::bench::codebase::CodebaseTask,
+    latch: &mut Option<String>,
+) -> Result<Result<crate::core::bench::runner::ProbeArtifact, String>, ChekovError> {
+    use crate::core::bench::runner::{InfillOutcome, InfillTask, cross_infill};
+    if let Some(reason) = latch {
+        return Ok(Err(reason.clone()));
+    }
+    let infill_task = InfillTask {
+        prefix: &task.prefix,
+        suffix: &task.suffix,
+        gold_lines: task.gold.lines().count().max(1),
+    };
+    match cross_infill(wire, &infill_task)? {
+        InfillOutcome::Answered(artifact) => Ok(Ok(artifact)),
+        InfillOutcome::Unsupported(reason) => {
+            eprintln!(
+                "chekov bench: infill unsupported by this model — codebase is N/A ({reason})"
+            );
+            *latch = Some(reason.clone());
+            Ok(Err(reason))
+        }
+    }
+}
+
+/// What one codebase task's outcome needs to become a row (§4 — keeps
+/// `record_codebase_task` at 3 params).
+struct Recorded<'a> {
+    outcome: Result<crate::core::bench::runner::ProbeArtifact, String>,
+    symbols: &'a crate::core::bench::codebase::ladder::Symbols,
+}
+
+/// Tier 5 for one prediction against the worktree's symbol set — 0.0 when
+/// the prediction is empty (the N/A path never displays it).
+fn symbols_tier_score(
+    task: &crate::core::bench::codebase::CodebaseTask,
+    prediction: &str,
+    symbols: &crate::core::bench::codebase::ladder::Symbols,
+) -> f64 {
+    use crate::core::bench::codebase::ladder::{Score, Scored, Tier, score_all};
+    score_all(&Scored {
+        task,
+        prediction,
+        symbols,
+    })
+    .into_iter()
+    .find_map(|(tier, score)| match (tier, score) {
+        (Tier::Symbols, Score::Value(v)) => Some(v),
+        _ => None,
+    })
+    .unwrap_or(0.0)
+}
+
+/// Assemble and append one codebase row: an answered task's raw prediction,
+/// or an unsupported one's N/A — tier 5 scored against the worktree's symbol
+/// set either way (empty prediction scores 0).
+fn record_codebase_task(
+    sink: &mut TaskSink,
+    task: &crate::core::bench::codebase::CodebaseTask,
+    recorded: Recorded,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::store;
+    let (measure, grade, prediction) = match recorded.outcome {
+        Ok(artifact) => (
+            probe_measure(&artifact.timings),
+            None,
+            artifact.anthropic_body,
+        ),
+        Err(reason) => (
+            empty_measure(),
+            Some(store::GradeRow::unavailable(reason)),
+            String::new(),
+        ),
+    };
+    let symbols_score = symbols_tier_score(task, &prediction, recorded.symbols);
+    sink.writer.append(store::Task {
+        suite: "codebase".into(),
+        task_id: task.id.clone(),
+        measure,
+        grade,
+        transport: store::Transport::Buffered,
+        codebase: Some(store::CodebaseRow {
+            tier: task.tier,
+            file: task.file.clone(),
+            line: task.line,
+            label: crate::core::bench::codebase::MASK_LABEL.to_owned(),
+            gold: task.gold.clone(),
+            prediction,
+            prefix: task.prefix.clone(),
+            suffix: task.suffix.clone(),
+            excluded: task.excluded.clone(),
+            symbols_score,
+        }),
+    })
+}
+
+/// Every sampled task through `/infill`, recorded with its raw prediction. A
+/// model without FIM records every task unavailable with the reason and
+/// stops firing — a capability, never a zero.
+fn run_codebase(
+    sink: &mut TaskSink,
+    wire: &crate::core::bench::runner::ProbeWire,
+    prepared: &crate::core::bench::codebase::Prepared,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::store::TaskKey;
+    let mut unsupported: Option<String> = None;
+    for task in &prepared.tasks {
+        if sink.is_done(&TaskKey::buffered("codebase", &task.id)) {
+            continue;
+        }
+        let outcome = infill_or_latch(wire, task, &mut unsupported)?;
+        record_codebase_task(
+            sink,
+            task,
+            Recorded {
+                outcome,
+                symbols: &prepared.symbols,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// A crossing that never completed is UNAVAILABLE, not a failure — for every
 /// suite, not just the forced one.
 ///
@@ -1337,16 +1608,9 @@ fn failed_probe(
     crate::core::bench::store::Measure,
     crate::core::bench::store::GradeRow,
 ) {
-    use crate::core::bench::store;
     (
-        store::Measure {
-            prompt_n: 0,
-            decode_samples: vec![],
-            prefill_samples: vec![],
-            warmup_dropped: 0,
-            cache_n: 0,
-        },
-        store::GradeRow::unavailable(e.to_string()),
+        empty_measure(),
+        crate::core::bench::store::GradeRow::unavailable(e.to_string()),
     )
 }
 
@@ -1375,7 +1639,10 @@ struct HeadInputs<'a> {
     props: crate::core::bench::runner::PropsInfo,
     plan: &'a crate::core::bench::sweep::SweepPlan,
     fixture: Option<&'a std::path::Path>,
-    suite: crate::core::bench::lifecycle::Suite,
+    suite: Option<crate::core::bench::lifecycle::Suite>,
+    /// The codebase run's head and task-set hash, when there is one — drives
+    /// `corpus_id` ahead of `suite`/`fixture`.
+    codebase: Option<(&'a str, &'a str)>,
 }
 
 /// Who measured: the hashed machine identity, its human-readable brand, and
@@ -1399,17 +1666,36 @@ fn stamp_identity(
     Ok((machine_id, probed.chip, engine))
 }
 
+/// The stamp's prompt-set hash and corpus id — split out since both read
+/// `inputs.suite` and the seed together (§4, and keeps `build_head` short).
+fn head_corpus(
+    inputs: &HeadInputs,
+    bench_cfg: &crate::core::config::BenchSection,
+) -> Result<(String, String), ChekovError> {
+    use crate::core::bench::probes;
+    let prompt_set_hash = inputs.suite.map_or_else(
+        || "codebase-only".to_owned(),
+        |suite| probes::suite_prompt_hash(suite, inputs.plan, bench_cfg.seed),
+    );
+    let corpus = match inputs.codebase {
+        Some((head, set_hash)) => codebase_corpus_id(head, set_hash),
+        None => corpus_id(inputs.suite, inputs.fixture)?,
+    };
+    Ok((prompt_set_hash, corpus))
+}
+
 fn build_head(
     ctx: &Ctx,
     setup: &BenchSetup,
     inputs: &HeadInputs,
 ) -> Result<crate::core::bench::store::RunHead, ChekovError> {
-    use crate::core::bench::{probes, stamp, store};
+    use crate::core::bench::{stamp, store};
     let cfg = &ctx.config;
     let (machine_id, machine_brand, engine) = stamp_identity(cfg)?;
     let launch_args = crate::core::server::launch_args(cfg, &setup.eff);
     let bench_cfg = &cfg.file.bench;
     let flags = stamped_flags(&launch_args);
+    let (prompt_set_hash, corpus_id) = head_corpus(inputs, bench_cfg)?;
     let head_stamp = stamp::Stamp {
         machine_id,
         engine_build_commit: engine,
@@ -1429,13 +1715,13 @@ fn build_head(
         seed: bench_cfg.seed,
         temperature_milli: 0,
         chekov_version: env!("CARGO_PKG_VERSION").to_owned(),
-        prompt_set_hash: probes::suite_prompt_hash(inputs.suite, inputs.plan, bench_cfg.seed),
-        corpus_id: corpus_id(inputs.suite, inputs.fixture)?,
+        prompt_set_hash,
+        corpus_id,
     };
     // Only a run with a forced pass has a forced reasoning mode to record.
     let forced_reasoning_format = inputs
         .suite
-        .runs_agentic()
+        .is_some_and(crate::core::bench::lifecycle::Suite::runs_agentic)
         .then(|| crate::core::bench::runner::FORCED_REASONING_FORMAT.to_owned());
     Ok(store::RunHead {
         model: setup.eff.name.clone(),
@@ -1471,7 +1757,7 @@ fn stamped_flags(launch_args: &[String]) -> StampedFlags {
 /// The task-set identity, from what the run actually measures — runs over
 /// different task sets must never compare as the same set.
 fn corpus_id(
-    suite: crate::core::bench::lifecycle::Suite,
+    suite: Option<crate::core::bench::lifecycle::Suite>,
     fixture: Option<&std::path::Path>,
 ) -> Result<String, ChekovError> {
     use crate::core::bench::lifecycle::Suite;
@@ -1482,9 +1768,13 @@ fn corpus_id(
         )
     };
     let mut id = match suite {
-        Suite::Throughput => "throughput-v1".to_owned(),
-        Suite::Agentic => agentic(),
-        Suite::All => format!("throughput-v1+{}", agentic()),
+        Some(Suite::Throughput) => "throughput-v1".to_owned(),
+        Some(Suite::Agentic) => agentic(),
+        Some(Suite::All) => format!("throughput-v1+{}", agentic()),
+        // Unreachable from `build_head` (that arm only runs when `codebase`
+        // is `None`, and `suite` is `None` only alongside a codebase run) —
+        // kept honest rather than `unreachable!()`.
+        None => "codebase-only".to_owned(),
     };
     if let Some(path) = fixture {
         let text = std::fs::read_to_string(path).map_err(|e| ChekovError::FixtureInvalid {
@@ -1619,11 +1909,7 @@ mod tests {
         match cli.cmd {
             crate::cli::Cmd::Capability(cap) => match cap.action {
                 Some(super::CapAction::Bench(opts)) => {
-                    assert_eq!(
-                        opts.suite,
-                        Suite::Throughput,
-                        "deviation held until full strength"
-                    );
+                    assert_eq!(opts.suite, None, "--suite not passed");
                 }
                 other => panic!("expected Bench, got {other:?}"),
             },
@@ -1639,11 +1925,65 @@ mod tests {
         .expect("parses");
         match cli.cmd {
             crate::cli::Cmd::Capability(cap) => match cap.action {
-                Some(super::CapAction::Bench(opts)) => assert_eq!(opts.suite, Suite::Agentic),
+                Some(super::CapAction::Bench(opts)) => {
+                    assert_eq!(opts.suite, Some(Suite::Agentic));
+                }
                 other => panic!("expected Bench, got {other:?}"),
             },
             _ => panic!("expected capability"),
         }
+    }
+
+    #[test]
+    fn codebase_and_fixture_conflict_and_suite_is_optional() {
+        use clap::Parser;
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "chekov",
+                "capability",
+                "bench",
+                "--codebase",
+                ".",
+                "--fixture",
+                "f.toml"
+            ])
+            .is_err(),
+            "mutually exclusive"
+        );
+        let cli =
+            crate::cli::Cli::try_parse_from(["chekov", "capability", "bench", "--codebase", "."])
+                .expect("parses");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Bench(opts)) => {
+                    assert_eq!(opts.codebase.as_deref(), Some(std::path::Path::new(".")));
+                    assert_eq!(opts.suite, None, "--suite not passed");
+                }
+                other => panic!("expected Bench, got {other:?}"),
+            },
+            _ => panic!("expected capability"),
+        }
+    }
+
+    #[test]
+    fn the_effective_suite_is_throughput_by_default_and_nothing_extra_with_codebase_alone() {
+        use crate::core::bench::lifecycle::Suite;
+        assert_eq!(super::effective_suite(None, false), Some(Suite::Throughput));
+        assert_eq!(
+            super::effective_suite(None, true),
+            None,
+            "codebase alone runs only codebase"
+        );
+        assert_eq!(
+            super::effective_suite(Some(Suite::All), true),
+            Some(Suite::All)
+        );
+    }
+
+    #[test]
+    fn the_codebase_corpus_id_pins_head_and_the_task_set() {
+        let id = super::codebase_corpus_id("0123456789abcdef0123", "fedcba987654");
+        assert_eq!(id, "codebase:0123456789ab:fedcba987654");
     }
 
     #[test]
@@ -1750,11 +2090,11 @@ mod tests {
         // forced pass crosses once.
         let cases = 2 * set.tool_emit.len() + forced + 2 * set.instruction.len();
         assert_eq!(
-            super::agentic_estimate_secs(Suite::Agentic).expect("estimate"),
+            super::agentic_estimate_secs(Some(Suite::Agentic)).expect("estimate"),
             cases as u64 * 8
         );
         assert_eq!(
-            super::agentic_estimate_secs(Suite::Throughput).expect("estimate"),
+            super::agentic_estimate_secs(Some(Suite::Throughput)).expect("estimate"),
             0
         );
     }
