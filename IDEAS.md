@@ -97,7 +97,13 @@ loaded, which can differ from the registry's intent indefinitely (the
 llama-server's `/props` for `n_ctx` and comparing it to the effective
 `ctx_size`. A new check is new capability, and it touches every "five checks"
 doc surface, so it waits here.
-Proposed 2026-08-27 — status: OPEN
+SHIPPED 2026-08-29 as the sixth row, "context loaded (server /props)",
+reusing the bench's `runner::assert_props_ctx` verbatim (doctor and bench
+cannot disagree). `/props` is behind `--api-key`, so doctor passes
+`serve::get_bearer` through the bench's `PropsFetch` seam — no change to the
+`HttpClient` trait or any fake. Unreachable = FAIL, like the other server
+rows. Every "five checks" surface now says six.
+Proposed 2026-08-27 — status: SHIPPED
 
 ## Machine capability scan, frontier graph, recommendations and agent bench (2026-08-25)
 `chekov capability {scan,graph,recommend,explain,bench,compare}` — probe the machine

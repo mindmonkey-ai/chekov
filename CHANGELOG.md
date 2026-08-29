@@ -16,6 +16,13 @@ All notable changes to chekov are recorded here. The format follows
   only on a real refusal now, never on a dead socket.
 
 ### Added
+- `doctor` gains a sixth check, **context loaded (server /props)**: the
+  per-slot `n_ctx` the server actually loaded must equal the effective
+  `ctx_size` — the same assertion the bench makes before recording a run, so
+  the two can never disagree. The fifth row only ever compared `models.toml`
+  to `config.toml` and could PASS with the server down; this is the row that
+  speaks for the server. A mismatch fails naming both numbers; an unreachable
+  `/props` fails like the other server checks — never SKIP, never PASS.
 - The bench's grammar-forced pass asks the engine to extract reasoning
   (`reasoning_format: deepseek`) on that wire only, so `grammar_gap` is
   measurable on thinking-prefill templates (ornith, the Qwen/Hermes family)

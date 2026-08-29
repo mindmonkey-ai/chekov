@@ -1,4 +1,4 @@
-//! `chekov doctor` — five independent checks, summary table, non-zero exit on
+//! `chekov doctor` — six independent checks, summary table, non-zero exit on
 //! any failure. Skipped checks are reported as skipped, never as passed.
 
 use std::process::ExitCode;
@@ -26,23 +26,45 @@ pub struct CheckResult {
     pub status: CheckStatus,
 }
 
-/// Run all five checks — four against the server (via the HTTP seam — tests inject
-/// canned responses).
-pub fn run_checks(http: &dyn HttpClient, cfg: &Config, eff: &Effective) -> Vec<CheckResult> {
+/// The two ways doctor reaches the server: the HTTP seam for the doors, and
+/// the authenticated `/props` fetch (behind `--api-key`) the bench also uses.
+/// Tests inject canned responses through both.
+pub struct Doors<'a> {
+    pub http: &'a dyn HttpClient,
+    pub props: &'a crate::core::bench::runner::PropsFetch<'a>,
+}
+
+/// Run all six checks — five against the server, one comparing configuration.
+#[must_use]
+pub fn run_checks(doors: &Doors, cfg: &Config, eff: &Effective) -> Vec<CheckResult> {
+    let http = doors.http;
     let (openai, content) = check_openai(http, cfg, eff);
     let anthropic = check_anthropic(http, cfg, eff);
     let think = check_think(eff, content.as_deref());
     let canary = check_canary(http, cfg, eff);
     let ctx_floor = check_ctx(cfg, eff);
+    let ctx_live = check_ctx_live(doors.props, eff);
     [
         ("OpenAI door (/v1/chat/completions)", openai),
         ("Anthropic door (/v1/messages)", anthropic),
         ("think-tag retention", think),
         ("NaN canary (degenerate output)", canary),
         ("context floor (config, not the server)", ctx_floor),
+        ("context loaded (server /props)", ctx_live),
     ]
     .map(|(name, status)| CheckResult { name, status })
     .to_vec()
+}
+
+/// The context the server ACTUALLY loaded, against the registry's intent —
+/// the same assertion the bench makes before it records a run, so doctor
+/// and bench can never disagree about what "the right context" means. A
+/// server check that cannot reach the server fails like the other four.
+fn check_ctx_live(props: &crate::core::bench::runner::PropsFetch, eff: &Effective) -> CheckStatus {
+    match crate::core::bench::runner::assert_props_ctx(props, eff.ctx_size) {
+        Ok(_) => CheckStatus::Pass,
+        Err(e) => CheckStatus::Fail(e.to_string()),
+    }
 }
 
 fn chat_body(eff: &Effective, prompt: &str, max_tokens: u32) -> String {
@@ -165,7 +187,16 @@ impl Command for DoctorCmd {
         let name = crate::core::server::read_run_state(&ctx.config)
             .unwrap_or(reg.active_name()?.to_owned());
         let eff = reg.effective(&name)?;
-        let results = run_checks(ctx.http.as_ref(), &ctx.config, &eff);
+        let upstream = crate::core::proxy::serve::Upstream {
+            base_url: ctx.config.base_url(),
+            api_key: ctx.config.file.server.api_key.clone(),
+        };
+        let props = || crate::core::proxy::serve::get_bearer(&upstream, "/props");
+        let doors = Doors {
+            http: ctx.http.as_ref(),
+            props: &props,
+        };
+        let results = run_checks(&doors, &ctx.config, &eff);
         let rows: Vec<Vec<String>> = results
             .iter()
             .map(|r| {
@@ -197,7 +228,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
-    use super::{CheckStatus, run_checks};
+    use super::{CheckStatus, Doors, run_checks};
     use crate::core::config::Config;
     use crate::core::hub::{HttpClient, JsonRequest};
     use crate::core::registry::{ModelEntry, Registry};
@@ -229,6 +260,26 @@ mod tests {
                     url: "fake".into(),
                     reason: "no canned response left".into(),
                 })
+        }
+    }
+
+    /// A canned `/props`: the server loaded `n_ctx` per slot, one slot.
+    fn props_fetch(n_ctx: u32) -> impl Fn() -> Result<String, ChekovError> {
+        move || {
+            Ok(serde_json::json!({
+                "default_generation_settings": { "n_ctx": n_ctx },
+                "total_slots": 1
+            })
+            .to_string())
+        }
+    }
+
+    fn props_unreachable() -> impl Fn() -> Result<String, ChekovError> {
+        || {
+            Err(ChekovError::EndpointDown {
+                url: "http://127.0.0.1:8080/props".into(),
+                reason: "connection refused".into(),
+            })
         }
     }
 
@@ -274,8 +325,16 @@ mod tests {
         let (cfg, eff) = fixture(true, None);
         // Every door is down: no canned responses at all.
         let http = SeqHttp::new(&[]);
-        let results = run_checks(&http, &cfg, &eff);
-        let ctx = results.last().expect("the ctx row is last");
+        let props = props_fetch(eff.ctx_size);
+        let results = run_checks(
+            &Doors {
+                http: &http,
+                props: &props,
+            },
+            &cfg,
+            &eff,
+        );
+        let ctx = &results[4];
         assert!(
             matches!(ctx.status, CheckStatus::Pass),
             "it compares two config files, so it still passes offline"
@@ -290,18 +349,84 @@ mod tests {
     }
 
     #[test]
-    fn healthy_server_passes_all_five() {
+    fn healthy_server_passes_all_six() {
         let (cfg, eff) = fixture(true, None);
         let http = SeqHttp::new(&[
             &openai("<think>plan</think>hello there"),
             &anthropic("hello"),
             &openai("fn main() { let list = LinkedList::new(); } // varied healthy code"),
         ]);
-        let results = run_checks(&http, &cfg, &eff);
-        assert_eq!(results.len(), 5);
+        let props = props_fetch(eff.ctx_size);
+        let results = run_checks(
+            &Doors {
+                http: &http,
+                props: &props,
+            },
+            &cfg,
+            &eff,
+        );
+        assert_eq!(results.len(), 6);
         for r in &results {
             assert_eq!(r.status, CheckStatus::Pass, "{} not passing", r.name);
         }
+        assert!(
+            results[5].name.contains("/props") || results[5].name.contains("server"),
+            "the live row says it asked the server: {:?}",
+            results[5].name
+        );
+    }
+
+    #[test]
+    fn the_live_context_check_fails_on_a_mismatch_naming_both_numbers() {
+        // The registry's intent and the server's reality can differ
+        // indefinitely; this is the row that notices.
+        let (cfg, eff) = fixture(true, Some(131_072));
+        let http = SeqHttp::new(&[
+            &openai("<think>x</think>y"),
+            &anthropic("y"),
+            &openai("code"),
+        ]);
+        let props = props_fetch(65_536);
+        let results = run_checks(
+            &Doors {
+                http: &http,
+                props: &props,
+            },
+            &cfg,
+            &eff,
+        );
+        match &results[5].status {
+            CheckStatus::Fail(reason) => {
+                assert!(
+                    reason.contains("65536") && reason.contains("131072"),
+                    "{reason}"
+                );
+                assert!(reason.contains("chekov restart"), "{reason}");
+            }
+            other => panic!("a mismatch must FAIL, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_live_context_check_fails_when_props_is_unreachable() {
+        // A server check that cannot reach the server fails like the other
+        // four — never SKIP, never PASS.
+        let (cfg, eff) = fixture(true, None);
+        let http = SeqHttp::new(&[]);
+        let props = props_unreachable();
+        let results = run_checks(
+            &Doors {
+                http: &http,
+                props: &props,
+            },
+            &cfg,
+            &eff,
+        );
+        assert!(
+            matches!(results[5].status, CheckStatus::Fail(ref r) if r.contains("connection refused")),
+            "{:?}",
+            results[5]
+        );
     }
 
     #[test]
@@ -313,7 +438,15 @@ mod tests {
             &anthropic("fine"),
             &openai(&degenerate),
         ]);
-        let results = run_checks(&http, &cfg, &eff);
+        let props = props_fetch(eff.ctx_size);
+        let results = run_checks(
+            &Doors {
+                http: &http,
+                props: &props,
+            },
+            &cfg,
+            &eff,
+        );
         assert!(
             matches!(results[3].status, CheckStatus::Fail(ref r) if r.contains("identical")),
             "{:?}",
@@ -325,7 +458,15 @@ mod tests {
     fn think_check_skips_without_reasoning_flag() {
         let (cfg, eff) = fixture(false, None);
         let http = SeqHttp::new(&[&openai("no think tags"), &anthropic("hi"), &openai("code")]);
-        let results = run_checks(&http, &cfg, &eff);
+        let props = props_fetch(eff.ctx_size);
+        let results = run_checks(
+            &Doors {
+                http: &http,
+                props: &props,
+            },
+            &cfg,
+            &eff,
+        );
         assert!(
             matches!(results[2].status, CheckStatus::Skipped(_)),
             "{:?}",
@@ -341,7 +482,15 @@ mod tests {
             &anthropic("y"),
             &openai("healthy code output"),
         ]);
-        let results = run_checks(&http, &cfg, &eff);
+        let props = props_fetch(eff.ctx_size);
+        let results = run_checks(
+            &Doors {
+                http: &http,
+                props: &props,
+            },
+            &cfg,
+            &eff,
+        );
         assert!(
             matches!(results[4].status, CheckStatus::Fail(ref r) if r.contains("65536")),
             "{:?}",
@@ -353,7 +502,15 @@ mod tests {
     fn dead_endpoint_fails_loudly_not_silently() {
         let (cfg, eff) = fixture(true, None);
         let http = SeqHttp::new(&[]);
-        let results = run_checks(&http, &cfg, &eff);
+        let props = props_fetch(eff.ctx_size);
+        let results = run_checks(
+            &Doors {
+                http: &http,
+                props: &props,
+            },
+            &cfg,
+            &eff,
+        );
         assert!(
             matches!(results[0].status, CheckStatus::Fail(_)),
             "{:?}",
