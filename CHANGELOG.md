@@ -16,6 +16,11 @@ All notable changes to chekov are recorded here. The format follows
   only on a real refusal now, never on a dead socket.
 
 ### Added
+- `chekov stop --if-running` — opt-in: with no server running it prints
+  "nothing to stop" and exits 0, so a teardown script can call it
+  idempotently. Without the flag, stopping a stopped server is the loud
+  failure it always was; a stale pidfile is still cleaned and reported, and
+  a stop that actually fails still fails, flag or not.
 - `doctor` gains a sixth check, **context loaded (server /props)**: the
   per-slot `n_ctx` the server actually loaded must equal the effective
   `ctx_size` — the same assertion the bench makes before recording a run, so

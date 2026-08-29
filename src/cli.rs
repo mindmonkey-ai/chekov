@@ -139,6 +139,15 @@ mod tests {
     }
 
     #[test]
+    fn stop_if_running_is_opt_in() {
+        let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "stop"]).expect("parse");
+        assert!(matches!(cli.cmd, Cmd::Stop(ref c) if !c.if_running));
+        let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "stop", "--if-running"])
+            .expect("parse");
+        assert!(matches!(cli.cmd, Cmd::Stop(ref c) if c.if_running));
+    }
+
+    #[test]
     fn update_flags_parse_independently() {
         let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "update", "--all", "--dry-run"])
             .expect("parse");
