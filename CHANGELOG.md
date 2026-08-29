@@ -21,6 +21,14 @@ All notable changes to chekov are recorded here. The format follows
   only on a real refusal now, never on a dead socket.
 
 ### Added
+- `capability graph --svg` under `--metric tok-s` draws the measured
+  throughput: a "decode tok/s (measured)" panel under the grid, on the grid's
+  own ctx columns, with a filled dot at each measured cell's decode median, a
+  p10–p90 whisker, and the number and row name beside it — nothing for a cell
+  without a run, and no panel at all without a measurement, so sparse dots
+  are the honest picture rather than empty axes. Labels flip to a dot's left
+  when they would run across the next dot. Predicted throughput is stated as
+  not drawn (no validated model), never left to be inferred.
 - `chekov stop --if-running` — opt-in: with no server running it prints
   "nothing to stop" and exits 0, so a teardown script can call it
   idempotently. Without the flag, stopping a stopped server is the loud
