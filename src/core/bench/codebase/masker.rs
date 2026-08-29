@@ -52,8 +52,12 @@ impl MaskSource for RustBraceMasker {
 }
 
 /// `fn name(` or `fn name<` at the start of a line (after visibility and
-/// qualifiers). Returns the byte range of `fn` through the name.
+/// qualifiers), skipping any hit whose `fn` falls inside a string, char, or
+/// comment literal — a line inside a block comment or a multi-line string
+/// is not code, however much it looks like a signature. Returns the byte
+/// range of `fn` through the name.
 fn fn_signatures(text: &str) -> Vec<Range<usize>> {
+    let literals = literal_ranges(text);
     let mut found = Vec::new();
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
@@ -66,13 +70,36 @@ fn fn_signatures(text: &str) -> Vec<Range<usize>> {
                 after_fn[name_len..].trim_start().chars().next(),
                 Some('(' | '<')
             )
+            && let start = offset + lead + (trimmed.len() - rest.len())
+            && !in_literal(&literals, start)
         {
-            let start = offset + lead + (trimmed.len() - rest.len());
             found.push(start..start + 3 + name_len);
         }
         offset += line.len();
     }
     found
+}
+
+/// Byte ranges of every string, char, and comment literal in `text` — the
+/// same text the `Scanner` skips when balancing braces, reused here so a
+/// `fn`-shaped line inside one of them is never mistaken for a signature.
+fn literal_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut pos = 0;
+    while pos < text.len() {
+        let rest = &text[pos..];
+        if let Some(skip) = literal_len(rest) {
+            ranges.push(pos..pos + skip);
+            pos += skip;
+        } else {
+            pos += rest.chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    ranges
+}
+
+fn in_literal(ranges: &[Range<usize>], at: usize) -> bool {
+    ranges.iter().any(|r| r.contains(&at))
 }
 
 fn strip_qualifiers(mut s: &str) -> &str {
@@ -407,6 +434,48 @@ pub(crate) fn branchy(flag: bool) -> &'static str {
             bodies[1].doc_comment.is_none(),
             "branchy has no doc comment"
         );
+    }
+
+    #[test]
+    fn signatures_inside_comments_and_strings_are_not_candidates() {
+        const SRC: &str = r#"/*
+fn fake() {
+    1
+}
+*/
+
+let s = "fn also_fake() {
+    1
+}";
+
+fn real() {
+    let a = 1;
+    let b = 2;
+    a + b
+}
+"#;
+        let cands = RustBraceMasker.candidates(SRC);
+        let bodies = tier(&cands, TaskTier::FunctionBody);
+        assert_eq!(
+            bodies.len(),
+            1,
+            "only `real`, never `fake`/`also_fake`: {cands:?}"
+        );
+        let gold = &SRC[bodies[0].byte_range.clone()];
+        assert!(
+            gold.contains("let a = 1") && gold.contains("let b = 2"),
+            "{gold:?}"
+        );
+        assert!(
+            !gold.contains("fake"),
+            "commented/stringed fn bodies must never surface: {gold:?}"
+        );
+        let spans: Vec<&str> = tier(&cands, TaskTier::InFile)
+            .iter()
+            .map(|c| SRC[c.byte_range.clone()].trim())
+            .collect();
+        assert!(spans.contains(&"let a = 1;"), "{spans:?}");
+        assert!(spans.contains(&"let b = 2;"), "{spans:?}");
     }
 
     #[test]
