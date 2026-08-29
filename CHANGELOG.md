@@ -7,6 +7,12 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `setup` and `update --engine` verify the binary they just built: a fourth
+  engine step runs `llama-server --version`, so a llama.cpp change that
+  breaks the build's output fails right there as `EngineStepFailed` naming
+  the step — before the commit is recorded as built — instead of surfacing
+  later as a failed `run`. Printed under `--dry-run` like every other step.
+  No auto-rollback: `logs/chekov.engine` names the commit to go back to.
 - `[engine] git_ref` in `config.toml` — pin the llama.cpp engine to a branch,
   tag, or commit. Weights were already revision-pinned; the binary that runs
   them was whatever upstream HEAD was on the day of `setup` / `update
