@@ -168,6 +168,7 @@ mod tests {
                     cache_n: 0,
                 },
                 grade: None,
+                codebase: None,
             }],
         }
     }
@@ -230,6 +231,7 @@ mod tests {
                 cache_n: 0,
             },
             grade: None,
+            codebase: None,
         });
         let b = run("m2", stamp("dda1b0d67", "r2/s2"), &[30.0, 40.0, 41.0]);
         let rows = compare_runs(&a, &b, 5.0).expect("same environment");

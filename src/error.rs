@@ -317,6 +317,28 @@ pub enum ChekovError {
     )]
     BenchStreamFailed { reason: String },
 
+    #[error(
+        "the working tree at {} is not clean — the codebase task set is sampled from \
+         HEAD and must be reproducible; commit or stash (`git status` shows what is \
+         pending), or run against a clean clone",
+        path.display()
+    )]
+    WorkingTreeDirty { path: PathBuf },
+
+    #[error(
+        "no codebase tasks could be sampled from {} ({reason}) — slice A masks Rust \
+         functions only; point --codebase at a repository with `*.rs` files outside \
+         its tests",
+        path.display()
+    )]
+    CodebaseNoTasks { path: PathBuf, reason: String },
+
+    #[error(
+        "codebase worktree step '{step}' failed ({reason}) — run `git worktree prune` \
+         in the repository and retry"
+    )]
+    CodebaseWorktreeFailed { step: String, reason: String },
+
     #[error("{context}: {source} — check the path exists and is writable, then retry")]
     Io {
         context: String,
@@ -338,6 +360,33 @@ impl ChekovError {
 #[cfg(test)]
 mod tests {
     use super::ChekovError;
+
+    #[test]
+    fn codebase_errors_name_their_remediation() {
+        let dirty = ChekovError::WorkingTreeDirty { path: "/r".into() }.to_string();
+        assert!(
+            dirty.contains("/r") && dirty.contains("git status"),
+            "{dirty}"
+        );
+        let none = ChekovError::CodebaseNoTasks {
+            path: "/r".into(),
+            reason: "scanned 3 files, 0 candidate spans".into(),
+        }
+        .to_string();
+        assert!(
+            none.contains("0 candidate spans") && none.contains("Rust"),
+            "{none}"
+        );
+        let wt = ChekovError::CodebaseWorktreeFailed {
+            step: "git worktree add".into(),
+            reason: "exit status 128".into(),
+        }
+        .to_string();
+        assert!(
+            wt.contains("git worktree add") && wt.contains("git worktree prune"),
+            "{wt}"
+        );
+    }
 
     #[test]
     fn a_refusal_says_the_server_answered_and_never_prescribes_a_restart() {

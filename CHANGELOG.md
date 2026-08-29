@@ -117,6 +117,30 @@ All notable changes to chekov are recorded here. The format follows
 - `launch`: local-directory marketplace plugins (`extraKnownMarketplaces`
   with `source = "directory"`) are mirrored into the session config dir so
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
+- `chekov capability bench --codebase <PATH>` — a private codebase is the
+  only corpus a local user has that is guaranteed not to be in any model's
+  training data. Slice A builds the whole pipeline over the narrowest task
+  shape that already discriminates: same-file infill in Rust. It covers the
+  gate, the worktree, deterministic task sampling, honest masking, the
+  `/infill` crossing, storage, tiers 1–5 of the deterministic scoring ladder,
+  and the report. Left to later slices, and said in every report so nothing
+  is over-claimed: slice B (`cross_file_first` tasks with `input_extra`
+  context, and tiers 6–7 behind `--allow-exec`), slice C (`--judge`), other
+  languages behind the same `MaskSource` trait, and any composite score.
+  The report's header reads `{n} tasks from {files} files ({a} in_file,
+  {b} function_body) — boundary-scanned (not AST); context: same-file (engine
+  window ≤ n_batch)`: chekov sends and grades the whole file, but llama.cpp's
+  `/infill` windows the prompt at its batch size, so a long file reaches the
+  model only in part and the header says so rather than implying otherwise.
+  `N/A — infill unsupported by this model` is reserved for a run where NOTHING
+  was answered and every crossing recorded that verdict as it happened (never
+  inferred later from an error's wording — a refusal names the URL it was
+  refused at, and that URL ends in `/infill`, so an outage would read as a
+  missing capability); a run that failed for another reason reports that
+  reason, and a run where only some tasks failed excludes
+  them from every mean and counts them in the header (`(k unavailable,
+  excluded)`). A task nobody answered stores no tier-5 score at all — the
+  symbols cell reads `n/a` rather than averaging in a zero.
 
 ### Fixed
 - **The non-streaming translator keeps extracted reasoning, as the streaming

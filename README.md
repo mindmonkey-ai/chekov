@@ -104,6 +104,7 @@ The registry stores the absolute path; everything else works unchanged.
 | `capability recommend [--ctx N] [--role agent\|chat] [--refresh] [--limit N]` | Ranks the registered models for this machine. Gates first — anything that exceeds the budget, or cannot be sized, is listed with its reason rather than dropped. Then sorts: under `--role agent` a model whose chat template has no dedicated llama.cpp tool parser is **downranked with a note, not refused**; under `--role chat` the tool parser is ignored. `--refresh` is the **only** networked path — without it chekov ranks registered models only and never reaches out. |
 | `capability explain [name] [--ctx N]` | Read one model's GGUF header and print its fit arithmetic line by line: block count, the MTP/interval layer ladder, padded context, cache type, KV bytes, weights on disk. Local file read; no network. |
 | `capability graph [--ctx N]...` | Grid of registered models against context lengths. Each cell is two characters: the fit verdict, then whether its inputs were measured or predicted. A predicted GPU ceiling is announced in the header and changes the legend, because every verdict below it is then measured against a guess. |
+| `capability bench --codebase <PATH>` | The repository at PATH (clean tree required) as 24 deterministic same-file infill tasks, sampled from HEAD (`[bench] codebase_tasks`), run through `/infill`, graded on tiers 1–5 (exact, edit similarity, identifier F1, parse, repo-symbol existence); tiers 6–7 and cross-file context are slice B. Masks are boundary-scanned, not AST, and the report says so. A model without FIM tokens is N/A, never zero. |
 | `capability [--json]` | What this Mac is and what it can hold: chip, GPU cores, performance threads, macOS, and the GPU budget **with its provenance**. The budget is read from the engine (`llama-server --list-devices`) when it is built, from `iogpu.wired_limit_mb` when set, and only otherwise from the 75%-of-RAM formula — which measures 31457 MiB low on a 256 GiB M3 Ultra, so the source is always printed. |
 | `setup [--dry-run]` | Engine clone/pull + cmake Metal build; creates `models/`/`logs/`; wired-limit verification (see Installation). Idempotent. |
 | `update --engine\|--model\|--all [--dry-run]` | Engine: fetch the pinned `[engine] git_ref` (or git pull), rebuild, verify the built `llama-server` runs, report old→new commit. Model: re-resolve the active repo; new revisions land in a new `@rev` dir, license is diffed and **any change stops for explicit confirmation (STOP-4)** before an atomic registry repoint. Old revisions are never auto-deleted. |
@@ -111,6 +112,23 @@ The registry stores the absolute path; everything else works unchanged.
 | `integrate claude` | Generate `bin/cclocal`; global Claude settings untouched. |
 | `env` | Stdout-only `ANTHROPIC_*` exports; diagnostics to stderr; safe for `eval "$(chekov env)"`. |
 | `launch <agent> [--model N] [--print] [--proxy-only [--port N]] [-- args]` | Start the agent wired to the local model: proxy in-thread, generated config dir, agent as a child (auto-starts the server if it isn't running). `--print` emits the command instead of running it. `--proxy-only` runs just the foreground protocol translator (Anthropic `/v1/messages` → the server's OpenAI endpoint) on `--port` (default 8787), with no child and no generated settings — for hand-wiring a different client. |
+
+**Codebase mode** (`capability bench --codebase <PATH>`) turns the user's own
+repository into a graded infill benchmark: 24 deterministic same-file Rust
+tasks are sampled from `HEAD` (`[bench] codebase_tasks` in `config.toml`),
+masked out, and run through `/infill`. It requires a clean tree and runs in a
+detached worktree, so the benchmark never touches uncommitted changes or the
+branch you're on. Only tiers 1–5 (exact, edit similarity, identifier F1,
+parse, repo-symbol existence) are scored; tiers 6–7 (compile gate, covering
+test) and cross-file context are deferred to slice B. Masks are
+boundary-scanned, not AST-derived, and the report always says so. chekov
+sends the whole file and grades over the whole file, but llama.cpp's `/infill`
+windows the prompt at its batch size (about ¾·`n_batch` tokens of prefix and
+¼·`n_batch` of suffix), so a long file reaches the model only in part — the
+report's `engine window ≤ n_batch` says as much. `--dry-run` still creates and
+removes a detached worktree in the target repository: the task set is sampled
+from `HEAD` before anything is printed. A model without FIM tokens reports as
+N/A, never as a zero — an unsupported capability is not a failing score.
 
 ### The six doctor checks
 

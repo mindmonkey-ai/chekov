@@ -133,6 +133,9 @@ pub struct BenchSection {
     pub release_pct: u32,
     pub release_max_polls: u32,
     pub release_interval_ms: u64,
+    /// Tasks per `--codebase` run: two-thirds `in_file`, one-third
+    /// `function_body`, sampled deterministically from HEAD.
+    pub codebase_tasks: u32,
 }
 
 impl Default for BenchSection {
@@ -148,6 +151,7 @@ impl Default for BenchSection {
             release_pct: 80,
             release_max_polls: 60,
             release_interval_ms: 500,
+            codebase_tasks: 24,
         }
     }
 }
@@ -245,7 +249,7 @@ pub fn resolve_root(env_home: Option<&str>, user_home: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Config, LimitsSection, resolve_root};
+    use super::{BenchSection, Config, LimitsSection, resolve_root};
     use crate::core::checks::{WiredVerdict, effective_wired_mb, wired_verdict};
 
     /// The README's config block is the only place a user learns these values.
@@ -326,6 +330,21 @@ mod tests {
         assert_eq!(cfg.bench.depths, vec![2048]);
         assert_eq!(cfg.bench.repetitions, 3);
         assert_eq!(cfg.bench.max_tokens, 128, "unset keys keep their defaults");
+    }
+
+    #[test]
+    fn codebase_tasks_defaults_to_24_and_overrides() {
+        assert_eq!(BenchSection::default().codebase_tasks, 24);
+        let root = scratch("cfg-codebase-tasks");
+        std::fs::write(root.join("config.toml"), "[bench]\ncodebase_tasks = 12\n").expect("write");
+        assert_eq!(
+            Config::load(&root)
+                .expect("valid")
+                .file
+                .bench
+                .codebase_tasks,
+            12
+        );
     }
 
     #[test]
