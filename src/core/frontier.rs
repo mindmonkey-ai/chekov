@@ -367,6 +367,43 @@ const FOOTER: [&str; 2] = [
     "hover a cell for its arithmetic.",
 ];
 
+/// The throughput panel under the grid: title band plus plot, in user units.
+const PANEL_H: usize = 150;
+const PANEL_PLOT_TOP: usize = 28;
+const PANEL_PLOT_H: usize = 100;
+
+/// SVG-only legend line for the dots. Predicted throughput is stated as
+/// absent rather than left to be inferred: no predicted tok/s reaches the
+/// frontier model, and the spec's ±15% band is an unvalidated prior.
+const DOT_LEGEND: &str = "\u{25cf}  measured decode median, whisker p10\u{2013}p90 (deepest depth of \
+                          the run)   predicted throughput is not drawn \u{2014} no validated model";
+
+/// Every measured cell: its row, its column, and the measurement.
+fn measured_cells(f: &Frontier) -> impl Iterator<Item = (&Row, usize, &Speed)> {
+    f.rows.iter().flat_map(|row| {
+        row.cells
+            .iter()
+            .enumerate()
+            .filter_map(move |(col, cell)| cell.speed.as_ref().map(|s| (row, col, s)))
+    })
+}
+
+/// Top of the y axis: the largest p90 rounded up to a clean multiple of ten,
+/// so the fastest whisker never touches the panel's edge. `None` without a
+/// measurement — no panel is drawn from nothing.
+fn panel_ceiling(f: &Frontier) -> Option<f64> {
+    measured_cells(f)
+        .map(|(_, _, s)| s.decode.p90)
+        .fold(None, |top: Option<f64>, p90| {
+            Some(top.map_or(p90, |t| t.max(p90)))
+        })
+        .map(|max| ((max / 10.0).floor() + 1.0) * 10.0)
+}
+
+fn as_f64(units: usize) -> f64 {
+    u32::try_from(units).map_or(0.0, f64::from)
+}
+
 /// Advance of `chars` glyphs in a monospace face at `font_px`. Chrome renders
 /// `ui-monospace` at 0.60 em (measured with `getBBox`); 0.65 plus one glyph of
 /// slack leaves room for a wider fallback face. Right-side whitespace is
@@ -384,6 +421,9 @@ struct Layout {
     quant_x: usize,
     left: usize,
     width: usize,
+    /// The throughput panel's top edge and y-axis ceiling, when any cell
+    /// carries a measurement.
+    panel: Option<(usize, f64)>,
     legend_top: usize,
     height: usize,
 }
@@ -399,12 +439,18 @@ fn layout(f: &Frontier) -> Layout {
     let quant_x = MARGIN + text_w(longest(&f.rows, |row| &row.name), 13) + GAP;
     let left = quant_x + text_w(longest(&f.rows, |row| &row.quant), 12) + GAP;
     let grid_w = left + f.ctx_ladder.len() * CELL_W + MARGIN;
-    let legend_top = TOP + f.rows.len() * CELL_H + 2 * LINE_H;
-    let text_lines = legend(f).lines().count() + footer_lines(f).len() + FOOTER.len();
+    let grid_bottom = TOP + f.rows.len() * CELL_H + LINE_H;
+    let panel = panel_ceiling(f).map(|ceiling| (grid_bottom, ceiling));
+    let legend_top = grid_bottom + LINE_H + panel.map_or(0, |_| PANEL_H);
+    let text_lines = legend(f).lines().count()
+        + usize::from(panel.is_some())
+        + footer_lines(f).len()
+        + FOOTER.len();
     Layout {
         quant_x,
         left,
         width: grid_w.max(widest_text(f)),
+        panel,
         legend_top,
         height: legend_top + text_lines * LINE_H + MARGIN,
     }
@@ -420,6 +466,7 @@ fn widest_text(f: &Frontier) -> usize {
         .chain(footer.iter().map(|line| text_w(line.chars().count(), 12)))
         .chain(FOOTER.iter().map(|line| text_w(line.chars().count(), 11)))
         .chain([
+            text_w(DOT_LEGEND.chars().count(), 12),
             text_w(title(f).chars().count(), 18),
             text_w(header_line(f).chars().count(), 13),
             text_w(CEILING_WARNING.chars().count(), 13),
@@ -579,9 +626,120 @@ pub fn render_svg(f: &Frontier) -> String {
     for (r, row) in f.rows.iter().enumerate() {
         out.push_str(&svg_row(row, r, &sheet));
     }
+    out.push_str(&svg_panel(&sheet));
     out.push_str(&svg_legend(&sheet));
     out.push_str("</svg>\n");
     out
+}
+
+/// The throughput panel: measured decode medians as filled dots with p10–p90
+/// whiskers, on the grid's own ctx columns. Nothing is drawn for a cell
+/// without a run, and no panel at all without a measurement — sparse dots
+/// are the honest picture; empty axes would invite reading a chart nobody
+/// measured. The number and the row's name travel with each dot, so nothing
+/// depends on colour.
+fn svg_panel(sheet: &Sheet) -> String {
+    let Some((top, ceiling)) = sheet.lay.panel else {
+        return String::new();
+    };
+    let plot_top = top + PANEL_PLOT_TOP;
+    let plot_bottom = plot_top + PANEL_PLOT_H;
+    let axis_x = sheet.lay.left - 10;
+    let mut out = format!(
+        "<text x=\"{MARGIN}\" y=\"{}\" font-size=\"13\">decode tok/s (measured)</text>\n\
+         <line x1=\"{axis_x}\" y1=\"{plot_top}\" x2=\"{axis_x}\" y2=\"{plot_bottom}\" \
+         stroke=\"#666\"/>\n\
+         <text x=\"{}\" y=\"{}\" text-anchor=\"end\" font-size=\"11\" fill=\"#555\">{ceiling:.0}</text>\n\
+         <text x=\"{}\" y=\"{}\" text-anchor=\"end\" font-size=\"11\" fill=\"#555\">0</text>\n",
+        top + 18,
+        axis_x - 4,
+        plot_top + 4,
+        axis_x - 4,
+        plot_bottom + 4,
+    );
+    let plot_y = |tok_s: f64| (tok_s / ceiling).mul_add(-as_f64(PANEL_PLOT_H), as_f64(plot_bottom));
+    let mut dots: Vec<(usize, &Row, &Speed)> = measured_cells(sheet.f)
+        .map(|(row, col, speed)| (sheet.lay.left + col * CELL_W + (CELL_W - 4) / 2, row, speed))
+        .collect();
+    dots.sort_by_key(|(cx, _, _)| *cx);
+    let mut lanes = LabelLanes::default();
+    for (i, &(cx, row, speed)) in dots.iter().enumerate() {
+        let width = as_f64(text_w(row.name.chars().count() + 6, 11));
+        // A label that would run across the next dot sits on its own dot's
+        // left instead — the dot cannot move, the text can.
+        let left = dots
+            .get(i + 1)
+            .is_some_and(|&(next_cx, _, _)| as_f64(cx + 8) + width > as_f64(next_cx) - 6.0);
+        let label = lanes.place((cx, width, left), plot_y(speed.decode.median) + 4.0);
+        out.push_str(&svg_dot(label, &plot_y, (row, speed)));
+    }
+    out
+}
+
+/// Where a dot's label goes: beside its dot, on the right unless flipped.
+#[derive(Debug, Clone, Copy)]
+struct LabelAt {
+    cx: usize,
+    y: f64,
+    left: bool,
+}
+
+/// Keeps a label off the previous same-side label's tail: when the two
+/// would overlap horizontally and sit within one line of each other, the
+/// later one drops a line. Colour never carries identity here, so the text
+/// must stay legible.
+#[derive(Default)]
+struct LabelLanes {
+    last_right: f64,
+    last_y: f64,
+}
+
+impl LabelLanes {
+    const LINE: f64 = 14.0;
+
+    /// `span` is the dot's x, the label's width, and whether it sits left.
+    fn place(&mut self, span: (usize, f64, bool), wanted_y: f64) -> LabelAt {
+        let (cx, width, left) = span;
+        let x = if left {
+            as_f64(cx) - 8.0 - width
+        } else {
+            as_f64(cx + 8)
+        };
+        let y = if x < self.last_right && (wanted_y - self.last_y).abs() < Self::LINE {
+            self.last_y + Self::LINE
+        } else {
+            wanted_y
+        };
+        self.last_right = x + width;
+        self.last_y = y;
+        LabelAt { cx, y, left }
+    }
+}
+
+/// One measurement: whisker from p10 up to p90, the dot at the median, and
+/// the median with the row's name beside it.
+fn svg_dot(label: LabelAt, plot_y: &dyn Fn(f64) -> f64, at: (&Row, &Speed)) -> String {
+    let (row, speed) = at;
+    let cx = label.cx;
+    let (y_p10, y_p90, cy) = (
+        plot_y(speed.decode.p10),
+        plot_y(speed.decode.p90),
+        plot_y(speed.decode.median),
+    );
+    let (x, anchor) = if label.left {
+        (cx - 8, " text-anchor=\"end\"")
+    } else {
+        (cx + 8, "")
+    };
+    format!(
+        "<line class=\"whisker\" x1=\"{cx}\" y1=\"{y_p10:.1}\" x2=\"{cx}\" y2=\"{y_p90:.1}\" \
+         stroke=\"#000\" stroke-width=\"1.5\"/>\n\
+         <circle cx=\"{cx}\" cy=\"{cy:.1}\" r=\"4\" fill=\"#000\"/>\n\
+         <text class=\"dot-label\" x=\"{x}\" y=\"{:.1}\"{anchor} font-size=\"11\">{:.1} {}</text>\n",
+        label.y,
+        speed.decode.median,
+        esc(&row.name),
+    )
 }
 
 fn header_line(f: &Frontier) -> String {
@@ -653,6 +811,14 @@ fn svg_legend(sheet: &Sheet) -> String {
             out,
             "<text x=\"{MARGIN}\" y=\"{y}\" font-size=\"12\" xml:space=\"preserve\">{}</text>",
             esc(line.trim()),
+        );
+        y += LINE_H;
+    }
+    if sheet.lay.panel.is_some() {
+        let _ = writeln!(
+            out,
+            "<text x=\"{MARGIN}\" y=\"{y}\" font-size=\"12\" xml:space=\"preserve\">{}</text>",
+            esc(DOT_LEGEND),
         );
         y += LINE_H;
     }
@@ -1024,6 +1190,95 @@ mod tests {
             "{svg}"
         );
         assert_eq!(f.rows[0].cells[0].kv_inputs(), '\u{b7}');
+    }
+
+    /// Every `key="<number>"` value in the SVG, in document order.
+    fn numbers_after(svg: &str, key: &str) -> Vec<f64> {
+        svg.match_indices(key)
+            .filter_map(|(at, _)| {
+                let rest = &svg[at + key.len()..];
+                rest.split('"').next()?.parse().ok()
+            })
+            .collect()
+    }
+
+    /// `(y1, y2)` of every whisker line, in document order.
+    fn whiskers(svg: &str) -> Vec<(f64, f64)> {
+        svg.split("class=\"whisker\"")
+            .skip(1)
+            .map(|seg| {
+                let head = seg.split("/>").next().unwrap_or("");
+                (
+                    numbers_after(head, "y1=\"")[0],
+                    numbers_after(head, "y2=\"")[0],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn without_a_measurement_the_svg_draws_no_throughput_panel() {
+        // Empty axes would invite the eye to read a chart nobody measured.
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(!svg.contains("<circle"), "{svg}");
+        assert!(!svg.contains("decode tok/s"), "{svg}");
+        assert!(!svg.contains("whisker"), "{svg}");
+    }
+
+    #[test]
+    fn each_measured_cell_is_a_filled_dot_with_a_p10_p90_whisker_and_its_number() {
+        let mut f = tok_s_frontier();
+        let mut slow = cell(Some(24 * GIB), Some(GIB));
+        slow.speed = Some(measured(20.0));
+        f.rows.push(super::Row {
+            name: "slow-model".into(),
+            quant: "Q4_K_M".into(),
+            cells: vec![slow, cell(Some(24 * GIB), Some(GIB))],
+        });
+        let svg = super::render_svg(&f);
+        // One dot and one whisker per measured cell, none for the rest.
+        assert_eq!(svg.matches("<circle").count(), 2, "{svg}");
+        let whiskers = whiskers(&svg);
+        assert_eq!(whiskers.len(), 2, "{svg}");
+        // p10 sits below p90 on the page (larger y).
+        for (y_p10, y_p90) in &whiskers {
+            assert!(y_p10 > y_p90, "whisker runs p10 (low) to p90 (high): {svg}");
+        }
+        // A faster median sits higher (smaller y): 68.1 then 20.0 in row order.
+        let cys = numbers_after(&svg, "cy=\"");
+        assert_eq!(cys.len(), 2);
+        assert!(cys[0] < cys[1], "68.1 tok/s above 20.0 tok/s: {cys:?}");
+        // The number and the row's name travel with the dot — never colour alone.
+        assert!(svg.contains("68.1 qwen3.8-27b"), "{svg}");
+        assert!(svg.contains("20.0 slow-model"), "{svg}");
+        // The panel and its legend say what is drawn and what is not.
+        assert!(svg.contains("decode tok/s"), "{svg}");
+        assert!(svg.contains("measured decode median, whisker p10"), "{svg}");
+        assert!(svg.contains("predicted throughput is not drawn"), "{svg}");
+        // Still self-contained.
+        assert!(!svg.contains("href=") && !svg.contains("<script"), "{svg}");
+    }
+
+    #[test]
+    fn a_label_that_would_land_on_the_previous_ones_tail_drops_a_line() {
+        // Seen live: 25.8 at 96K and 20.4 at 128K sat within a few px of each
+        // other and the first label ran under the second dot.
+        let mut f = tok_s_frontier();
+        f.rows[0].cells[0].speed = Some(measured(25.8));
+        let mut near = cell(Some(24 * GIB), Some(GIB));
+        near.speed = Some(measured(25.0));
+        f.rows[0].cells[1] = near;
+        let svg = super::render_svg(&f);
+        let labels: Vec<&str> = svg
+            .split("class=\"dot-label\"")
+            .skip(1)
+            .map(|seg| seg.split('>').next().unwrap_or(""))
+            .collect();
+        assert_eq!(labels.len(), 2, "{svg}");
+        // The first label would run across the second dot, so it sits on the
+        // left of its own dot instead; the last one keeps the right side.
+        assert!(labels[0].contains("text-anchor=\"end\""), "{svg}");
+        assert!(!labels[1].contains("text-anchor=\"end\""), "{svg}");
     }
 
     #[test]

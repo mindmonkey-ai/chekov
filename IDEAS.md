@@ -296,7 +296,16 @@ UNBLOCKED 2026-08-28: `Cell.speed` now carries the measured median with p10-p90,
 so the filled-dot layer has its source. The hollow predicted dots do not — no
 predicted tok/s reaches the frontier model, and the ±15% band is an unvalidated
 prior — so the layer should ship measured-only first.
-Proposed 2026-08-28 — status: OPEN
+SHIPPED 2026-08-29, measured-only: a "decode tok/s (measured)" panel under the
+grid on the grid's own ctx columns — a filled dot at the median with a p10–p90
+whisker and the number + row name beside it (identity never rides on colour);
+nothing for a cell without a run, and no panel at all without a measurement.
+A label that would run across the next dot flips to its dot's left; same-side
+labels a line apart drop a line. The SVG legend states that predicted
+throughput is not drawn and why. Verified in Chrome (`getBBox`: no overlaps,
+no overflow). The hollow predicted dots stay out until a validated predictor
+exists.
+Proposed 2026-08-28 — status: SHIPPED (measured); predicted dots OPEN
 
 ## Feed measured bench medians into `capability graph` (2026-08-27)
 Slice 5's spec line "the `--metric tok-s` grid upgrades from predicted to
