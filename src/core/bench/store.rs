@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::bench::codebase::ladder::{self, Score, Tier};
+use crate::core::bench::codebase::{Excluded, TaskTier};
 use crate::core::bench::stamp::{Stamp, mismatch_error};
 use crate::core::bench::sweep::curve_note;
 use crate::core::stats;
@@ -63,6 +65,11 @@ pub struct TaskRow {
     pub measure: Measure,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade: Option<GradeRow>,
+    /// Present on `codebase` rows only: what the model saw, what it answered,
+    /// and the gold. Tiers 1–4 are recomputed from these on read; tier 5
+    /// needs the worktree and is scored at run time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codebase: Option<CodebaseRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +129,23 @@ impl GradeRow {
     }
 }
 
+/// A codebase task's record (spec §8, slice A). Raw text in, scores out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodebaseRow {
+    pub tier: TaskTier,
+    pub file: String,
+    pub line: usize,
+    pub label: String,
+    pub gold: String,
+    pub prediction: String,
+    pub prefix: String,
+    pub suffix: String,
+    pub excluded: Excluded,
+    /// Tier 5 against the worktree's symbol set, scored at run time.
+    pub symbols_score: f64,
+}
+
 /// One task to append: its identity plus what was measured.
 pub struct Task {
     pub suite: String,
@@ -129,6 +153,8 @@ pub struct Task {
     pub measure: Measure,
     pub grade: Option<GradeRow>,
     pub transport: Transport,
+    /// Present on `codebase` rows only — see `TaskRow::codebase`.
+    pub codebase: Option<CodebaseRow>,
 }
 
 /// An open run directory being written.
@@ -195,6 +221,7 @@ impl RunWriter {
             transport: task.transport,
             measure: task.measure,
             grade: task.grade,
+            codebase: task.codebase,
         };
         let results = self.dir.join("results.jsonl");
         let mut line = serde_json::to_string(&row).map_err(|e| invalid(&results, e))?;
@@ -333,6 +360,7 @@ pub fn render_run(log: &RunLog) -> String {
         .collect();
     out.push_str(&probes);
     out.push_str(&suite_summaries(log));
+    out.push_str(&render_codebase(log));
     out
 }
 
@@ -524,6 +552,97 @@ fn unavailable_reason(rows: &[&TaskRow]) -> String {
         .to_owned()
 }
 
+/// The codebase block: counts and labels, then one line per tier group
+/// with the mean of every tier that has a value.
+#[must_use]
+pub fn render_codebase(log: &RunLog) -> String {
+    let rows: Vec<&TaskRow> = rows_of(log, "codebase")
+        .filter(|r| r.codebase.is_some())
+        .collect();
+    if rows.is_empty() {
+        return String::new();
+    }
+    if rows.iter().any(|r| is_unavailable(r)) {
+        let reason = unavailable_reason(&rows);
+        return format!("codebase     N/A — infill unsupported by this model ({reason})\n");
+    }
+    let count = |tier: TaskTier| {
+        rows.iter()
+            .filter(|r| r.codebase.as_ref().is_some_and(|c| c.tier == tier))
+            .count()
+    };
+    let mut out = format!(
+        "codebase     {} tasks ({} in_file, {} function_body) — {}; context: same-file\n",
+        rows.len(),
+        count(TaskTier::InFile),
+        count(TaskTier::FunctionBody),
+        crate::core::bench::codebase::MASK_LABEL,
+    );
+    for tier in [TaskTier::InFile, TaskTier::FunctionBody] {
+        out.push_str(&tier_line(&rows, tier));
+    }
+    out.push_str("             tiers 6-7 skipped: slice B (--allow-exec)\n");
+    out
+}
+
+fn tier_line(rows: &[&TaskRow], tier: TaskTier) -> String {
+    let group: Vec<&CodebaseRow> = rows
+        .iter()
+        .filter_map(|r| r.codebase.as_ref())
+        .filter(|c| c.tier == tier)
+        .collect();
+    if group.is_empty() {
+        return String::new();
+    }
+    let mut cells = Vec::new();
+    for t in [Tier::Exact, Tier::EditSim, Tier::IdentF1, Tier::Parse] {
+        if let Some(mean) = tier_mean(&group, t) {
+            cells.push(format!("{} {mean:.2}", t.label()));
+        }
+    }
+    let symbols_mean = group.iter().map(|c| c.symbols_score).sum::<f64>() / as_f64(group.len());
+    cells.push(format!("symbols {symbols_mean:.2} (scored at run time)"));
+    format!(
+        "             {:<14} {}   (n={})\n",
+        tier.label(),
+        cells.join("   "),
+        group.len()
+    )
+}
+
+/// The mean of the values that tier recomputes for this group — `None` when
+/// every task in the group skips that tier.
+fn tier_mean(group: &[&CodebaseRow], tier: Tier) -> Option<f64> {
+    let values: Vec<f64> = group
+        .iter()
+        .filter_map(|c| match recompute(c, tier) {
+            Score::Value(v) => Some(v),
+            Score::Skipped(_) => None,
+        })
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<f64>() / as_f64(values.len()))
+}
+
+/// Tiers 1–4 from the stored text — a stored score can never drift.
+fn recompute(c: &CodebaseRow, tier: Tier) -> Score {
+    let line_level = c.tier == TaskTier::InFile;
+    match tier {
+        Tier::Exact if line_level => Score::Value(ladder::exact(&c.gold, &c.prediction)),
+        Tier::EditSim if line_level => Score::Value(ladder::edit_sim(&c.gold, &c.prediction)),
+        Tier::Exact | Tier::EditSim => Score::Skipped("function_body"),
+        Tier::IdentF1 => Score::Value(ladder::ident_f1(&c.gold, &c.prediction)),
+        Tier::Parse => Score::Value(ladder::parse(&c.prefix, &c.prediction, &c.suffix)),
+        Tier::Symbols | Tier::Compile | Tier::Test => Score::Skipped("not recomputed"),
+    }
+}
+
+fn as_f64(n: usize) -> f64 {
+    u32::try_from(n).map_or(f64::MAX, f64::from)
+}
+
 fn tool_emit_line(log: &RunLog, transport: Transport) -> Option<String> {
     let rows: Vec<&TaskRow> = rows_via(log, "tool_emit", transport).collect();
     if rows.is_empty() {
@@ -680,8 +799,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        GradeRow, Measure, RunHead, RunLog, RunWriter, Task, TaskRow, Transport, render_run,
+        CodebaseRow, GradeRow, Measure, RunHead, RunLog, RunWriter, Task, TaskRow, Transport,
+        render_run,
     };
+    use crate::core::bench::codebase::{Excluded, TaskTier};
     use crate::core::bench::stamp::Stamp;
     use crate::error::ChekovError;
 
@@ -777,6 +898,7 @@ mod tests {
                         unavailable: false,
                     }),
                     transport: Transport::Buffered,
+                    codebase: None,
                 })
                 .expect("append");
         }
@@ -906,6 +1028,7 @@ mod tests {
             measure: measure(&[20.0, 20.0]),
             grade: Some(grade),
             transport: Transport::Buffered,
+            codebase: None,
         }
     }
 
@@ -1068,6 +1191,122 @@ mod tests {
         assert_eq!(loaded.forced_reasoning_format, None);
     }
 
+    /// Bundled so `codebase_task` stays within the 3-argument limit.
+    #[derive(Clone, Copy)]
+    struct CodebaseFixture<'a> {
+        id: &'a str,
+        tier: TaskTier,
+        gold: &'a str,
+        prediction: &'a str,
+    }
+
+    /// The three tasks `codebase_rows_round_trip_and_the_block_recomputes_tiers_from_stored_text`
+    /// exercises: two in-file (one exact, one a miss) and one function body.
+    fn codebase_fixtures() -> [CodebaseFixture<'static>; 3] {
+        [
+            CodebaseFixture {
+                id: "in_file-abc123-L7",
+                tier: TaskTier::InFile,
+                gold: "let a = 1;",
+                prediction: "let a = 1;",
+            },
+            CodebaseFixture {
+                id: "in_file-abc123-L9",
+                tier: TaskTier::InFile,
+                gold: "let b = 2;",
+                prediction: "let c = 3;",
+            },
+            CodebaseFixture {
+                id: "function_body-abc123-L20",
+                tier: TaskTier::FunctionBody,
+                gold: "let x = 1;\n    x",
+                prediction: "x",
+            },
+        ]
+    }
+
+    fn codebase_task(fixture: CodebaseFixture) -> Task {
+        Task {
+            suite: "codebase".into(),
+            task_id: fixture.id.into(),
+            measure: measure(&[20.0, 20.0]),
+            grade: None,
+            transport: Transport::Buffered,
+            codebase: Some(CodebaseRow {
+                tier: fixture.tier,
+                file: "src/a.rs".into(),
+                line: 7,
+                label: "boundary-scanned (not AST)".into(),
+                gold: fixture.gold.into(),
+                prediction: fixture.prediction.into(),
+                prefix: "fn f() {\n".into(),
+                suffix: "\n}\n".into(),
+                excluded: Excluded {
+                    doc_comment: 0,
+                    cross_file: "n/a: same-file".into(),
+                },
+                symbols_score: 1.0,
+            }),
+        }
+    }
+
+    #[test]
+    fn codebase_rows_round_trip_and_the_block_recomputes_tiers_from_stored_text() {
+        let eval = scratch("codebase-rows");
+        let mut writer = RunWriter::create(&eval, "r10-model", &head()).expect("create");
+        for task in codebase_fixtures().map(codebase_task) {
+            writer.append(task).expect("append");
+        }
+        let log = RunLog::load(writer.dir()).expect("load");
+        assert_eq!(
+            log.rows[0].codebase.as_ref().map(|c| c.prediction.as_str()),
+            Some("let a = 1;")
+        );
+        let rendered = render_run(&log);
+        let expected = [
+            "codebase     3 tasks (2 in_file, 1 function_body) — boundary-scanned (not AST); \
+             context: same-file",
+            "in_file        exact 0.50   edit_sim",
+            "symbols 1.00 (scored at run time)   (n=2)",
+            "function_body  ident_f1",
+            "tiers 6-7 skipped: slice B (--allow-exec)",
+        ];
+        for line in expected {
+            assert!(rendered.contains(line), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn an_infill_unsupported_run_reports_na_not_zero() {
+        let eval = scratch("codebase-na");
+        let mut writer = RunWriter::create(&eval, "r11-model", &head()).expect("create");
+        let mut task = codebase_task(CodebaseFixture {
+            id: "in_file-abc123-L7",
+            tier: TaskTier::InFile,
+            gold: "let a = 1;",
+            prediction: "",
+        });
+        task.grade = Some(GradeRow::unavailable(
+            "infill is not supported by this model".into(),
+        ));
+        writer.append(task).expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains(
+                "codebase     N/A — infill unsupported by this model (infill is not supported"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("exact 0.00"), "{rendered}");
+    }
+
+    #[test]
+    fn a_row_written_before_the_codebase_field_loads() {
+        let line = r#"{"schema":1,"run_id":"r","seq":0,"suite":"tool_emit","task_id":"te-001","measure":{"prompt_n":4,"decode_samples":[1.0],"prefill_samples":[1.0],"warmup_dropped":0}}"#;
+        let row: TaskRow = serde_json::from_str(line).expect("loads");
+        assert!(row.codebase.is_none());
+    }
+
     #[test]
     fn a_hot_cache_is_visible_in_the_rendering() {
         let eval = scratch("cache-n");
@@ -1081,6 +1320,7 @@ mod tests {
                 measure: warm,
                 grade: None,
                 transport: Transport::Buffered,
+                codebase: None,
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
@@ -1099,6 +1339,7 @@ mod tests {
                     measure: measure(&[19.0, 21.0, 22.0 + bump]),
                     grade: None,
                     transport: Transport::Buffered,
+                    codebase: None,
                 })
                 .expect("append");
         }
@@ -1121,6 +1362,7 @@ mod tests {
                 measure: measure(&[19.0, 21.0]),
                 grade: None,
                 transport: Transport::Buffered,
+                codebase: None,
             })
             .expect("append");
         drop(writer);
@@ -1134,6 +1376,7 @@ mod tests {
                 measure: measure(&[15.0, 16.0]),
                 grade: None,
                 transport: Transport::Buffered,
+                codebase: None,
             })
             .expect("append after resume");
         let reloaded = RunLog::load(resumed.dir()).expect("reload");
@@ -1169,6 +1412,7 @@ mod tests {
                 measure: measure(&[19.0, 21.0]),
                 grade: None,
                 transport: Transport::Buffered,
+                codebase: None,
             })
             .expect("append");
         let results = writer.dir().join("results.jsonl");
@@ -1190,6 +1434,7 @@ mod tests {
                 measure: measure(&[19.0, 21.0, 22.0, 22.4]),
                 grade: None,
                 transport: Transport::Buffered,
+                codebase: None,
             })
             .expect("append");
         writer
@@ -1201,6 +1446,7 @@ mod tests {
                     "missing expected substring \"hello\"".to_owned(),
                 )),
                 transport: Transport::Buffered,
+                codebase: None,
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));

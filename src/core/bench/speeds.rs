@@ -230,6 +230,7 @@ mod tests {
                 cache_n: 0,
             },
             grade: None,
+            codebase: None,
         }
     }
 
