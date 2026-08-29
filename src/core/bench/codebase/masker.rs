@@ -47,8 +47,31 @@ impl MaskSource for RustBraceMasker {
             }
             out.extend(statement_spans(text, &interior));
         }
-        out
+        dedupe(text, out)
     }
+}
+
+/// One span is one candidate.
+///
+/// Two statements on one line widen to the same lines and would otherwise be
+/// two candidates with the same id; a one-statement body is the same text as
+/// the statement inside it and belongs to the stronger tier, `function_body`,
+/// once — counting it again as `in_file` would inflate the task count and
+/// score the same span twice.
+fn dedupe(text: &str, candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let bodies: Vec<&str> = candidates
+        .iter()
+        .filter(|c| c.tier == TaskTier::FunctionBody)
+        .map(|c| text[c.byte_range.clone()].trim())
+        .collect();
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|c| seen.insert((c.byte_range.start, c.byte_range.end)))
+        .filter(|c| {
+            c.tier != TaskTier::InFile || !bodies.contains(&text[c.byte_range.clone()].trim())
+        })
+        .collect()
 }
 
 /// `fn name(` or `fn name<` at the start of a line (after visibility and
@@ -404,6 +427,14 @@ pub(crate) fn branchy(flag: bool) -> &'static str {
         "no"
     }
 }
+
+fn mixed(flag: bool) -> i32 {
+    let base = 1;
+    if flag {
+        return base;
+    }
+    base + 1
+}
 "#;
 
     fn tier(cands: &[Candidate], tier: TaskTier) -> Vec<&Candidate> {
@@ -416,8 +447,8 @@ pub(crate) fn branchy(flag: bool) -> &'static str {
         let bodies = tier(&cands, TaskTier::FunctionBody);
         assert_eq!(
             bodies.len(),
-            2,
-            "add and branchy; tiny is one line: {cands:?}"
+            3,
+            "add, branchy and mixed; tiny is one line: {cands:?}"
         );
         let add = &bodies[0];
         let gold = &SRC[add.byte_range.clone()];
@@ -492,6 +523,10 @@ fn real() {
                 .any(|s| s.starts_with("if flag {") && s.ends_with('}')),
             "an if with its blocks is one span: {spans:?}"
         );
+        assert!(
+            !spans.iter().any(|s| s.contains("\"yes\"")),
+            "branchy's if IS its whole body — counted once, as function_body: {spans:?}"
+        );
         assert!(spans.iter().all(|s| balance(s) == Some(0)), "{spans:?}");
     }
 
@@ -509,6 +544,34 @@ fn real() {
         assert!(
             !bodies.iter().any(|c| c.tier == TaskTier::FunctionBody),
             "2-line and 41-line bodies are out of range: {bodies:?}"
+        );
+    }
+
+    #[test]
+    fn a_one_statement_body_is_one_candidate_at_the_function_body_tier() {
+        const SRC: &str = "fn wrap() -> Vec<u8> {\n    collect_bytes(\n        &input,\n    )\n}\n";
+        let cands = RustBraceMasker.candidates(SRC);
+        assert_eq!(
+            cands.len(),
+            1,
+            "the body and the statement are one span: {cands:?}"
+        );
+        assert_eq!(cands[0].tier, TaskTier::FunctionBody);
+    }
+
+    #[test]
+    fn two_statements_on_one_line_are_one_in_file_candidate() {
+        const SRC: &str =
+            "fn f() {\n    let a = 1; let b = 2;\n    let c = 3;\n    let d = 4;\n}\n";
+        let cands = RustBraceMasker.candidates(SRC);
+        let spans: Vec<&str> = tier(&cands, TaskTier::InFile)
+            .iter()
+            .map(|c| SRC[c.byte_range.clone()].trim())
+            .collect();
+        assert_eq!(
+            spans.iter().filter(|s| s.contains("let a = 1;")).count(),
+            1,
+            "one line is one span, however many statements it holds: {spans:?}"
         );
     }
 

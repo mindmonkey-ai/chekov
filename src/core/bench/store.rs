@@ -552,8 +552,23 @@ fn unavailable_reason(rows: &[&TaskRow]) -> String {
         .to_owned()
 }
 
+/// How many distinct files the rows were drawn from.
+fn distinct_files(rows: &[&TaskRow]) -> usize {
+    rows.iter()
+        .filter_map(|r| r.codebase.as_ref())
+        .map(|c| c.file.as_str())
+        .collect::<std::collections::BTreeSet<&str>>()
+        .len()
+}
+
 /// The codebase block: counts and labels, then one line per tier group
 /// with the mean of every tier that has a value.
+///
+/// The header says `engine window ≤ n_batch` because llama.cpp's `/infill`
+/// caps the prefix at ~¾·`n_batch` tokens and the suffix at ~¼·`n_batch`:
+/// chekov sends the whole file and grades over the whole file, but a long
+/// file reaches the model only in part. Truncating here instead would make
+/// the tiers score a different question than the one the spec asks.
 #[must_use]
 pub fn render_codebase(log: &RunLog) -> String {
     let rows: Vec<&TaskRow> = rows_of(log, "codebase")
@@ -572,8 +587,10 @@ pub fn render_codebase(log: &RunLog) -> String {
             .count()
     };
     let mut out = format!(
-        "codebase     {} tasks ({} in_file, {} function_body) — {}; context: same-file\n",
+        "codebase     {} tasks from {} files ({} in_file, {} function_body) — {}; \
+         context: same-file (engine window ≤ n_batch)\n",
         rows.len(),
+        distinct_files(&rows),
         count(TaskTier::InFile),
         count(TaskTier::FunctionBody),
         crate::core::bench::codebase::MASK_LABEL,
@@ -1264,8 +1281,8 @@ mod tests {
         );
         let rendered = render_run(&log);
         let expected = [
-            "codebase     3 tasks (2 in_file, 1 function_body) — boundary-scanned (not AST); \
-             context: same-file",
+            "codebase     3 tasks from 1 files (2 in_file, 1 function_body) — \
+             boundary-scanned (not AST); context: same-file (engine window ≤ n_batch)",
             "in_file        exact 0.50   edit_sim",
             "symbols 1.00 (scored at run time)   (n=2)",
             "function_body  ident_f1",

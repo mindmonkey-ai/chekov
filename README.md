@@ -121,9 +121,14 @@ detached worktree, so the benchmark never touches uncommitted changes or the
 branch you're on. Only tiers 1–5 (exact, edit similarity, identifier F1,
 parse, repo-symbol existence) are scored; tiers 6–7 (compile gate, covering
 test) and cross-file context are deferred to slice B. Masks are
-boundary-scanned, not AST-derived, and the report always says so. A model
-without FIM tokens reports as N/A, never as a zero — an unsupported
-capability is not a failing score.
+boundary-scanned, not AST-derived, and the report always says so. chekov
+sends the whole file and grades over the whole file, but llama.cpp's `/infill`
+windows the prompt at its batch size (about ¾·`n_batch` tokens of prefix and
+¼·`n_batch` of suffix), so a long file reaches the model only in part — the
+report's `engine window ≤ n_batch` says as much. `--dry-run` still creates and
+removes a detached worktree in the target repository: the task set is sampled
+from `HEAD` before anything is printed. A model without FIM tokens reports as
+N/A, never as a zero — an unsupported capability is not a failing score.
 
 ### The six doctor checks
 
