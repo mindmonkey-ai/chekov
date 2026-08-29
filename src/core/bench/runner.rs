@@ -168,6 +168,18 @@ pub fn cross_forced(
     cross_inner(wire, req, Some(schema))
 }
 
+/// `cross` or `cross_streaming`, by door.
+pub fn cross_via(
+    wire: &ProbeWire,
+    req: &HttpRequest,
+    transport: Transport,
+) -> Result<ProbeArtifact, ChekovError> {
+    match transport {
+        Transport::Buffered => cross(wire, req),
+        Transport::Streamed => cross_streaming(wire, req),
+    }
+}
+
 fn cross_inner(
     wire: &ProbeWire,
     req: &HttpRequest,
@@ -742,6 +754,41 @@ mod tests {
         let err = super::cross_streaming(&wire(&http, &facade, &up), &anthropic_request("hi"))
             .expect_err("no timings, no measurement");
         assert!(matches!(err, ChekovError::BenchNoTimings), "{err}");
+    }
+
+    #[test]
+    fn a_transport_dispatches_to_its_door() {
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+
+        let buffered = CannedUpstream::new(openai_with_timings());
+        let artifact = super::cross_via(
+            &wire(&buffered, &facade, &up),
+            &anthropic_request("hi"),
+            super::Transport::Buffered,
+        )
+        .expect("buffered crossing");
+        let sent: serde_json::Value =
+            serde_json::from_str(&buffered.sent_body.borrow().clone().expect("posted"))
+                .expect("json");
+        assert!(
+            sent.get("stream").is_none(),
+            "buffered never streams: {sent}"
+        );
+        assert_eq!(parsed(&artifact)["content"][0]["text"], "hello there");
+
+        let streamed = CannedUpstream::new(sse(&[text_frame("hello there"), final_frame()]));
+        let artifact = super::cross_via(
+            &wire(&streamed, &facade, &up),
+            &anthropic_request("hi"),
+            super::Transport::Streamed,
+        )
+        .expect("streamed crossing");
+        let sent: serde_json::Value =
+            serde_json::from_str(&streamed.sent_body.borrow().clone().expect("posted"))
+                .expect("json");
+        assert_eq!(sent["stream"], true, "{sent}");
+        assert_eq!(parsed(&artifact)["content"][0]["text"], "hello there");
     }
 
     #[test]
