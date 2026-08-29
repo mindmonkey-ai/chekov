@@ -117,6 +117,16 @@ All notable changes to chekov are recorded here. The format follows
 - `launch`: local-directory marketplace plugins (`extraKnownMarketplaces`
   with `source = "directory"`) are mirrored into the session config dir so
   `enabledPlugins` resolves; `extraKnownMarketplaces` is now a carried key.
+- `chekov capability bench --codebase <PATH>` — a private codebase is the
+  only corpus a local user has that is guaranteed not to be in any model's
+  training data. Slice A builds the whole pipeline over the narrowest task
+  shape that already discriminates: same-file infill in Rust. It covers the
+  gate, the worktree, deterministic task sampling, honest masking, the
+  `/infill` crossing, storage, tiers 1–5 of the deterministic scoring ladder,
+  and the report. Left to later slices, and said in every report so nothing
+  is over-claimed: slice B (`cross_file_first` tasks with `input_extra`
+  context, and tiers 6–7 behind `--allow-exec`), slice C (`--judge`), other
+  languages behind the same `MaskSource` trait, and any composite score.
 
 ### Fixed
 - **The non-streaming translator keeps extracted reasoning, as the streaming
