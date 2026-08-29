@@ -29,8 +29,13 @@ fn git(repo: &Path, args: &[&str], step: &str) -> Result<String, ChekovError> {
 }
 
 /// `git status --porcelain` must be empty — untracked files included.
+///
+/// This is the first git command `--codebase` runs, so it is also where a
+/// path that is not a repository at all surfaces: the step carries the
+/// question the git error alone would not answer.
 pub fn assert_clean(repo: &Path) -> Result<(), ChekovError> {
-    let status = git(repo, &["status", "--porcelain"], "git status")?;
+    let step = format!("git status (is {} a git repository?)", repo.display());
+    let status = git(repo, &["status", "--porcelain"], &step)?;
     if status.is_empty() {
         Ok(())
     } else {
@@ -41,7 +46,11 @@ pub fn assert_clean(repo: &Path) -> Result<(), ChekovError> {
 }
 
 pub fn head_sha(repo: &Path) -> Result<String, ChekovError> {
-    git(repo, &["rev-parse", "HEAD"], "git rev-parse HEAD")
+    let step = format!(
+        "git rev-parse HEAD (is {} a git repository?)",
+        repo.display()
+    );
+    git(repo, &["rev-parse", "HEAD"], &step)
 }
 
 /// A detached checkout of HEAD that the run reads from; removed after.
@@ -109,18 +118,34 @@ impl Drop for Worktree {
     }
 }
 
-/// Every `*.rs` under `root` except test files (the leakage filter's rule
-/// (a), applied at the source so a test is never a task or context), with
-/// oversized files skipped. Sorted by relative path.
-#[must_use]
-pub fn rust_sources(root: &Path) -> Vec<(String, String)> {
-    let mut files = Vec::new();
-    walk(root, root, &mut files);
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-    files
+/// What the walk found.
+///
+/// The eligible files, and enough of what it passed over to say so: a file
+/// skipped for its size is a file the run silently would not have drawn
+/// from, and the count makes that visible in the shortfall.
+pub struct Sources {
+    pub files: Vec<(String, String)>,
+    pub oversized: usize,
+    pub scanned: usize,
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+/// Every `*.rs` under `root` except test files, sorted by relative path.
+///
+/// The leakage filter's rule (a) is applied at the source, so a test is never
+/// a task or context; oversized files are skipped and counted.
+#[must_use]
+pub fn rust_sources(root: &Path) -> Sources {
+    let mut out = Sources {
+        files: Vec::new(),
+        oversized: 0,
+        scanned: 0,
+    };
+    walk(root, root, &mut out);
+    out.files.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn walk(root: &Path, dir: &Path, out: &mut Sources) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -133,26 +158,38 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
             }
             continue;
         }
-        if let Some(text) = source_text(&path, &name) {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            out.push((rel, text));
-        }
+        take_source(root, &path, out);
     }
 }
 
-fn source_text(path: &Path, name: &str) -> Option<String> {
-    let is_rust = path
+/// One file's contribution: every Rust file is scanned, and the eligible ones
+/// are kept under their `root`-relative path.
+fn take_source(root: &Path, path: &Path, out: &mut Sources) {
+    if !path
         .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"));
-    let is_test = name.ends_with("_test.rs") || name.starts_with("test_");
-    if !is_rust || is_test {
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+    {
+        return;
+    }
+    out.scanned += 1;
+    let Some(text) = source_text(path, &mut out.oversized) else {
+        return;
+    };
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    out.files.push((rel, text));
+}
+
+fn source_text(path: &Path, oversized: &mut usize) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy().to_string();
+    if name.ends_with("_test.rs") || name.starts_with("test_") {
         return None;
     }
     if std::fs::metadata(path).ok()?.len() > MAX_FILE_BYTES {
+        *oversized += 1;
         return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
@@ -242,6 +279,22 @@ mod tests {
     }
 
     #[test]
+    fn a_path_that_is_not_a_repository_says_so_in_the_step() {
+        let dir = std::env::temp_dir()
+            .join("chekov-test-codebase-tree")
+            .join("not-a-repo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let Err(ChekovError::CodebaseWorktreeFailed { step, .. }) = assert_clean(&dir) else {
+            panic!("a non-repository is a worktree failure, not a dirty tree");
+        };
+        assert!(
+            step.contains("is") && step.contains("a git repository?"),
+            "{step}"
+        );
+    }
+
+    #[test]
     fn a_leftover_directory_at_the_destination_does_not_block_the_next_run() {
         let dir = repo("leftover");
         let dest = dir.join("scratch").join("codebase-tree-abc123");
@@ -266,11 +319,28 @@ mod tests {
     }
 
     #[test]
-    fn rust_sources_skip_tests_and_cfg_test_files() {
+    fn rust_sources_skip_tests_and_cfg_test_files_and_count_what_they_passed() {
         let dir = repo("walk");
-        let files = rust_sources(&dir);
-        let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        let sources = rust_sources(&dir);
+        let paths: Vec<&str> = sources.files.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(paths, vec!["src/lib.rs"], "{paths:?}");
-        assert!(files[0].1.contains("pub fn a()"));
+        assert!(sources.files[0].1.contains("pub fn a()"));
+        assert_eq!(
+            sources.scanned, 2,
+            "src/lib.rs and src/cov.rs; tests/ is not walked"
+        );
+        assert_eq!(sources.oversized, 0);
+    }
+
+    #[test]
+    fn a_file_over_the_size_cap_is_counted_not_silently_dropped() {
+        let dir = repo("oversize");
+        std::fs::write(dir.join("src/huge.rs"), "// ".repeat(120 * 1024)).expect("write");
+        let sources = rust_sources(&dir);
+        assert_eq!(sources.oversized, 1, "{:?}", sources.files.len());
+        assert!(
+            !sources.files.iter().any(|(p, _)| p.contains("huge")),
+            "the file is still skipped — it is now also counted"
+        );
     }
 }

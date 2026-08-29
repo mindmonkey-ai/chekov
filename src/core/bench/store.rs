@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::bench::codebase::ladder::{self, Score, Tier};
+use crate::core::bench::codebase::ladder::{self, Score, Tier, as_f64};
 use crate::core::bench::codebase::{Excluded, TaskTier};
 use crate::core::bench::stamp::{Stamp, mismatch_error};
 use crate::core::bench::sweep::curve_note;
@@ -669,21 +669,20 @@ fn tier_mean(group: &[&CodebaseRow], tier: Tier) -> Option<f64> {
     Some(values.iter().sum::<f64>() / as_f64(values.len()))
 }
 
-/// Tiers 1–4 from the stored text — a stored score can never drift.
+/// Tiers 1–4 from the stored text — a stored score can never drift. The
+/// ladder's own function does the scoring, so the run and the re-read cannot
+/// disagree about which tier a task skipped, or say it differently.
 fn recompute(c: &CodebaseRow, tier: Tier) -> Score {
-    let line_level = c.tier == TaskTier::InFile;
-    match tier {
-        Tier::Exact if line_level => Score::Value(ladder::exact(&c.gold, &c.prediction)),
-        Tier::EditSim if line_level => Score::Value(ladder::edit_sim(&c.gold, &c.prediction)),
-        Tier::Exact | Tier::EditSim => Score::Skipped("function_body"),
-        Tier::IdentF1 => Score::Value(ladder::ident_f1(&c.gold, &c.prediction)),
-        Tier::Parse => Score::Value(ladder::parse(&c.prefix, &c.prediction, &c.suffix)),
-        Tier::Symbols | Tier::Compile | Tier::Test => Score::Skipped("not recomputed"),
-    }
-}
-
-fn as_f64(n: usize) -> f64 {
-    u32::try_from(n).map_or(f64::MAX, f64::from)
+    ladder::stored_tier(
+        tier,
+        &ladder::StoredText {
+            tier: c.tier,
+            gold: &c.gold,
+            prediction: &c.prediction,
+            prefix: &c.prefix,
+            suffix: &c.suffix,
+        },
+    )
 }
 
 fn tool_emit_line(log: &RunLog, transport: Transport) -> Option<String> {

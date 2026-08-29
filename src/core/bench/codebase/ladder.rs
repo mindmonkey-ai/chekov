@@ -24,16 +24,6 @@ pub enum Tier {
 }
 
 impl Tier {
-    pub const ALL: [Self; 7] = [
-        Self::Exact,
-        Self::EditSim,
-        Self::IdentF1,
-        Self::Parse,
-        Self::Symbols,
-        Self::Compile,
-        Self::Test,
-    ];
-
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -56,6 +46,7 @@ pub enum Score {
 
 const EXEC_SKIPPED: &str = "slice B (--allow-exec)";
 const BODY_SKIPPED: &str = "function_body: tiers 1-2 punish valid alternatives";
+const SYMBOLS_AT_RUN_TIME: &str = "symbols: needs the worktree, scored at run time";
 
 /// Rust keywords — never identifiers.
 const KEYWORDS: [&str; 52] = [
@@ -246,6 +237,35 @@ pub struct Scored<'a> {
     pub symbols: &'a Symbols,
 }
 
+/// The text tiers 1–4 are scored from.
+///
+/// A live task and a stored row look identical here, which is the point: both
+/// go through `stored_tier`, so the run and the re-read can never disagree
+/// about what a tier skipped or why.
+pub struct StoredText<'a> {
+    pub tier: TaskTier,
+    pub gold: &'a str,
+    pub prediction: &'a str,
+    pub prefix: &'a str,
+    pub suffix: &'a str,
+}
+
+/// One tier over stored text. Tier 5 needs the repo's symbol set, which the
+/// worktree took with it, so it is scored at run time and skipped here.
+#[must_use]
+pub fn stored_tier(tier: Tier, text: &StoredText) -> Score {
+    let line_level = text.tier == TaskTier::InFile;
+    match tier {
+        Tier::Exact if line_level => Score::Value(exact(text.gold, text.prediction)),
+        Tier::EditSim if line_level => Score::Value(edit_sim(text.gold, text.prediction)),
+        Tier::Exact | Tier::EditSim => Score::Skipped(BODY_SKIPPED),
+        Tier::IdentF1 => Score::Value(ident_f1(text.gold, text.prediction)),
+        Tier::Parse => Score::Value(parse(text.prefix, text.prediction, text.suffix)),
+        Tier::Symbols => Score::Skipped(SYMBOLS_AT_RUN_TIME),
+        Tier::Compile | Tier::Test => Score::Skipped(EXEC_SKIPPED),
+    }
+}
+
 #[must_use]
 pub fn score_all(s: &Scored) -> Vec<(Tier, Score)> {
     let t = s.task;
@@ -256,29 +276,25 @@ pub fn score_all(s: &Scored) -> Vec<(Tier, Score)> {
         file_uses: &file_uses,
         context: &context,
     };
-    let line_level = t.tier == TaskTier::InFile;
-    let gated = |v: f64| {
-        if line_level {
-            Score::Value(v)
-        } else {
-            Score::Skipped(BODY_SKIPPED)
-        }
+    let text = StoredText {
+        tier: t.tier,
+        gold: &t.gold,
+        prediction: s.prediction,
+        prefix: &t.prefix,
+        suffix: &t.suffix,
     };
-    vec![
-        (Tier::Exact, gated(exact(&t.gold, s.prediction))),
-        (Tier::EditSim, gated(edit_sim(&t.gold, s.prediction))),
-        (Tier::IdentF1, Score::Value(ident_f1(&t.gold, s.prediction))),
-        (
-            Tier::Parse,
-            Score::Value(parse(&t.prefix, s.prediction, &t.suffix)),
-        ),
-        (
-            Tier::Symbols,
-            Score::Value(symbols(s.prediction, &t.gold, &known)),
-        ),
-        (Tier::Compile, Score::Skipped(EXEC_SKIPPED)),
-        (Tier::Test, Score::Skipped(EXEC_SKIPPED)),
-    ]
+    [Tier::Exact, Tier::EditSim, Tier::IdentF1, Tier::Parse]
+        .into_iter()
+        .map(|tier| (tier, stored_tier(tier, &text)))
+        .chain([
+            (
+                Tier::Symbols,
+                Score::Value(symbols(s.prediction, &t.gold, &known)),
+            ),
+            (Tier::Compile, Score::Skipped(EXEC_SKIPPED)),
+            (Tier::Test, Score::Skipped(EXEC_SKIPPED)),
+        ])
+        .collect()
 }
 
 fn normalise(s: &str) -> String {
@@ -320,7 +336,9 @@ pub fn edit_sim(gold: &str, pred: &str) -> f64 {
     1.0 - as_f64(previous_row[b.len()]) / as_f64(longest)
 }
 
-fn as_f64(n: usize) -> f64 {
+/// A count as a float, exactly — a count too large for `u32` saturates
+/// rather than rounding to a number that was never measured.
+pub(crate) fn as_f64(n: usize) -> f64 {
     u32::try_from(n).map_or(f64::MAX, f64::from)
 }
 

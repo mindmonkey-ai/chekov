@@ -95,37 +95,54 @@ fn assembled_tasks(files: &[(String, String)], picked: &[sample::Picked]) -> Vec
 /// HEAD it checks out, so two runs of different commits never share one, and
 /// derived here rather than by the caller, which does not know the HEAD yet.
 pub fn prepare(repo: &Path, scratch_root: &Path, tasks: u32) -> Result<Prepared, ChekovError> {
-    use masker::MaskSource;
     tree::assert_clean(repo)?;
     let head = tree::head_sha(repo)?;
     let scratch_tree = scratch_root.join(format!("codebase-tree-{}", head12(&head)));
     let worktree = tree::Worktree::add(repo, &scratch_tree)?;
-    let files = tree::rust_sources(&worktree.path);
-    let candidates: Vec<sample::FileCandidates> = files
-        .iter()
-        .map(|(path, text)| sample::FileCandidates {
-            path: path.clone(),
-            candidates: masker::RustBraceMasker.candidates(text),
-        })
-        .collect();
+    let sources = tree::rust_sources(&worktree.path);
     let set = sample::sample(
-        candidates,
+        file_candidates(&sources.files),
         sample::quota(tasks),
         sample::seed_from_head(&head),
     );
-    let symbols = ladder::repo_symbols(&files);
+    let symbols = ladder::repo_symbols(&sources.files);
     worktree.remove()?;
     if set.picked.is_empty() {
         return Err(ChekovError::CodebaseNoTasks {
             path: repo.to_path_buf(),
-            reason: format!("scanned {} files, 0 candidate spans", files.len()),
+            reason: format!(
+                "scanned {} files, {} eligible, 0 candidate spans",
+                sources.scanned,
+                sources.files.len()
+            ),
         });
     }
     Ok(Prepared {
         head,
         set_hash: sample::task_set_hash(&set),
-        tasks: assembled_tasks(&files, &set.picked),
-        shortfall: set.shortfall,
+        tasks: assembled_tasks(&sources.files, &set.picked),
+        shortfall: with_oversized(set.shortfall, sources.oversized),
         symbols,
     })
+}
+
+/// Every file's candidate spans, in the shape the sampler strata want.
+fn file_candidates(files: &[(String, String)]) -> Vec<sample::FileCandidates> {
+    use masker::MaskSource;
+    files
+        .iter()
+        .map(|(path, text)| sample::FileCandidates {
+            path: path.clone(),
+            candidates: masker::RustBraceMasker.candidates(text),
+        })
+        .collect()
+}
+
+/// The sampler's shortfall, plus the files the walk never offered it — a task
+/// set drawn from less than the repository says so.
+fn with_oversized(mut shortfall: Vec<String>, oversized: usize) -> Vec<String> {
+    if oversized > 0 {
+        shortfall.push(format!("{oversized} files over 200 KiB skipped"));
+    }
+    shortfall
 }

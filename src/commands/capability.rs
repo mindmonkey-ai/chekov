@@ -913,8 +913,10 @@ fn render_dry_run(
 
 fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
     use crate::core::bench::{lifecycle, sweep};
-    let candidates = resolve_candidates(ctx, args)?;
+    // The user's own repository is asked about first: a dirty tree is refused
+    // before a single question about servers or models is asked.
     let prepared = prepare_codebase(ctx, args)?;
+    let candidates = resolve_candidates(ctx, args)?;
     let inputs = RunInputs {
         args,
         prepared: prepared.as_ref(),
