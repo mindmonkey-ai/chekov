@@ -275,9 +275,14 @@ shapes, and a repo only has to use one of them:
   `Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`;
 - flat files in the repo root — `Model-Q8_0.gguf`.
 
-A dot-separated tag (`Model.Q4_K_M.gguf`, the mradermacher style) is **not**
-read yet: such a repo reports "this repo exposes no .gguf files". If a repo you
-expect to work reports that, check the layout before the tag.
+The tag may be dot-separated (`Model.Q4_K_M.gguf`, the mradermacher style) and
+may be lowercase (`qwen2.5-0.5b-instruct-q4_k_m.gguf`, the `Qwen/*-GGUF`
+style): a spec matches a tag case-insensitively, and the registry records the
+repo's own spelling, because that spelling is also the download path. If one
+repo carries two spellings of the same tag, both are listed and an inexact
+spec is refused naming them — give the exact spelling. A repo that still
+reports "this repo exposes no .gguf files" has files whose names carry no
+`Q…`/`IQ…`/`BF16`/`F16`/`F32` token at all; check its file list.
 
 ### Swapping models
 
@@ -359,7 +364,7 @@ days-old `~/.cargo/bin/chekov` is the likelier explanation.
 | First Claude Code call is slow (~5–6 min) | Expected: Claude Code's initial request carries a ~60k-token system+tools prompt; MiniMax prompt-processes at ~180 tok/s. The server's prompt cache makes subsequent calls fast. |
 | Registry corrupt | The error names the file; restore from a backup or delete `models.toml` and re-`pull` (weights are untouched). |
 | `Not possible to fast-forward` on `setup` / `update --engine` | The `llama.cpp/` checkout has diverged from `origin/master` (a hand-applied commit), and the step is a `git pull --ff-only`. The built engine is untouched. Pin `[engine] git_ref`, or rebase and rebuild by hand — see [Updating](#updating). |
-| `quant tag 'X' not found … (none — this repo exposes no .gguf files)` | Either the installed binary predates the folder-per-quant fix (`make install`), or the repo uses a layout chekov does not read yet — a dot-separated tag such as `Model.Q4_K_M.gguf`. Check the repo's file list before assuming the tag is wrong. |
+| `quant tag 'X' not found … (none — this repo exposes no .gguf files)` | Either the installed binary predates the folder-per-quant fix (`make install`), or the repo's filenames carry no `Q…`/`IQ…`/`BF16`/`F16`/`F32` token in any spelling (dot- and dash-separated, upper- and lowercase are all read). Check the repo's file list before assuming the tag is wrong. |
 | `WorkingTreeDirty` from `capability bench --codebase` | Codebase mode refuses a dirty tree so the task set is exactly what `HEAD` says. Commit, stash, or bench a clean clone of the repository. |
 | `codebase N/A — infill unsupported by this model` | The model's GGUF carries no FIM tokens, so `/infill` has nothing to fill. That is a missing capability, not a failing score — it is never reported as a zero. |
 
@@ -456,9 +461,11 @@ Short names derive from the repo tail: `-GGUF` stripped, lowercased
 (`unsloth/MiniMax-M2.7-GGUF` → `minimax-m2.7`). Override with `--name`.
 Quant tags are matched by a single source of truth — subdir-style
 `UD-Q5_K_XL/…`, a model-named subdir carrying the tag in the shard filename
-(`Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`), and flat `…-Q8_0.gguf` all
-work — so `Q5_K_XL` can never accidentally select `UD-Q5_K_XL` files. A
-dot-separated tag (`Model.Q4_K_M.gguf`) is not read yet.
+(`Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`), flat `…-Q8_0.gguf`, and
+dot-separated `Model.Q4_K_M.gguf` all work — so `Q5_K_XL` can never
+accidentally select `UD-Q5_K_XL` files. Matching is case-insensitive
+(`Q4_K_M` selects a repo's `q4_k_m`) and the repo's spelling is what gets
+recorded; a repo with two spellings of one tag refuses an inexact spec.
 
 ## Registry: flags concatenate, never replace
 

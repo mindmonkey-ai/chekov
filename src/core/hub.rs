@@ -152,28 +152,22 @@ pub fn plan_pull(
     target: &PullTarget<'_>,
 ) -> Result<PullPlan, ChekovError> {
     let available = render_quant_table(&quant_options(snapshot), target.wired_mb);
-    let Some(quant) = target.quant else {
+    if target.quant.is_none() {
         return Err(ChekovError::NoQuantSpecified {
             repo: target.repo.to_string(),
             available,
         });
-    };
+    }
+    let quant = resolve_quant(snapshot, target, available)?;
     let files: Vec<PlanFile> = snapshot
         .files
         .iter()
-        .filter(|f| derived_quant(&f.rfilename).as_deref() == Some(quant))
+        .filter(|f| derived_quant(&f.rfilename).as_deref() == Some(quant.as_str()))
         .map(|f| PlanFile {
             path: f.rfilename.clone(),
             size: f.size,
         })
         .collect();
-    if files.is_empty() {
-        return Err(ChekovError::QuantNotFound {
-            quant: quant.to_owned(),
-            repo: target.repo.to_string(),
-            available,
-        });
-    }
     let first_shard = files
         .iter()
         .find(|f| f.path.contains("-00001-of-"))
@@ -181,10 +175,55 @@ pub fn plan_pull(
         .path
         .clone();
     Ok(PullPlan {
-        quant: quant.to_owned(),
+        quant,
         files,
         first_shard,
     })
+}
+
+/// The spelling `plan_pull` will use, or the error that names the choices:
+/// `QuantNotFound` with the table when nothing matches, `QuantAmbiguous` with
+/// every spelling when more than one does.
+fn resolve_quant(
+    snapshot: &RepoSnapshot,
+    target: &PullTarget<'_>,
+    available: String,
+) -> Result<String, ChekovError> {
+    let quant = target.quant.unwrap_or_default();
+    match select_spelling(snapshot, quant) {
+        Ok(spelling) => Ok(spelling),
+        Err(spellings) if spellings.is_empty() => Err(ChekovError::QuantNotFound {
+            quant: quant.to_owned(),
+            repo: target.repo.to_string(),
+            available,
+        }),
+        Err(spellings) => Err(ChekovError::QuantAmbiguous {
+            quant: quant.to_owned(),
+            repo: target.repo.to_string(),
+            spellings: spellings.join(", "),
+        }),
+    }
+}
+
+/// The repo's own spelling of the tag the user asked for.
+///
+/// An exact match wins outright. Otherwise the match is case-insensitive
+/// (`Q4_K_M` selects a repo's `q4_k_m`) — and if that matches more than one
+/// spelling, the caller refuses with all of them rather than picking one:
+/// `Err` carries every spelling matched, empty when there is none.
+fn select_spelling(snapshot: &RepoSnapshot, quant: &str) -> Result<String, Vec<String>> {
+    let tags = available_quants(snapshot);
+    if tags.iter().any(|t| t == quant) {
+        return Ok(quant.to_owned());
+    }
+    let mut matched: Vec<String> = tags
+        .into_iter()
+        .filter(|t| t.eq_ignore_ascii_case(quant))
+        .collect();
+    match matched.len() {
+        1 => Ok(matched.remove(0)),
+        _ => Err(matched),
+    }
 }
 
 /// Distinct quant tags present in a repo's GGUF files (subdir- and
@@ -302,8 +341,11 @@ fn derived_quant(path: &str) -> Option<String> {
     }
     let stem = stem.rsplit('/').next().unwrap_or(stem);
     let stem = strip_shard_suffix(stem);
+    // `-` and `.` both separate a tag from the model name: `Model-Q8_0` and
+    // `Model.Q4_K_M` (the mradermacher layout). A version dot (`Qwen2.5-…`)
+    // yields a candidate starting with a digit, which is not tag-like.
     stem.char_indices()
-        .filter(|&(_, c)| c == '-')
+        .filter(|&(_, c)| c == '-' || c == '.')
         .map(|(i, _)| &stem[i + 1..])
         .find(|cand| quant_like(cand))
         .map(ToOwned::to_owned)
@@ -327,8 +369,13 @@ fn is_weights(path: &str) -> bool {
 }
 
 /// Heuristic for quant-tag tokens: `UD-Q5_K_XL`, `IQ4_XS`, `Q8_0`, `BF16`…
+///
+/// Case-insensitive: `Qwen/*-GGUF` repos publish `q4_k_m`, and a tag is a
+/// tag whichever case its publisher typed. The token keeps its own spelling
+/// everywhere it is stored — it is also the download path.
 fn quant_like(token: &str) -> bool {
-    let core = token.strip_prefix("UD-").unwrap_or(token);
+    let upper = token.to_ascii_uppercase();
+    let core = upper.strip_prefix("UD-").unwrap_or(&upper);
     let q_digit = |t: &str| {
         t.strip_prefix("IQ")
             .or_else(|| t.strip_prefix('Q'))
@@ -954,6 +1001,78 @@ mod tests {
             "{}",
             plan.first_shard
         );
+    }
+
+    const LOWER_AND_DOTTED_JSON: &str = r#"{
+        "sha": "abcdef0123456789abcdef0123456789abcdef01",
+        "siblings": [
+            {"rfilename": "qwen2.5-0.5b-instruct-q4_k_m.gguf", "size": 10},
+            {"rfilename": "Mistral-7B-v0.3.Q4_K_M.gguf", "size": 20},
+            {"rfilename": "Model.i1-IQ3_XS.gguf", "size": 30},
+            {"rfilename": "ud-q5_k_xl/Model-ud-q5_k_xl-00001-of-00002.gguf", "size": 40},
+            {"rfilename": "ud-q5_k_xl/Model-ud-q5_k_xl-00002-of-00002.gguf", "size": 40}
+        ]
+    }"#;
+
+    #[test]
+    fn lowercase_and_dot_separated_tags_derive_in_the_repos_own_spelling() {
+        let tags = available_quants(&snapshot_from(LOWER_AND_DOTTED_JSON));
+        for expected in ["q4_k_m", "Q4_K_M", "IQ3_XS", "ud-q5_k_xl"] {
+            assert!(
+                tags.contains(&expected.to_owned()),
+                "{expected} missing from {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spec_matches_a_tag_case_insensitively_and_records_the_repo_spelling() {
+        let snap = snapshot_from(LOWER_AND_DOTTED_JSON);
+        let target = PullTarget {
+            repo: &repo(),
+            quant: Some("IQ3_xs"),
+            wired_mb: None,
+        };
+        let plan = plan_pull(&snap, &target).expect("case-insensitive match");
+        assert_eq!(
+            plan.quant, "IQ3_XS",
+            "the repo's spelling is what gets stored"
+        );
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, "Model.i1-IQ3_XS.gguf");
+    }
+
+    #[test]
+    fn two_spellings_of_one_tag_are_both_listed_and_an_inexact_spec_is_refused() {
+        let snap = snapshot_from(
+            r#"{"sha": "abcdef0123456789abcdef0123456789abcdef01", "siblings": [
+                {"rfilename": "Model-Q4_K_M.gguf", "size": 10},
+                {"rfilename": "Model.q4_k_m.gguf", "size": 10}
+            ]}"#,
+        );
+        let tags = available_quants(&snap);
+        assert!(
+            tags.contains(&"Q4_K_M".to_owned()) && tags.contains(&"q4_k_m".to_owned()),
+            "{tags:?}"
+        );
+        let ask = |quant: &'static str| {
+            plan_pull(
+                &snap,
+                &PullTarget {
+                    repo: &repo(),
+                    quant: Some(quant),
+                    wired_mb: None,
+                },
+            )
+        };
+        let err = ask("q4_K_m").expect_err("two spellings match");
+        assert!(matches!(err, ChekovError::QuantAmbiguous { .. }), "{err}");
+        assert!(
+            err.to_string().contains("Q4_K_M") && err.to_string().contains("q4_k_m"),
+            "{err}"
+        );
+        let exact = ask("q4_k_m").expect("an exact spelling wins outright");
+        assert_eq!(exact.files[0].path, "Model.q4_k_m.gguf");
     }
 
     #[test]

@@ -189,6 +189,15 @@ All notable changes to chekov are recorded here. The format follows
   derived from the shard's own filename when the folder does not carry one.
   unsloth's `UD-*/` folders and flat `Model-Q8_0.gguf` names derive exactly as
   before.
+- **`pull` reads lowercase and dot-separated quant tags.** `Qwen/*-GGUF` repos
+  publish `qwen2.5-0.5b-instruct-q4_k_m.gguf` and mradermacher publishes
+  `Model.Q4_K_M.gguf`; both derived to nothing and reported "exposes no .gguf
+  files". A tag is now recognised in any case and after a `.` as well as a
+  `-`, a spec matches case-insensitively, and the registry records the repo's
+  own spelling — it is also the download path. If one repo carries two
+  spellings of the same tag, both are listed and an inexact spec is refused
+  (`QuantAmbiguous`) naming them, never resolved by a silent pick; an exact
+  spelling always wins.
 - **The non-streaming translator keeps extracted reasoning, as the streaming
   one always has.** With `--reasoning-format auto|deepseek` — or the bench's
   forced pass asking for it per request — the engine puts the reasoning in

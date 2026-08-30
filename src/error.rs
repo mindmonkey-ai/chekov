@@ -31,6 +31,16 @@ pub enum ChekovError {
     },
 
     #[error(
+        "quant tag '{quant}' matches more than one spelling in {repo}: {spellings} — \
+         re-run with the exact spelling: chekov pull {repo}:<QUANT>"
+    )]
+    QuantAmbiguous {
+        quant: String,
+        repo: String,
+        spellings: String,
+    },
+
+    #[error(
         "model '{name}' is not in the registry — run `chekov list` to see \
          registered models or `chekov pull <spec>` to add one"
     )]

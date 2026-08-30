@@ -415,9 +415,11 @@ appears in the path:
   `Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`;
 - **flat in the repo root** — `Model-Q8_0.gguf`.
 
-`chekov pull` reads all three. It does not yet read a dot-separated tag
-(`Model.Q4_K_M.gguf`, the mradermacher style) — such a repo reports that it
-exposes no `.gguf` files, so check the layout before assuming the tag is wrong.
+`chekov pull` reads all three, plus a dot-separated tag (`Model.Q4_K_M.gguf`,
+the mradermacher style) and lowercase tags (`…-q4_k_m.gguf`, the `Qwen/*-GGUF`
+style). Specs match case-insensitively; the repo's own spelling is what the
+registry stores. A repo that still reports it exposes no `.gguf` files has
+filenames with no recognisable quant token — check its file list.
 
 ---
 
