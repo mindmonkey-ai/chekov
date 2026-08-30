@@ -361,6 +361,31 @@ pub enum ChekovError {
     )]
     ExecWorktreeDirty { path: PathBuf, file: String },
 
+    #[error(
+        "'{name}' is registered without `role = \"judge\"` — a judge is named on purpose; \
+         add `role = \"judge\"` to its entry in models.toml (a different family from every \
+         candidate), then retry"
+    )]
+    JudgeNoRole { name: String },
+
+    #[error(
+        "judge '{judge}' and candidate '{candidate}' are the same family ({family}) — a model \
+         judging its sibling produces a rigged table; name a judge whose GGUF \
+         `general.architecture` is not {family}"
+    )]
+    JudgeFamilyConflict {
+        judge: String,
+        candidate: String,
+        family: String,
+    },
+
+    #[error(
+        "--judge needs to load the judge after the candidates are down, but the running \
+         server is one bench did not start — bench never stops a server it did not start; \
+         stop it or drop --judge"
+    )]
+    JudgeNeedsTheServer,
+
     #[error("{context}: {source} — check the path exists and is writable, then retry")]
     Io {
         context: String,
