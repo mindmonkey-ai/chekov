@@ -302,6 +302,7 @@ fn record_codebase_task(
             n_predict: Some(runner::n_predict_for(gold_lines(task))),
             exec,
         }),
+        judge: None,
     })
 }
 
@@ -514,6 +515,7 @@ mod tests {
                 chekov_version: "0.1.0".into(),
                 prompt_set_hash: "codebase-only".into(),
                 corpus_id: "codebase:4818813deeaa:abcdef123456".into(),
+                judge: None,
             },
         }
     }

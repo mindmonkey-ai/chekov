@@ -361,6 +361,7 @@ mod tests {
                 hermes_ok: false,
                 ctx_size: None,
                 extra_flags: Vec::new(),
+                role: None,
             },
         }
     }

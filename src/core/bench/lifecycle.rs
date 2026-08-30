@@ -129,6 +129,8 @@ pub enum StepAction {
     UseRunning,
     /// Bench launches it, tears it down, and verifies the budget released.
     Launch,
+    /// The judge, loaded once after every candidate is down (spec C §3).
+    Judge,
 }
 
 /// Reference rates from the spec's measured inputs (§7.6): load ≈ 4 s/GiB,
@@ -138,8 +140,11 @@ const PREFILL_TOK_S: u64 = 150;
 const DECODE_TOK_S: u64 = 60;
 const GIB: u64 = 1024 * 1024 * 1024;
 
-/// Rough wall-clock seconds for the whole plan. Integer milliseconds
-/// throughout — an estimate needs no float.
+/// Rough wall-clock seconds for the whole plan.
+///
+/// Every candidate's load and sweep, plus the judge step's own load. What the
+/// judge then SPENDS on verdicts is `judge_estimate_secs`, added by the
+/// caller. Integer milliseconds throughout — an estimate needs no float.
 #[must_use]
 pub fn estimate_secs(steps: &[BenchStep], plan: &crate::core::bench::sweep::SweepPlan) -> u64 {
     let sweep_ms: u64 = plan
@@ -151,24 +156,39 @@ pub fn estimate_secs(steps: &[BenchStep], plan: &crate::core::bench::sweep::Swee
                     + u64::from(plan.max_tokens) * 1000 / DECODE_TOK_S)
         })
         .sum();
-    let total_ms: u64 = steps
-        .iter()
-        .map(|step| {
-            let load_ms = match step.action {
-                StepAction::Launch => step.weights_bytes.unwrap_or(0) / GIB * LOAD_MS_PER_GIB,
-                StepAction::UseRunning => 0,
-            };
-            load_ms + sweep_ms
-        })
-        .sum();
+    let total_ms: u64 = steps.iter().map(|step| step_ms(step, sweep_ms)).sum();
     total_ms.div_ceil(1000)
 }
 
+/// One step's wall-clock cost: a load for anything launched, a sweep for
+/// anything measured against the model once it's up. The judge is loaded
+/// but never swept — its cost is `judge_estimate_secs`, counted elsewhere.
+fn step_ms(step: &BenchStep, sweep_ms: u64) -> u64 {
+    let load_ms = || step.weights_bytes.unwrap_or(0) / GIB * LOAD_MS_PER_GIB;
+    match step.action {
+        StepAction::Launch => load_ms() + sweep_ms,
+        StepAction::Judge => load_ms(),
+        StepAction::UseRunning => sweep_ms,
+    }
+}
+
 /// Any launch is a real side effect (a model load, a teardown) — those runs
-/// confirm; a pure reuse-the-running-server run stays gate-free.
+/// confirm, and the judge's own step is such a launch. A pure
+/// reuse-the-running-server run stays gate-free.
 #[must_use]
 pub fn needs_confirm(steps: &[BenchStep]) -> bool {
-    steps.iter().any(|s| s.action == StepAction::Launch)
+    steps
+        .iter()
+        .any(|s| matches!(s.action, StepAction::Launch | StepAction::Judge))
+}
+
+/// Two seconds a verdict on the 2026-08-30 probe (1.06 s gpt-oss-20b,
+/// 0.78 s Gemma), rounded up; two orders per crossing.
+pub const JUDGE_SECS_PER_VERDICT: u64 = 2;
+
+#[must_use]
+pub const fn judge_estimate_secs(crossings: u64) -> u64 {
+    crossings * 2 * JUDGE_SECS_PER_VERDICT
 }
 
 /// The plan a human reads before agreeing to it.
@@ -185,6 +205,7 @@ fn step_line(step: &BenchStep) -> String {
     let action = match step.action {
         StepAction::UseRunning => "use running server",
         StepAction::Launch => "launch + teardown",
+        StepAction::Judge => "judge: launch + teardown",
     };
     let weights = step
         .weights_bytes
@@ -310,7 +331,9 @@ mod tests {
         assert!(wait_budget_released(instant_policy(3), &mut || None).is_err());
     }
 
-    use super::{BenchStep, StepAction, estimate_secs, needs_confirm, render_plan};
+    use super::{
+        BenchStep, GIB, StepAction, estimate_secs, judge_estimate_secs, needs_confirm, render_plan,
+    };
     use crate::core::bench::sweep::SweepPlan;
 
     fn plan() -> SweepPlan {
@@ -361,5 +384,39 @@ mod tests {
             "an unknown size is stated, never invented: {rendered}"
         );
         assert!(rendered.contains("min estimated"), "{rendered}");
+    }
+
+    #[test]
+    fn a_judge_step_confirms_loads_and_never_sweeps() {
+        let steps = [
+            BenchStep {
+                model: "ornith-1.5-35b-a3b".into(),
+                action: StepAction::Launch,
+                weights_bytes: Some(GIB),
+            },
+            BenchStep {
+                model: "gpt-oss-20b".into(),
+                action: StepAction::Judge,
+                weights_bytes: Some(GIB),
+            },
+        ];
+        let plan = crate::core::bench::sweep::SweepPlan {
+            depths: vec![1024],
+            repetitions: 1,
+            max_tokens: 60,
+        };
+        let one = estimate_secs(&steps[..1], &plan);
+        let both = estimate_secs(&steps, &plan);
+        assert_eq!(
+            both - one,
+            4,
+            "a judge step costs its load (4 s/GiB) and no sweep"
+        );
+        assert!(needs_confirm(&steps[1..]));
+        assert!(
+            render_plan(&steps, both)
+                .contains("  gpt-oss-20b  judge: launch + teardown  weights 1.0 GiB\n")
+        );
+        assert_eq!(judge_estimate_secs(6), 24);
     }
 }

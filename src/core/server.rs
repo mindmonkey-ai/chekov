@@ -249,6 +249,7 @@ mod tests {
                 hermes_ok: false,
                 ctx_size: None,
                 extra_flags: vec!["--temp".into(), "1.0".into()],
+                role: None,
             },
         );
         (cfg, reg.effective("m").expect("registered"))

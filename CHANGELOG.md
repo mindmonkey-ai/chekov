@@ -7,6 +7,11 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Changed
+- `Stamp` gains a 21st field, `judge: Option<JudgeStamp>` — absent on every
+  run recorded before slice C, filled at plan time by `--judge` or adopted on
+  `--resume --judge <name>` when the rest of the stamp still matches. `compare`
+  is not affected by its presence or absence; `--resume` refuses a run whose
+  stamp names a different judge.
 - `capability bench --codebase` keeps a file that contains `#[cfg(test)]` and
   cuts the test items out of it, instead of excluding the whole file. Idiomatic
   Rust keeps its unit tests inline, so the old rule left 7 of chekov's own 63
@@ -35,6 +40,49 @@ All notable changes to chekov are recorded here. The format follows
   only on a real refusal now, never on a dead socket.
 
 ### Added
+- `capability bench` gains `--judge <NAME>`, a registered `role = "judge"`
+  model (set by hand on its `models.toml` entry — `pull` never writes the
+  field; any other value is refused at registry load, naming the one accepted
+  value; `chekov list` marks the entry carrying it in a new `ROLE` column) of
+  a different architecture family from every candidate. Resolution
+  happens at plan time, before any launch: an unregistered name, a judge
+  missing `role = "judge"`, a same-family judge and candidate, a judge named
+  among `--models`, and a running server that bench did not start are each a
+  refusal before the run is spent, and `--resume` of a run stamped with a
+  different judge is refused too — a run is never spent to report a judge
+  outcome as unavailable at the end. The judge runs as its own phase, launched
+  once after every candidate has landed on disk and torn down, and shared
+  across every run in the invocation. For each eligible `function_body`
+  crossing — a stored row with a non-empty prediction, and, under
+  `--allow-exec`, a tier-6 verdict other than a hard `0.0` — it asks one
+  binary question twice, gold and prediction position-swapped, through
+  chekov's own translator on the forced wire with a `json_schema`-grammar
+  request; the reply's `content` is parsed into a `deny_unknown_fields`
+  struct rather than trusted, because llama.cpp can leave the grammar
+  inactive while a model is thinking. A reply that is not exactly the schema,
+  or one truncated at `[bench] judge_max_tokens` (default 512), is a counted,
+  printed abstention, never a verdict; agreement between the two orders is the
+  verdict, disagreement is undecided. Verdicts land as their own resumable
+  `judge` suite in `results.jsonl`, keyed so `--resume` skips what is already
+  judged. The report's `function_body` line gains an `equiv` cell (the mean
+  over judged rows, with the judged/undecided counts named), the header gains
+  a clause naming the judge, its quant/revision/architecture, the rubric
+  hash, and the swap-consistency rate, and the trailer prints the
+  identical/called/undecided/skipped tally plus a "reply was not the schema"
+  warning when the grammar went unenforced. Below `[bench]
+  judge_min_consistency_pct` (default 70) the `equiv` column is voided for
+  that run, both numbers printed, and the raw rows stay. `capability compare`
+  gains an `equiv` row under `function_body` with the same paired sign test as
+  every other tier, or `equiv: not compared (judge differs: …)` when the two
+  runs' judge stamps disagree, or `equiv: not compared (no crossing judged in
+  both runs)` when they share a judge but no crossing reached a verdict in
+  both — nothing else in the comparison changes. A third new `[bench]` knob
+  joins the two named above: `judge_reasoning_effort` (`none|low|medium|high`,
+  default `low`, forwarded to the judge's wire only — gpt-oss needs it,
+  Gemma's template ignores it).
+  The 2026-08-30 probe recommends `gpt-oss-20b` (Apache-2.0, 96% swap
+  consistency); Gemma 3 12B instruct also clears the 100%-parse/70%-
+  consistency gate.
 - `capability bench --codebase` gains `--allow-exec` and, behind it, the two
   tiers that say whether a fill is code rather than plausible text. Tier 6
   splices the fill (trimmed to the gold's line count — the same text tiers 1-4

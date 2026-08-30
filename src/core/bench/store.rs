@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::bench::codebase::ladder::{self, Score, Tier, as_f64};
 use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
-use crate::core::bench::stamp::{Stamp, mismatch_error};
+use crate::core::bench::stamp::{Stamp, first_mismatch, mismatch_error};
 use crate::core::bench::sweep::curve_note;
 use crate::core::stats;
 use crate::error::ChekovError;
@@ -70,6 +70,10 @@ pub struct TaskRow {
     /// needs the worktree and is scored at run time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codebase: Option<CodebaseRow>,
+    /// Present on `judge` rows only: the verdict for the codebase row with
+    /// the same `task_id`. Rows written before slice C load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<JudgeRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +186,37 @@ impl ExecRow {
     }
 }
 
+/// The suite a verdict row is recorded under — its own suite, because the
+/// codebase row it judges was flushed long before the judge phase ran.
+pub const JUDGE_SUITE: &str = "judge";
+
+/// How a judge row was settled (spec C §5). "Not at all" is one of the ways.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecidedBy {
+    SwapAgreement,
+    SwapDisagreement,
+    Identical,
+    Skipped,
+}
+
+/// One crossing's verdict: the two raw answers, what they settle to, and why
+/// there is none when there is none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeRow {
+    /// `None` = the two orders disagreed, or the crossing was skipped.
+    pub equivalent: Option<bool>,
+    /// The raw answer with the gold shown as A; `None` when that order was skipped.
+    pub gold_first: Option<bool>,
+    /// The raw answer with the prediction shown as A.
+    pub prediction_first: Option<bool>,
+    pub decided_by: DecidedBy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
+    pub judge_secs: f64,
+}
+
 /// A codebase task's record (spec §8, slice A). Raw text in, scores out.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -244,6 +279,8 @@ pub struct Task {
     pub transport: Transport,
     /// Present on `codebase` rows only — see `TaskRow::codebase`.
     pub codebase: Option<CodebaseRow>,
+    /// Present on `judge` rows only — see `TaskRow::judge`.
+    pub judge: Option<JudgeRow>,
 }
 
 /// An open run directory being written.
@@ -311,6 +348,7 @@ impl RunWriter {
             measure: task.measure,
             grade: task.grade,
             codebase: task.codebase,
+            judge: task.judge,
         };
         let results = self.dir.join("results.jsonl");
         let mut line = serde_json::to_string(&row).map_err(|e| invalid(&results, e))?;
@@ -376,6 +414,33 @@ impl RunLog {
             r.suite == key.suite && r.task_id == key.task_id && r.transport == key.transport
         })
     }
+}
+
+/// A run recorded before it had a judge takes the judge on resume.
+///
+/// The head is rewritten with the judge added and nothing else changed — and
+/// only when every other field of `incoming` already matches, so a resume the
+/// next `RunWriter::resume` is about to refuse leaves the stamp exactly as it
+/// found it. A run that already names a judge is left alone: `resume` compares
+/// that judge like any other field.
+pub fn adopt_judge(run_dir: &Path, incoming: &Stamp) -> Result<(), ChekovError> {
+    if incoming.judge.is_none() {
+        return Ok(());
+    }
+    let mut log = RunLog::load(run_dir)?;
+    if log.head.stamp.judge.is_some() {
+        return Ok(());
+    }
+    let mut candidate = log.head.stamp.clone();
+    candidate.judge.clone_from(&incoming.judge);
+    if first_mismatch(&candidate, incoming).is_some() {
+        return Ok(());
+    }
+    log.head.stamp = candidate;
+    let stamp_path = run_dir.join("stamp.json");
+    let json = serde_json::to_string_pretty(&log.head).map_err(|e| invalid(&stamp_path, e))?;
+    std::fs::write(&stamp_path, json)
+        .map_err(|e| ChekovError::io(format!("writing {}", stamp_path.display()), e))
 }
 
 /// What identifies one recorded crossing: the case and the door it took.
@@ -588,6 +653,23 @@ fn rows_of<'a>(log: &'a RunLog, suite: &'a str) -> impl Iterator<Item = &'a Task
     log.rows.iter().filter(move |r| r.suite == suite)
 }
 
+/// Every verdict row, in file order — the report's source for the judge
+/// clause and trailer.
+#[must_use]
+pub(crate) fn judge_rows(log: &RunLog) -> Vec<&TaskRow> {
+    rows_of(log, JUDGE_SUITE)
+        .filter(|r| r.judge.is_some())
+        .collect()
+}
+
+/// The verdicts themselves — what the `equiv` cell, the judge clause and the
+/// judge trailer all read, without each of them unwrapping the task row.
+fn verdicts(log: &RunLog) -> Vec<&JudgeRow> {
+    rows_of(log, JUDGE_SUITE)
+        .filter_map(|r| r.judge.as_ref())
+        .collect()
+}
+
 fn rows_via<'a>(
     log: &'a RunLog,
     suite: &'a str,
@@ -768,18 +850,22 @@ pub fn render_codebase(log: &RunLog) -> String {
     let mut out = codebase_header(&Header {
         kept: &kept,
         excluded,
-        stamp: &log.head.stamp,
+        log,
     });
     out.push_str(&scores_line(
         "in_file",
         &group(&kept, TaskTier::InFile, None),
+        None,
     ));
+    let judge = judge_cell(&kept, log);
     out.push_str(&scores_line(
         "function_body",
         &group(&kept, TaskTier::FunctionBody, None),
+        judge.as_deref(),
     ));
     out.push_str(&cross_lines(&rows, &kept));
     out.push_str(&exec_trailer(&kept, &log.head.stamp));
+    out.push_str(&judge_trailer(&kept, log));
     out
 }
 
@@ -787,7 +873,7 @@ pub fn render_codebase(log: &RunLog) -> String {
 struct Header<'a> {
     kept: &'a [&'a TaskRow],
     excluded: usize,
-    stamp: &'a crate::core::bench::stamp::Stamp,
+    log: &'a RunLog,
 }
 
 fn codebase_header(header: &Header) -> String {
@@ -800,14 +886,15 @@ fn codebase_header(header: &Header) -> String {
     format!(
         "codebase     {} tasks, {} crossings, from {} files ({}) — {}; context: same-file, \
          plus the defining file for cross_file_first (engine window ≤ n_batch; extra from \
-         ctx); tiers 1-4 score the first gold_lines lines of each fill{}{}{}\n",
+         ctx); tiers 1-4 score the first gold_lines lines of each fill{}{}{}{}\n",
         distinct_tasks(kept),
         kept.len(),
         distinct_files(kept),
         crate::core::bench::codebase::tier_counts_clause(counts),
         crate::core::bench::codebase::MASK_LABEL,
         elided_note(kept),
-        exec_clause(header.stamp),
+        exec_clause(&header.log.head.stamp),
+        judge_clause(header.log),
         excluded_note(header.excluded),
     )
 }
@@ -849,8 +936,8 @@ fn cross_lines(rows: &[&TaskRow], kept: &[&TaskRow]) -> String {
     }
     format!(
         "{}{}{}",
-        scores_line("cross_file_first", &without),
-        scores_line("cross_file_first+extra", &with),
+        scores_line("cross_file_first", &without, None),
+        scores_line("cross_file_first+extra", &with, None),
         lift_line(kept)
     )
 }
@@ -914,7 +1001,7 @@ fn codebase_na_line(rows: &[&TaskRow]) -> String {
 
 /// One line of tier means for a group, at the 24-wide label column every
 /// line of the block shares.
-fn scores_line(label: &str, group: &[&CodebaseRow]) -> String {
+fn scores_line(label: &str, group: &[&CodebaseRow], judge: Option<&str>) -> String {
     if group.is_empty() {
         return String::new();
     }
@@ -926,6 +1013,9 @@ fn scores_line(label: &str, group: &[&CodebaseRow]) -> String {
     }
     cells.push(symbols_cell(group));
     cells.extend(exec_cells(group));
+    if let Some(j) = judge {
+        cells.push(j.to_owned());
+    }
     format!(
         "             {label:<24}{}   (n={})\n",
         cells.join("   "),
@@ -1177,6 +1267,138 @@ fn exec_trailer(rows: &[&TaskRow], stamp: &crate::core::bench::stamp::Stamp) -> 
     )
 }
 
+/// `equiv 0.60 (n=5 judged of 6; 1 undecided)`, or the void, or `None`
+/// when the run has no judge rows at all.
+fn judge_cell(kept: &[&TaskRow], log: &RunLog) -> Option<String> {
+    let stamp = log.head.stamp.judge.as_ref()?;
+    let rows = verdicts(log);
+    if rows.is_empty() {
+        return None;
+    }
+    let total = tier_tasks(kept, TaskTier::FunctionBody);
+    if let Some(rate) = crate::core::bench::judge::consistency_pct(&rows)
+        && rate < stamp.min_consistency_pct
+    {
+        return Some(format!(
+            "equiv voided (swap consistency {rate}% < {}%)",
+            stamp.min_consistency_pct
+        ));
+    }
+    let judged: Vec<bool> = rows.iter().filter_map(|r| r.equivalent).collect();
+    let undecided = rows
+        .iter()
+        .filter(|r| r.decided_by == DecidedBy::SwapDisagreement)
+        .count();
+    if judged.is_empty() {
+        return Some(format!(
+            "equiv n/a (0 judged of {total}; {undecided} undecided)"
+        ));
+    }
+    let agreed = judged.iter().filter(|&&e| e).count();
+    let mean = as_f64(agreed) / as_f64(judged.len());
+    Some(format!(
+        "equiv {mean:.2} (n={} judged of {total}; {undecided} undecided)",
+        judged.len()
+    ))
+}
+
+/// `; judge: <model> (<quant>@<rev12>, <arch>, effort <e>) rubric <hash>, swap consistency N% (k of n)`.
+fn judge_clause(log: &RunLog) -> String {
+    let Some(j) = log.head.stamp.judge.as_ref() else {
+        return String::new();
+    };
+    let rows = verdicts(log);
+    let answered = rows
+        .iter()
+        .filter(|r| r.gold_first.is_some() && r.prediction_first.is_some())
+        .count();
+    let agreed = rows
+        .iter()
+        .filter(|r| r.gold_first.is_some() && r.gold_first == r.prediction_first)
+        .count();
+    let consistency = crate::core::bench::judge::consistency_pct(&rows).map_or_else(
+        || "n/a".to_owned(),
+        |rate| format!("{rate}% ({agreed} of {answered})"),
+    );
+    format!(
+        "; judge: {} ({}@{}, {}, effort {}) rubric {}, swap consistency {consistency}",
+        j.model, j.quant, j.revision, j.arch, j.reasoning_effort, j.rubric_hash
+    )
+}
+
+/// The judge's own trailer line: called under `--judge`, resuming, or
+/// skipped outright — and a second line naming any off-schema replies.
+fn judge_trailer(kept: &[&TaskRow], log: &RunLog) -> String {
+    let Some(stamp) = log.head.stamp.judge.as_ref() else {
+        return "             judge skipped: --judge not given\n".to_owned();
+    };
+    let rows = verdicts(log);
+    let total = tier_tasks(kept, TaskTier::FunctionBody);
+    if rows.is_empty() {
+        return unjudged_trailer(total, &stamp.model);
+    }
+    let count = |d: DecidedBy| rows.iter().filter(|r| r.decided_by == d).count();
+    let called = rows.iter().filter(|r| was_called(r)).count();
+    let secs: Vec<f64> = rows
+        .iter()
+        .filter(|r| was_called(r))
+        .map(|r| r.judge_secs)
+        .collect();
+    let mut out = format!(
+        "             judge: {} identical, {called} called, {} undecided, {} skipped; {:.1} s \
+         median per verdict\n",
+        count(DecidedBy::Identical),
+        count(DecidedBy::SwapDisagreement),
+        count(DecidedBy::Skipped),
+        median(&secs).unwrap_or(0.0)
+    );
+    if let Some(warning) = schema_warning(&rows) {
+        out.push_str(&warning);
+    }
+    out
+}
+
+/// Whether the judge was actually asked about this crossing.
+///
+/// Not "did it answer": an off-schema or truncated reply is a request that was
+/// sent and paid for, and it belongs in both the count and the median. The two
+/// pre-call settlements — an identical pair, and a `did not compile` skip —
+/// never reach the wire, and record `0.0` seconds because nothing was spent.
+fn was_called(row: &JudgeRow) -> bool {
+    row.decided_by != DecidedBy::Identical && row.judge_secs > 0.0
+}
+
+/// A run under a judge that holds no verdict.
+///
+/// With no `function_body` crossing there was never anything to ask about and
+/// the phase was skipped (spec C §7); otherwise the crossings are still owed
+/// and the run is resumable.
+fn unjudged_trailer(total: usize, model: &str) -> String {
+    if total == 0 {
+        return "             judge: nothing eligible\n".to_owned();
+    }
+    format!("             judge: 0 of {total} crossings judged — resume with --judge {model}\n")
+}
+
+/// `             warning: N reply was not the schema — …`, or `None` when
+/// every reply the judge returned parsed as the schema.
+fn schema_warning(rows: &[&JudgeRow]) -> Option<String> {
+    let not_schema = rows
+        .iter()
+        .filter(|r| {
+            r.skipped
+                .as_deref()
+                .is_some_and(|s| s.starts_with("reply was not the schema"))
+        })
+        .count();
+    (not_schema > 0).then(|| {
+        format!(
+            "             warning: {not_schema} reply was not the schema — the grammar was \
+             not enforced for this judge and the column is measuring the prompt alone\n"
+        )
+    })
+}
+
 /// Every skip reason with its count, most frequent first and ties by reason —
 /// a stable order, so the line is testable.
 fn skip_tally(execs: &[&ExecRow]) -> Vec<(String, usize)> {
@@ -1393,11 +1615,11 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        CodebaseRow, GradeRow, Measure, RunHead, RunLog, RunWriter, Task, TaskRow, Transport,
-        render_run,
+        CodebaseRow, DecidedBy, GradeRow, JudgeRow, Measure, RunHead, RunLog, RunWriter, Task,
+        TaskKey, TaskRow, Transport, render_codebase, render_run,
     };
     use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
-    use crate::core::bench::stamp::Stamp;
+    use crate::core::bench::stamp::{JudgeStamp, Stamp};
     use crate::error::ChekovError;
 
     fn scratch(name: &str) -> PathBuf {
@@ -1431,6 +1653,7 @@ mod tests {
             chekov_version: "0.1.0".into(),
             prompt_set_hash: "e19a".into(),
             corpus_id: "throughput-v1".into(),
+            judge: None,
         }
     }
 
@@ -1496,6 +1719,7 @@ mod tests {
                     }),
                     transport: Transport::Buffered,
                     codebase: None,
+                    judge: None,
                 })
                 .expect("append");
         }
@@ -1626,6 +1850,7 @@ mod tests {
             grade: Some(grade),
             transport: Transport::Buffered,
             codebase: None,
+            judge: None,
         }
     }
 
@@ -1667,6 +1892,62 @@ mod tests {
             "measure":{"prompt_n":4,"decode_samples":[1.0],"prefill_samples":[1.0],"warmup_dropped":0}}"#;
         let row: TaskRow = serde_json::from_str(line).expect("an old row still loads");
         assert_eq!(row.transport, Transport::Buffered);
+    }
+
+    /// A real `codebase` row from before slice C — no `judge` key at all.
+    const PRE_C_ROW: &str = r#"{"schema":1,"run_id":"20260830T072140Z-qwen3.8-flash-next","seq":64,"suite":"codebase","task_id":"in_file-1142dc-L35","transport":"buffered","measure":{"prompt_n":659,"decode_samples":[31.383755425823352],"prefill_samples":[280.5818219595511],"warmup_dropped":0,"cache_n":0},"codebase":{"tier":"in_file","file":"crates/pushkin-cli/src/verbs/list.rs","line":35,"label":"boundary-scanned (not AST)","gold":"    let entries = state::registry();","prediction":"    let entries = match state::entries() {\n        Ok(entries) => entries,\n        Err(error) => {\n            eprintln!(\"pushkin: cannot read the registry: {error}\");\n            return 1;\n        }\n    };\n","prefix":"//! `pushkin list [--prune]`: every daemon the per-user registry knows, from\n//! any directory (ADR-0010 step 1b). One line per repository: running with\n//! its pid, or stale (registered, nothing answering). `--prune` removes the\n//! stale entries' dirs; a dir with no root record is reported as unknown and\n//! never pruned — a thing we cannot name is not ours to delete.\n\nuse super::state;\nuse pushkin_daemon::protocol::{Request, Response, PROTOCOL_VERSION};\nuse pushkin_daemon::server;\n\npub struct ListArgs {\n    pub prune: bool,\n}\n\nenum Health {\n    Running(u32),\n    Stale,\n}\n\nfn health(entry: &state::Entry) -> Health {\n    match server::request_at(\n        &entry.socket(),\n        &Request::Ping {\n            v: PROTOCOL_VERSION,\n        },\n    ) {\n        Ok(Response::Pong { info }) => Health::Running(info.pid),\n        _ => Health::Stale,\n    }\n}\n\n/// Exit 0 always: an empty or stale registry is a state, not a failure.\n#[must_use]\npub fn run(args: &ListArgs) -> i32 {\n","suffix":"\n    if entries.is_empty() {\n        println!(\"pushkin: no daemons registered\");\n        return 0;\n    }\n    let mut running = 0;\n    let mut stale = 0;\n    for entry in entries {\n        match report(&entry, args.prune) {\n            Some(Health::Running(_)) => running += 1,\n            Some(Health::Stale) => stale += 1,\n            None => {}\n        }\n    }\n    // The live count is the named trigger for ADR-0012's option A: a shared\n    // process is worth revisiting only when this number gets large.\n    println!(\"{running} running, {stale} stale\");\n    0\n}\n\nfn report(entry: &state::Entry, prune: bool) -> Option<Health> {\n    let Some(root) = entry.root.as_deref() else {\n        println!(\n            \"{}  unknown (no root record; not pruned)\",\n            entry.dir.display()\n        );\n        return None;\n    };\n    let health = health(entry);\n    match health {\n        Health::Running(pid) => println!(\"{}  running (pid {pid})\", root.display()),\n        Health::Stale if prune => match std::fs::remove_dir_all(&entry.dir) {\n            Ok(()) => println!(\"{}  stale — pruned\", root.display()),\n            Err(error) => println!(\"{}  stale — prune failed: {error}\", root.display()),\n        },\n        Health::Stale => println!(\"{}  stale (no daemon answering)\", root.display()),\n    }\n    Some(health)\n}\n","excluded":{"doc_comment":0,"cross_file":"n/a: same-file","cfg_test_lines":0,"cross_file_withheld":0},"symbols_score":1.0,"unsupported":false,"n_predict":64}}"#;
+
+    fn judge_task(id: &str, verdict: JudgeRow) -> Task {
+        Task {
+            suite: super::JUDGE_SUITE.into(),
+            task_id: id.into(),
+            measure: crate::core::bench::codebase::run::empty_measure(),
+            grade: None,
+            transport: Transport::Buffered,
+            codebase: None,
+            judge: Some(verdict),
+        }
+    }
+
+    #[test]
+    fn a_judge_row_round_trips_and_an_old_row_loads_without_one() {
+        let eval = scratch("judge-row");
+        let mut writer = RunWriter::create(&eval, "r-judge", &head()).expect("create");
+        writer
+            .append(judge_task(
+                "function_body-abc123-L10",
+                JudgeRow {
+                    equivalent: None,
+                    gold_first: Some(true),
+                    prediction_first: Some(false),
+                    decided_by: DecidedBy::SwapDisagreement,
+                    skipped: None,
+                    judge_secs: 2.5,
+                },
+            ))
+            .expect("append");
+        let log = RunLog::load(&eval.join("r-judge")).expect("load");
+        let row = &log.rows[0];
+        assert_eq!(row.suite, "judge");
+        let judge = row.judge.as_ref().expect("judge row");
+        assert_eq!(judge.decided_by, DecidedBy::SwapDisagreement);
+        assert_eq!(
+            (judge.gold_first, judge.prediction_first),
+            (Some(true), Some(false))
+        );
+        let text = std::fs::read_to_string(eval.join("r-judge/results.jsonl")).expect("read");
+        assert!(
+            text.contains("\"decided_by\":\"swap_disagreement\""),
+            "{text}"
+        );
+        assert_eq!(super::judge_rows(&log).len(), 1, "judge_rows finds the row");
+        assert!(log.is_done(&TaskKey::buffered("judge", "function_body-abc123-L10")));
+        assert!(
+            serde_json::from_str::<TaskRow>(PRE_C_ROW)
+                .expect("a row without the field parses")
+                .judge
+                .is_none()
+        );
     }
 
     #[test]
@@ -1853,6 +2134,7 @@ mod tests {
                 n_predict: Some(64),
                 exec: None,
             }),
+            judge: None,
         }
     }
 
@@ -2302,6 +2584,7 @@ mod tests {
                 grade: None,
                 transport: Transport::Buffered,
                 codebase: None,
+                judge: None,
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
@@ -2321,6 +2604,7 @@ mod tests {
                     grade: None,
                     transport: Transport::Buffered,
                     codebase: None,
+                    judge: None,
                 })
                 .expect("append");
         }
@@ -2344,6 +2628,7 @@ mod tests {
                 grade: None,
                 transport: Transport::Buffered,
                 codebase: None,
+                judge: None,
             })
             .expect("append");
         drop(writer);
@@ -2358,6 +2643,7 @@ mod tests {
                 grade: None,
                 transport: Transport::Buffered,
                 codebase: None,
+                judge: None,
             })
             .expect("append after resume");
         let reloaded = RunLog::load(resumed.dir()).expect("reload");
@@ -2394,6 +2680,7 @@ mod tests {
                 grade: None,
                 transport: Transport::Buffered,
                 codebase: None,
+                judge: None,
             })
             .expect("append");
         let results = writer.dir().join("results.jsonl");
@@ -2416,6 +2703,7 @@ mod tests {
                 grade: None,
                 transport: Transport::Buffered,
                 codebase: None,
+                judge: None,
             })
             .expect("append");
         writer
@@ -2428,6 +2716,7 @@ mod tests {
                 )),
                 transport: Transport::Buffered,
                 codebase: None,
+                judge: None,
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
@@ -2638,5 +2927,410 @@ mod tests {
         }
         let block = super::render_codebase(&RunLog::load(writer.dir()).expect("load"));
         assert!(block.contains("compile +1.00  test n/a"), "{block}");
+    }
+
+    /// Bundled so `judge_verdict` stays within the 3-argument limit.
+    #[derive(Clone, Copy)]
+    struct JudgeFixture<'a> {
+        id: &'a str,
+        equivalent: Option<bool>,
+        gold_first: Option<bool>,
+        prediction_first: Option<bool>,
+        decided_by: DecidedBy,
+        skipped: Option<&'a str>,
+        /// What the pair cost. `0.0` is what production records for a crossing
+        /// settled before any request went out.
+        judge_secs: f64,
+    }
+
+    /// The pair time a crossing that reached the wire records.
+    const ASKED_SECS: f64 = 2.1;
+
+    fn judge_verdict(fixture: JudgeFixture) -> Task {
+        judge_task(
+            fixture.id,
+            JudgeRow {
+                equivalent: fixture.equivalent,
+                gold_first: fixture.gold_first,
+                prediction_first: fixture.prediction_first,
+                decided_by: fixture.decided_by,
+                skipped: fixture.skipped.map(str::to_owned),
+                judge_secs: fixture.judge_secs,
+            },
+        )
+    }
+
+    /// `fb-1` identical, `fb-2..fb-4` swap agreements (two of them agreeing
+    /// on `false`).
+    fn identical_and_agreements() -> [JudgeFixture<'static>; 4] {
+        [
+            JudgeFixture {
+                id: "fb-1",
+                equivalent: Some(true),
+                gold_first: None,
+                prediction_first: None,
+                decided_by: DecidedBy::Identical,
+                skipped: None,
+                judge_secs: 0.0,
+            },
+            JudgeFixture {
+                id: "fb-2",
+                equivalent: Some(true),
+                gold_first: Some(true),
+                prediction_first: Some(true),
+                decided_by: DecidedBy::SwapAgreement,
+                skipped: None,
+                judge_secs: ASKED_SECS,
+            },
+            JudgeFixture {
+                id: "fb-3",
+                equivalent: Some(false),
+                gold_first: Some(false),
+                prediction_first: Some(false),
+                decided_by: DecidedBy::SwapAgreement,
+                skipped: None,
+                judge_secs: ASKED_SECS,
+            },
+            JudgeFixture {
+                id: "fb-4",
+                equivalent: Some(false),
+                gold_first: Some(false),
+                prediction_first: Some(false),
+                decided_by: DecidedBy::SwapAgreement,
+                skipped: None,
+                judge_secs: ASKED_SECS,
+            },
+        ]
+    }
+
+    /// `fb-5` a swap disagreement, `fb-6` skipped for an off-schema reply.
+    fn disagreement_and_skip() -> [JudgeFixture<'static>; 2] {
+        [
+            JudgeFixture {
+                id: "fb-5",
+                equivalent: None,
+                gold_first: Some(true),
+                prediction_first: Some(false),
+                decided_by: DecidedBy::SwapDisagreement,
+                skipped: None,
+                judge_secs: ASKED_SECS,
+            },
+            JudgeFixture {
+                id: "fb-6",
+                equivalent: None,
+                gold_first: None,
+                prediction_first: None,
+                decided_by: DecidedBy::Skipped,
+                skipped: Some("reply was not the schema: yes"),
+                judge_secs: ASKED_SECS,
+            },
+        ]
+    }
+
+    fn judge_verdicts() -> impl Iterator<Item = JudgeFixture<'static>> {
+        identical_and_agreements()
+            .into_iter()
+            .chain(disagreement_and_skip())
+    }
+
+    /// Three `function_body` crossings, all skipped for the same truncation —
+    /// no order of any of them parsed, yet every one of them was asked, and
+    /// paid for.
+    fn all_skipped_verdicts() -> [JudgeFixture<'static>; 3] {
+        ["fb-1", "fb-2", "fb-3"].map(|id| JudgeFixture {
+            id,
+            equivalent: None,
+            gold_first: None,
+            prediction_first: None,
+            decided_by: DecidedBy::Skipped,
+            skipped: Some("reply truncated at 512 tokens"),
+            judge_secs: ASKED_SECS,
+        })
+    }
+
+    fn judge_stamp() -> JudgeStamp {
+        JudgeStamp {
+            model: "gpt-oss-20b".into(),
+            quant: "F16".into(),
+            revision: "1a2b3c4d5e6f".into(),
+            arch: "gpt-oss".into(),
+            rubric_hash: "9f8e7d6c5b4a".into(),
+            max_tokens: 512,
+            reasoning_effort: "low".into(),
+            min_consistency_pct: 70,
+        }
+    }
+
+    /// A `function_body` run whose crossings are named by `ids`, judged by
+    /// `verdicts`. Every call gets its own scratch directory — several tests
+    /// build one of these, and `cargo test` runs them concurrently.
+    fn judged_run_with(
+        scratch_name: &str,
+        ids: &[&'static str],
+        verdicts: impl Iterator<Item = JudgeFixture<'static>>,
+    ) -> RunLog {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let eval = scratch(&format!("{scratch_name}-{n}"));
+        let mut head = head();
+        head.stamp.judge = Some(judge_stamp());
+        let mut writer = RunWriter::create(&eval, "r-judged-report", &head).expect("create");
+        for &id in ids {
+            writer
+                .append(codebase_task(CodebaseFixture {
+                    id,
+                    tier: TaskTier::FunctionBody,
+                    gold: "let x = 1;\n    x",
+                    prediction: "x",
+                }))
+                .expect("append");
+        }
+        for fixture in verdicts {
+            writer.append(judge_verdict(fixture)).expect("append");
+        }
+        RunLog::load(writer.dir()).expect("load")
+    }
+
+    /// Six `function_body` crossings plus the verdicts `judge_verdicts`
+    /// describes.
+    fn judged_run() -> RunLog {
+        judged_run_with(
+            "judged-report",
+            &["fb-1", "fb-2", "fb-3", "fb-4", "fb-5", "fb-6"],
+            judge_verdicts(),
+        )
+    }
+
+    /// Three `function_body` crossings, every one of them skipped.
+    fn all_skipped_judged_run() -> RunLog {
+        judged_run_with(
+            "all-skipped-report",
+            &["fb-1", "fb-2", "fb-3"],
+            all_skipped_verdicts().into_iter(),
+        )
+    }
+
+    /// A stored run with no judge, and the stamp a `--resume --judge` would
+    /// bring: identical but for the judge.
+    fn adoptable(scratch_name: &str) -> (PathBuf, Stamp) {
+        let eval = scratch(scratch_name);
+        RunWriter::create(&eval, "r-adopt", &head()).expect("create");
+        let mut incoming = stamp();
+        incoming.judge = Some(judge_stamp());
+        (eval.join("r-adopt"), incoming)
+    }
+
+    #[test]
+    fn a_run_without_a_judge_adopts_one_when_the_rest_of_the_stamp_matches() {
+        let (dir, incoming) = adoptable("adopt-judge-match");
+        super::adopt_judge(&dir, &incoming).expect("adopt");
+        let reloaded = RunLog::load(&dir).expect("load");
+        assert_eq!(reloaded.head.stamp.judge, Some(judge_stamp()));
+    }
+
+    /// The stamp is rewritten only for a resume that will be accepted — a
+    /// refused one must leave the run exactly as it found it, since nothing
+    /// can take an adopted judge back off.
+    #[test]
+    fn a_resume_that_will_be_refused_leaves_the_stored_stamp_alone() {
+        let (dir, mut incoming) = adoptable("adopt-judge-mismatch");
+        incoming.ctx = 65_536;
+        let stamp_path = dir.join("stamp.json");
+        let before = std::fs::read_to_string(&stamp_path).expect("read");
+        super::adopt_judge(&dir, &incoming).expect("a no-op, not an error");
+        let after = std::fs::read_to_string(&stamp_path).expect("read");
+        assert_eq!(before, after, "a refused resume never rewrites the stamp");
+        let eval = dir.parent().expect("eval dir");
+        let refused = RunWriter::resume(
+            eval,
+            "r-adopt",
+            &RunHead {
+                stamp: incoming,
+                ..head()
+            },
+        )
+        .expect_err("the stamp still differs");
+        assert!(
+            matches!(refused, ChekovError::BenchStampMismatch { ref field, .. } if field == "ctx"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_already_names_a_judge_keeps_it_and_resume_refuses_a_different_one() {
+        let eval = scratch("adopt-judge-taken");
+        let stored = RunHead {
+            stamp: Stamp {
+                judge: Some(judge_stamp()),
+                ..stamp()
+            },
+            ..head()
+        };
+        RunWriter::create(&eval, "r-adopt", &stored).expect("create");
+        let dir = eval.join("r-adopt");
+        let incoming = Stamp {
+            judge: Some(JudgeStamp {
+                model: "gemma-3-12b-it".into(),
+                ..judge_stamp()
+            }),
+            ..stamp()
+        };
+        super::adopt_judge(&dir, &incoming).expect("a no-op, not an error");
+        let reloaded = RunLog::load(&dir).expect("load");
+        assert_eq!(
+            reloaded.head.stamp.judge,
+            Some(judge_stamp()),
+            "the judge a run was measured with is never replaced"
+        );
+        let refused = RunWriter::resume(
+            &eval,
+            "r-adopt",
+            &RunHead {
+                stamp: incoming,
+                ..head()
+            },
+        )
+        .expect_err("a different judge is a different environment");
+        assert!(
+            matches!(refused, ChekovError::BenchStampMismatch { ref field, .. } if field == "judge"),
+            "{refused}"
+        );
+    }
+
+    /// A judge-stamped run whose crossings are all `in_file`: there was never
+    /// a `function_body` for the judge to be asked about.
+    fn nothing_eligible_run() -> RunLog {
+        let eval = scratch("nothing-eligible-report");
+        let mut head = head();
+        head.stamp.judge = Some(judge_stamp());
+        let mut writer = RunWriter::create(&eval, "r-nothing-eligible", &head).expect("create");
+        for fixture in codebase_fixtures()
+            .into_iter()
+            .filter(|f| f.tier == TaskTier::InFile)
+        {
+            writer.append(codebase_task(fixture)).expect("append");
+        }
+        RunLog::load(writer.dir()).expect("load")
+    }
+
+    /// A plain codebase run: no `--judge` given at all.
+    fn codebase_only_run() -> RunLog {
+        let eval = scratch("codebase-only-report");
+        let mut writer = RunWriter::create(&eval, "r-codebase-only", &head()).expect("create");
+        for task in codebase_fixtures().map(codebase_task) {
+            writer.append(task).expect("append");
+        }
+        RunLog::load(writer.dir()).expect("load")
+    }
+
+    #[test]
+    fn the_function_body_line_carries_the_equiv_cell_and_the_header_names_the_judge() {
+        let out = render_codebase(&judged_run());
+        assert!(out.contains("; judge: gpt-oss-20b (F16@1a2b3c4d5e6f, gpt-oss, effort low) rubric 9f8e7d6c5b4a, swap consistency 75% (3 of 4)"), "{out}");
+        assert!(
+            out.contains("equiv 0.50 (n=4 judged of 6; 1 undecided)"),
+            "identical counts as true, 2 true of 4: {out}"
+        );
+        assert!(out.contains("             judge: 1 identical, 5 called, 1 undecided, 1 skipped; 2.1 s median per verdict\n"), "the off-schema crossing was asked like any other: {out}");
+        assert!(out.contains("             warning: 1 reply was not the schema — the grammar was not enforced for this judge and the column is measuring the prompt alone\n"), "{out}");
+        let in_file_line = out
+            .lines()
+            .find(|l| l.contains("in_file"))
+            .unwrap_or_default();
+        assert!(
+            !in_file_line.contains("equiv"),
+            "other tiers print no equiv cell: {in_file_line}"
+        );
+    }
+
+    #[test]
+    fn below_the_floor_the_column_is_voided_with_both_numbers() {
+        let mut log = judged_run();
+        if let Some(judge) = log.head.stamp.judge.as_mut() {
+            judge.min_consistency_pct = 80;
+        }
+        let out = render_codebase(&log);
+        assert!(
+            out.contains("equiv voided (swap consistency 75% < 80%)"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn without_a_judge_the_trailer_says_so_and_an_unjudged_run_says_how_to_resume() {
+        let out = render_codebase(&codebase_only_run());
+        assert!(
+            out.contains("             judge skipped: --judge not given\n"),
+            "{out}"
+        );
+        let mut stamped = judged_run();
+        stamped.rows.retain(|r| r.suite != "judge");
+        let out = render_codebase(&stamped);
+        assert!(
+            out.contains(
+                "             judge: 0 of 6 crossings judged — resume with --judge gpt-oss-20b\n"
+            ),
+            "{out}"
+        );
+    }
+
+    /// A run the judge had nothing to ask about does not read as a run whose
+    /// judge phase is still owed — there is nothing to resume.
+    #[test]
+    fn a_run_with_no_function_body_crossing_says_nothing_was_eligible() {
+        let out = render_codebase(&nothing_eligible_run());
+        assert!(
+            out.contains("             judge: nothing eligible\n"),
+            "{out}"
+        );
+        assert!(!out.contains("resume with --judge"), "{out}");
+    }
+
+    /// A judge that never got an answered order still names a rate — `n/a`,
+    /// not a zero it never measured, and no `(k of n)` for a denominator
+    /// of zero. The calls it made are counted all the same: three crossings
+    /// were asked and three replies came back truncated.
+    #[test]
+    fn an_all_skipped_judge_run_renders_n_a_not_a_number() {
+        let out = render_codebase(&all_skipped_judged_run());
+        assert!(
+            out.contains("equiv n/a (0 judged of 3; 0 undecided)"),
+            "{out}"
+        );
+        assert!(out.contains("swap consistency n/a\n"), "{out}");
+        assert!(
+            out.contains(
+                "             judge: 0 identical, 3 called, 0 undecided, 3 skipped; 2.1 s \
+                 median per verdict\n"
+            ),
+            "a reply nobody could parse still cost a request: {out}"
+        );
+    }
+
+    /// The call count is "was a request sent", not "did an answer come back".
+    #[test]
+    fn a_crossing_settled_before_the_wire_is_the_only_uncalled_one() {
+        let row = |decided_by, judge_secs| JudgeRow {
+            equivalent: None,
+            gold_first: None,
+            prediction_first: None,
+            decided_by,
+            skipped: None,
+            judge_secs,
+        };
+        assert!(
+            !super::was_called(&row(DecidedBy::Identical, 0.0)),
+            "an identical pair is never asked"
+        );
+        assert!(
+            !super::was_called(&row(DecidedBy::Skipped, 0.0)),
+            "a `did not compile` skip is decided before the wire"
+        );
+        assert!(
+            super::was_called(&row(DecidedBy::Skipped, 2.1)),
+            "an off-schema reply is a request that was sent"
+        );
+        assert!(super::was_called(&row(DecidedBy::SwapAgreement, 2.1)));
+        assert!(super::was_called(&row(DecidedBy::SwapDisagreement, 2.1)));
     }
 }

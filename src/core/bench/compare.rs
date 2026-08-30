@@ -8,6 +8,7 @@
 use crate::core::bench::codebase::TaskTier;
 use crate::core::bench::codebase::ladder::{Score, Tier, as_f64};
 use crate::core::bench::stamp;
+use crate::core::bench::stamp::Stamp;
 use crate::core::bench::store::{
     self, CodebaseRow, RunLog, Tally, TaskRow, Transport, door_tag, is_unavailable,
 };
@@ -123,6 +124,11 @@ pub struct CodebaseComparison {
     pub presence: Presence,
     pub tiers: Vec<TierDelta>,
     pub dropped: Vec<GroupDrop>,
+    /// Why the `equiv` row is absent: the two runs' judges were not the same
+    /// instrument, or they were and no crossing reached a verdict in both.
+    /// `None` when there is nothing to explain — the row is present, or
+    /// neither run used a judge.
+    pub judge_note: Option<String>,
 }
 
 pub fn compare_runs(
@@ -182,6 +188,7 @@ fn assert_same_environment(a: &RunLog, b: &RunLog) -> Result<(), ChekovError> {
         .weights_revision
         .clone_from(&a.head.stamp.weights_revision);
     b_env.quant.clone_from(&a.head.stamp.quant);
+    b_env.judge.clone_from(&a.head.stamp.judge);
     stamp::mismatch_error(&a.head.stamp, &b_env).map_or(Ok(()), Err)
 }
 
@@ -416,10 +423,81 @@ fn compare_codebase(pair: &RunPair) -> CodebaseComparison {
         });
         tiers.extend(group_tiers(&pairs, group));
     }
+    let (equiv, judge_note) = compare_judge(pair);
+    tiers.extend(equiv);
     CodebaseComparison {
         presence,
         tiers,
         dropped,
+        judge_note,
+    }
+}
+
+/// One judged verdict per task id, as `1.0`/`0.0` — abstentions and skips are
+/// absent, so a pair exists only where both runs reached a verdict.
+fn judge_values(log: &RunLog) -> std::collections::BTreeMap<&str, f64> {
+    store::judge_rows(log)
+        .into_iter()
+        .filter_map(|r| Some((r.task_id.as_str(), r.judge.as_ref()?.equivalent?)))
+        .map(|(id, e)| (id, if e { 1.0 } else { 0.0 }))
+        .collect()
+}
+
+fn judge_label(stamp: &Stamp) -> String {
+    stamp.judge.as_ref().map_or_else(
+        || "none".to_owned(),
+        |j| format!("{}@{}/{}", j.model, j.revision, j.rubric_hash),
+    )
+}
+
+/// The `equiv` row's numbers, once both runs are known to share a judge.
+fn equiv_delta(pair: &RunPair) -> Option<TierDelta> {
+    let (va, vb) = (judge_values(pair.a), judge_values(pair.b));
+    let values: Vec<(f64, f64)> = va
+        .iter()
+        .filter_map(|(id, a)| Some((*a, *vb.get(id)?)))
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    let wins = win_counts(&values);
+    Some(TierDelta {
+        group: TaskTier::FunctionBody.label().to_owned(),
+        tier: "equiv".to_owned(),
+        mean_a: mean(values.iter().map(|v| v.0)),
+        mean_b: mean(values.iter().map(|v| v.1)),
+        a_better: wins.a,
+        b_better: wins.b,
+        ties: wins.ties,
+        verdict: sign_test(wins.a, wins.b),
+    })
+}
+
+/// The `equiv` row when both runs were judged by the same instrument, or
+/// the note saying why they were not compared. Silence would read as "the
+/// judge had nothing to say", so a shared judge with no shared verdict says
+/// which of the two it was.
+fn compare_judge(pair: &RunPair) -> (Option<TierDelta>, Option<String>) {
+    let (ja, jb) = (&pair.a.head.stamp.judge, &pair.b.head.stamp.judge);
+    match (ja, jb) {
+        (None, None) => (None, None),
+        (Some(a), Some(b)) if a == b => equiv_delta(pair).map_or_else(
+            || {
+                (
+                    None,
+                    Some("equiv: not compared (no crossing judged in both runs)".to_owned()),
+                )
+            },
+            |delta| (Some(delta), None),
+        ),
+        _ => (
+            None,
+            Some(format!(
+                "equiv: not compared (judge differs: a={} b={})",
+                judge_label(&pair.a.head.stamp),
+                judge_label(&pair.b.head.stamp)
+            )),
+        ),
     }
 }
 
@@ -715,6 +793,11 @@ fn render_codebase(pair: &RunPair, codebase: &CodebaseComparison) -> String {
             .iter()
             .map(|delta| tier_delta_line(pair, delta, widths)),
     );
+    if let Some(note) = &codebase.judge_note {
+        out.push_str("  ");
+        out.push_str(note);
+        out.push('\n');
+    }
     out.push_str(&dropped_block(&codebase.dropped));
     out
 }
@@ -803,9 +886,10 @@ mod tests {
         sign_test,
     };
     use crate::core::bench::codebase::{Excluded, TaskTier};
-    use crate::core::bench::stamp::Stamp;
+    use crate::core::bench::stamp::{JudgeStamp, Stamp};
     use crate::core::bench::store::{
-        CodebaseRow, GradeRow, Measure, RunHead, RunLog, TaskRow, Transport,
+        CodebaseRow, DecidedBy, GradeRow, JUDGE_SUITE, JudgeRow, Measure, RunHead, RunLog, TaskRow,
+        Transport,
     };
     use crate::core::stats::Comparison;
     use crate::error::ChekovError;
@@ -832,6 +916,7 @@ mod tests {
             chekov_version: "0.1.0".into(),
             prompt_set_hash: "e19a".into(),
             corpus_id: "throughput-v1".into(),
+            judge: None,
         }
     }
 
@@ -868,6 +953,7 @@ mod tests {
                 },
                 grade: None,
                 codebase: None,
+                judge: None,
             }],
         }
     }
@@ -886,6 +972,23 @@ mod tests {
             }
             other => panic!("expected stamp mismatch, got {other}"),
         }
+    }
+
+    #[test]
+    fn a_differing_judge_does_not_refuse_the_comparison() {
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut b = run("m2", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        b.head.stamp.judge = Some(crate::core::bench::stamp::JudgeStamp {
+            model: "gpt-oss-20b".into(),
+            quant: "F16".into(),
+            revision: "d449b42d93e1".into(),
+            arch: "gpt-oss".into(),
+            rubric_hash: "9f8e7d6c5b4a".into(),
+            max_tokens: 512,
+            reasoning_effort: "low".into(),
+            min_consistency_pct: 70,
+        });
+        assert!(super::assert_same_environment(&a, &b).is_ok());
     }
 
     #[test]
@@ -934,6 +1037,7 @@ mod tests {
             },
             grade: None,
             codebase: None,
+            judge: None,
         });
         let b = run("m2", stamp("dda1b0d67", "r2/s2"), &[30.0, 40.0, 41.0]);
         let compared = compare_runs(&a, &b, 5.0).expect("same environment");
@@ -1009,6 +1113,7 @@ mod tests {
             measure: empty_measure(),
             grade: Some(case.grade),
             codebase: None,
+            judge: None,
         }
     }
 
@@ -1077,6 +1182,7 @@ mod tests {
                 n_predict: None,
                 exec: None,
             }),
+            judge: None,
         }
     }
 
@@ -1370,6 +1476,168 @@ mod tests {
         assert!(
             rendered.contains("1 task(s) dropped from in_file"),
             "{rendered}"
+        );
+    }
+
+    // -------------------------------------------------------------- judge
+
+    fn judge_stamp() -> JudgeStamp {
+        JudgeStamp {
+            model: "gpt-oss-20b".into(),
+            quant: "F16".into(),
+            revision: "1a2b3c4d5e6f".into(),
+            arch: "gpt-oss".into(),
+            rubric_hash: "9f8e7d6c5b4a".into(),
+            max_tokens: 512,
+            reasoning_effort: "low".into(),
+            min_consistency_pct: 70,
+        }
+    }
+
+    fn verdict(equivalent: Option<bool>) -> JudgeRow {
+        JudgeRow {
+            equivalent,
+            gold_first: None,
+            prediction_first: None,
+            decided_by: if equivalent.is_some() {
+                DecidedBy::SwapAgreement
+            } else {
+                DecidedBy::SwapDisagreement
+            },
+            skipped: None,
+            judge_secs: 1.0,
+        }
+    }
+
+    fn judge_row(seq: usize, task_id: &str, row: JudgeRow) -> TaskRow {
+        TaskRow {
+            schema: 1,
+            run_id: "r".into(),
+            seq: u32::try_from(seq).unwrap_or(0),
+            suite: JUDGE_SUITE.into(),
+            task_id: task_id.into(),
+            transport: Transport::Buffered,
+            measure: empty_measure(),
+            grade: None,
+            codebase: None,
+            judge: Some(row),
+        }
+    }
+
+    fn function_body_rows(ids: [&str; 3]) -> Vec<TaskRow> {
+        ids.into_iter()
+            .enumerate()
+            .map(|(seq, id)| {
+                codebase_row(
+                    seq,
+                    CodeCase {
+                        task_id: id.into(),
+                        tier: TaskTier::FunctionBody,
+                        prediction: GOLD,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Three `function_body` tasks, both answered and both judged by the same
+    /// instrument: a's judge calls fb-1 equivalent, fb-2 not, fb-3
+    /// equivalent; b's calls fb-1 not, fb-2 not, and abstains on fb-3.
+    fn judged_pair() -> (RunLog, RunLog) {
+        let ids = ["fb-1", "fb-2", "fb-3"];
+        let mut a_stamp = stamp("dda1b0d67", "r1/s1");
+        a_stamp.judge = Some(judge_stamp());
+        let mut b_stamp = stamp("dda1b0d67", "r2/s2");
+        b_stamp.judge = Some(judge_stamp());
+        let mut a_rows = function_body_rows(ids);
+        a_rows.extend([
+            judge_row(3, "fb-1", verdict(Some(true))),
+            judge_row(4, "fb-2", verdict(Some(false))),
+            judge_row(5, "fb-3", verdict(Some(true))),
+        ]);
+        let mut b_rows = function_body_rows(ids);
+        b_rows.extend([
+            judge_row(3, "fb-1", verdict(Some(false))),
+            judge_row(4, "fb-2", verdict(Some(false))),
+            judge_row(5, "fb-3", verdict(None)),
+        ]);
+        (
+            RunLog {
+                head: head_of("m1", a_stamp),
+                rows: a_rows,
+            },
+            RunLog {
+                head: head_of("m2", b_stamp),
+                rows: b_rows,
+            },
+        )
+    }
+
+    #[test]
+    fn a_shared_judge_yields_an_equiv_row_with_the_paired_sign_test() {
+        // a: fb-1 true, fb-2 false, fb-3 true ; b: fb-1 false, fb-2 false, fb-3 undecided
+        let (a, b) = judged_pair();
+        let cmp = super::compare_runs(&a, &b, 5.0).expect("compare");
+        let equiv = cmp
+            .codebase
+            .tiers
+            .iter()
+            .find(|t| t.tier == "equiv")
+            .expect("equiv row");
+        assert_eq!(equiv.group, "function_body");
+        assert_eq!(
+            (equiv.a_better, equiv.b_better, equiv.ties),
+            (1, 0, 1),
+            "fb-3 is not paired: b abstained"
+        );
+        assert!(cmp.codebase.judge_note.is_none());
+        let out = super::render_comparison(&RunPair { a: &a, b: &b }, &cmp);
+        // Two spaces, not one: the group column's floor (13) is exactly
+        // `"function_body".len()`, and `column_width` always adds 2 — the
+        // same convention that pads "in_file" out to 15 columns elsewhere
+        // in this file (see `codebase_tasks_pair_by_id_and_only_a_clear_group_is_called`).
+        assert!(out.contains("function_body  equiv"), "{out}");
+    }
+
+    #[test]
+    fn a_differing_or_absent_judge_prints_a_note_and_leaves_the_tiers_alone() {
+        let (a, mut b) = judged_pair();
+        b.head.stamp.judge = None;
+        let cmp = super::compare_runs(&a, &b, 5.0).expect("compare");
+        assert!(cmp.codebase.tiers.iter().all(|t| t.tier != "equiv"));
+        assert_eq!(
+            cmp.codebase.judge_note.as_deref(),
+            Some(
+                "equiv: not compared (judge differs: a=gpt-oss-20b@1a2b3c4d5e6f/9f8e7d6c5b4a b=none)"
+            )
+        );
+        let out = super::render_comparison(&RunPair { a: &a, b: &b }, &cmp);
+        assert!(
+            out.contains("  equiv: not compared (judge differs: a=gpt-oss-20b@1a2b3c4d5e6f/9f8e7d6c5b4a b=none)\n"),
+            "{out}"
+        );
+    }
+
+    /// One judge, both runs, and not one crossing decided in both of them:
+    /// the absent `equiv` row is a fact about the overlap, not silence.
+    #[test]
+    fn a_shared_judge_with_no_shared_verdict_says_why_there_is_no_equiv_row() {
+        let (mut a, mut b) = judged_pair();
+        // a decides fb-1 and fb-2; b decides only fb-3 — no id is in both.
+        a.rows
+            .retain(|r| r.suite != JUDGE_SUITE || r.task_id != "fb-3");
+        b.rows.retain(|r| r.suite != JUDGE_SUITE);
+        b.rows.push(judge_row(3, "fb-3", verdict(Some(true))));
+        let cmp = super::compare_runs(&a, &b, 5.0).expect("compare");
+        assert!(cmp.codebase.tiers.iter().all(|t| t.tier != "equiv"));
+        assert_eq!(
+            cmp.codebase.judge_note.as_deref(),
+            Some("equiv: not compared (no crossing judged in both runs)")
+        );
+        let out = super::render_comparison(&RunPair { a: &a, b: &b }, &cmp);
+        assert!(
+            out.contains("  equiv: not compared (no crossing judged in both runs)\n"),
+            "{out}"
         );
     }
 

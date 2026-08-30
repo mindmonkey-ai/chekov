@@ -288,11 +288,12 @@ pub fn stored_tier(tier: Tier, text: &StoredText) -> Score {
 /// asked for the gold's lines; the lines past them belong to the suffix the
 /// model was already shown, and grading them measured the token budget.
 ///
-/// `pub(super)` for tier 6: the text that gets spliced into the file and
-/// compiled is the same text tiers 1-4 grade. A compile verdict on a
+/// `pub(crate)` for tier 6 and the judge: the text that gets spliced into
+/// the file and compiled — and the text the judge is shown as B — is the
+/// same text tiers 1-4 grade. A compile verdict or a judge verdict on a
 /// different string from the one the report scores would be two answers to
 /// one question.
-pub(super) fn trimmed_to_gold(gold: &str, prediction: &str) -> String {
+pub(crate) fn trimmed_to_gold(gold: &str, prediction: &str) -> String {
     let kept: String = prediction
         .split_inclusive('\n')
         .take(gold.lines().count())

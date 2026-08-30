@@ -158,6 +158,13 @@ pub fn cross(wire: &ProbeWire, req: &HttpRequest) -> Result<ProbeArtifact, Cheko
     cross_inner(wire, req, None)
 }
 
+/// What a forced crossing constrains: the grammar, and — on the judge wire
+/// only — the engine's reasoning effort. Candidate probes never set the latter.
+pub struct Forced<'a> {
+    pub schema: &'a Value,
+    pub reasoning_effort: Option<&'a str>,
+}
+
 /// `cross` with a JSON schema forced on the wire (`response_format`) — the
 /// `grammar_gap` probe's forced half. The sampling pins still apply.
 pub fn cross_forced(
@@ -165,7 +172,23 @@ pub fn cross_forced(
     req: &HttpRequest,
     schema: &Value,
 ) -> Result<ProbeArtifact, ChekovError> {
-    cross_inner(wire, req, Some(schema))
+    cross_inner(
+        wire,
+        req,
+        Some(&Forced {
+            schema,
+            reasoning_effort: None,
+        }),
+    )
+}
+
+/// `cross_forced` with the judge's extra field (spec C §3.0: one uniform judge wire).
+pub fn cross_forced_with(
+    wire: &ProbeWire,
+    req: &HttpRequest,
+    forced: &Forced,
+) -> Result<ProbeArtifact, ChekovError> {
+    cross_inner(wire, req, Some(forced))
 }
 
 /// `cross` or `cross_streaming`, by door.
@@ -183,7 +206,7 @@ pub fn cross_via(
 fn cross_inner(
     wire: &ProbeWire,
     req: &HttpRequest,
-    forced: Option<&Value>,
+    forced: Option<&Forced>,
 ) -> Result<ProbeArtifact, ChekovError> {
     let (path, body) = forward_of(wire, req)?;
     let body = adjust_body(&body, wire.pins, forced)?;
@@ -402,7 +425,7 @@ fn push_str(field: &mut Value, text: &str) {
 fn adjust_body(
     body: &str,
     pins: SamplingPins,
-    forced: Option<&Value>,
+    forced: Option<&Forced>,
 ) -> Result<String, ChekovError> {
     let mut parsed: Value =
         serde_json::from_str(body).map_err(|e| ChekovError::ProxyBadRequest {
@@ -416,18 +439,21 @@ fn adjust_body(
     object.insert("temperature".to_owned(), Value::from(0));
     object.insert("top_k".to_owned(), Value::from(1));
     object.insert("seed".to_owned(), Value::from(pins.seed));
-    if let Some(schema) = forced {
+    if let Some(f) = forced {
         object.insert(
             "response_format".to_owned(),
             serde_json::json!({
                 "type": "json_schema",
-                "json_schema": { "name": "tool_call", "schema": schema },
+                "json_schema": { "name": "tool_call", "schema": f.schema },
             }),
         );
         object.insert(
             "reasoning_format".to_owned(),
             Value::from(FORCED_REASONING_FORMAT),
         );
+        if let Some(effort) = f.reasoning_effort {
+            object.insert("reasoning_effort".to_owned(), Value::from(effort));
+        }
     }
     Ok(parsed.to_string())
 }
@@ -1168,6 +1194,39 @@ mod tests {
             "{sent}"
         );
         assert_eq!(sent["temperature"], 0, "the pins still hold: {sent}");
+    }
+
+    #[test]
+    fn only_a_judge_crossing_carries_reasoning_effort() {
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let schema = serde_json::json!({"type": "object"});
+        let judge = CannedUpstream::new(openai_with_timings());
+        super::cross_forced_with(
+            &wire(&judge, &facade, &up),
+            &anthropic_request("judge it"),
+            &super::Forced {
+                schema: &schema,
+                reasoning_effort: Some("low"),
+            },
+        )
+        .expect("judge crossing");
+        assert_eq!(sent(&judge)["reasoning_effort"], "low", "{}", sent(&judge));
+        assert_eq!(sent(&judge)["response_format"]["type"], "json_schema");
+        assert_eq!(sent(&judge)["reasoning_format"], "deepseek");
+
+        let probe = CannedUpstream::new(openai_with_timings());
+        super::cross_forced(
+            &wire(&probe, &facade, &up),
+            &anthropic_request("go"),
+            &schema,
+        )
+        .expect("forced probe");
+        assert!(
+            sent(&probe).get("reasoning_effort").is_none(),
+            "{}",
+            sent(&probe)
+        );
     }
 
     #[test]
