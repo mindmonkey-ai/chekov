@@ -35,6 +35,24 @@ All notable changes to chekov are recorded here. The format follows
   only on a real refusal now, never on a dead socket.
 
 ### Added
+- `capability compare <A> <B>` compares the agentic and codebase sections too,
+  not throughput alone. Tonight's pushkin run had to be held up against its
+  predecessor by eye, two reports open side by side, which is exactly how a
+  case that flipped gets missed. The agentic block prints the report's own
+  figures side by side — counted by the store's helpers, so the comparison and
+  the report can never disagree about what 8/10 means — over the cases both
+  runs graded, keyed by suite, task id AND door. Under them go the
+  disagreements: the cases where exactly one run passed, named with the losing
+  side's own reason, since a case both runs failed separates nothing. Cases
+  graded in only one run are listed by name rather than dropped, and
+  unavailable rows leave every count with the exclusion printed. The codebase
+  block pairs tasks by id and prints, per tier group and ladder tier, both
+  means with a signed delta and the per-task win counts, judged by an exact
+  two-sided binomial sign test at p < 0.05 — a five-nil sweep of six tasks is
+  p = 0.0625 and is reported as no significant difference, which a normal
+  approximation at that n would have called a win. Verdicts name the model,
+  never "A" or "B", and a section one run never measured says so instead of
+  vanishing.
 - `chekov pull` shows a per-shard progress line while a file is in flight:
   `  shard 2/5  12.3 / 39.9 GB  31%  97 MiB/s  ETA 4m29s`, with the rate
   measured over the last five seconds so a stall shows up as it happens
