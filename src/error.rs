@@ -399,6 +399,22 @@ pub enum ChekovError {
     )]
     JudgeNeedsTheServer,
 
+    #[error(
+        "tune: the baseline for '{name}' could not be measured ({reason}) — there is nothing \
+         to compare candidates against; check that `chekov run {name}` starts and `chekov \
+         doctor` passes, then retry"
+    )]
+    TuneBaselineDegenerate { name: String, reason: String },
+
+    #[error(
+        "tune: '{name}' — defaults won, so there is nothing to apply; the current flags are \
+         already the best this run measured"
+    )]
+    TuneNothingToApply { name: String },
+
+    #[error("tune: unknown stage '{stage}' — the stages are fa, kv, batch, ubatch (in that order)")]
+    TuneUnknownStage { stage: String },
+
     #[error("{context}: {source} — check the path exists and is writable, then retry")]
     Io {
         context: String,
