@@ -2754,6 +2754,30 @@ mod tests {
 
     /// One answered codebase crossing — a prediction that differs from the
     /// gold, so a `function_body` one is a crossing the judge would be asked.
+    fn crossing_row(
+        tier: crate::core::bench::codebase::TaskTier,
+    ) -> crate::core::bench::store::CodebaseRow {
+        crate::core::bench::store::CodebaseRow {
+            tier,
+            file: "src/a.rs".into(),
+            line: 7,
+            label: "<mask>".into(),
+            gold: "let a = 1;".into(),
+            prediction: "let b = 2;".into(),
+            prefix: "fn f() {\n".into(),
+            suffix: "\n}\n".into(),
+            excluded: crate::core::bench::codebase::Excluded::default(),
+            symbols_score: Some(1.0),
+            unsupported: false,
+            arm: None,
+            extra: None,
+            also_first_uses: Vec::new(),
+            name: None,
+            n_predict: Some(64),
+            exec: None,
+        }
+    }
+
     fn crossing_task(
         id: &str,
         tier: crate::core::bench::codebase::TaskTier,
@@ -2764,25 +2788,7 @@ mod tests {
             measure: crate::core::bench::codebase::run::empty_measure(),
             grade: None,
             transport: crate::core::bench::store::Transport::Buffered,
-            codebase: Some(crate::core::bench::store::CodebaseRow {
-                tier,
-                file: "src/a.rs".into(),
-                line: 7,
-                label: "<mask>".into(),
-                gold: "let a = 1;".into(),
-                prediction: "let b = 2;".into(),
-                prefix: "fn f() {\n".into(),
-                suffix: "\n}\n".into(),
-                excluded: crate::core::bench::codebase::Excluded::default(),
-                symbols_score: Some(1.0),
-                unsupported: false,
-                arm: None,
-                extra: None,
-                also_first_uses: Vec::new(),
-                name: None,
-                n_predict: Some(64),
-                exec: None,
-            }),
+            codebase: Some(crossing_row(tier)),
             judge: None,
         }
     }
@@ -2870,6 +2876,196 @@ mod tests {
             "bench 2 candidate(s) plus judge 'gpt-oss-20b' with launch + teardown, \
              ~5 min estimated"
         );
+    }
+
+    // --------------------------------------------------------- judge seam
+
+    /// Pops one canned outcome per POST and counts what went out — the judge
+    /// wire's only boundary (§8.2).
+    struct CannedJudge {
+        outcomes: std::cell::RefCell<std::collections::VecDeque<Result<String, ChekovError>>>,
+        sent: std::cell::Cell<usize>,
+    }
+
+    impl CannedJudge {
+        fn new(outcomes: Vec<Result<String, ChekovError>>) -> Self {
+            Self {
+                outcomes: std::cell::RefCell::new(outcomes.into()),
+                sent: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl crate::core::hub::HttpClient for CannedJudge {
+        fn get(&self, _url: &str) -> Result<String, ChekovError> {
+            unreachable!("the judge wire never GETs")
+        }
+
+        fn post_json(&self, _req: &crate::core::hub::JsonRequest) -> Result<String, ChekovError> {
+            self.sent.set(self.sent.get() + 1);
+            self.outcomes
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| Err(socket_down("no canned response left")))
+        }
+    }
+
+    fn socket_down(reason: &str) -> ChekovError {
+        ChekovError::EndpointDown {
+            url: "http://fake".into(),
+            reason: reason.to_owned(),
+        }
+    }
+
+    /// A judge that ANSWERED, with a refusal.
+    fn judge_refused() -> ChekovError {
+        ChekovError::UpstreamRefused {
+            url: "http://fake/v1/chat/completions".into(),
+            status: 400,
+            reason: "the grammar could not be compiled".into(),
+        }
+    }
+
+    /// One llama-server reply carrying the judge's schema answer and the
+    /// timings object every crossing is measured from.
+    fn judge_reply(same_behavior: bool) -> String {
+        serde_json::json!({
+            "choices": [{
+                "message": { "content": format!("{{\"same_behavior\":{same_behavior}}}") },
+                "finish_reason": "stop",
+            }],
+            "usage": { "prompt_tokens": 900, "completion_tokens": 10 },
+            "timings": {
+                "cache_n": 0,
+                "prompt_n": 900, "prompt_ms": 2000.0, "prompt_per_second": 450.0,
+                "predicted_n": 10, "predicted_ms": 460.0, "predicted_per_second": 21.7
+            }
+        })
+        .to_string()
+    }
+
+    fn judge_plan() -> crate::core::bench::judge::JudgePlan {
+        crate::core::bench::judge::JudgePlan {
+            judge: judge_entry("gpt-oss-20b"),
+            arch: "gpt-oss".into(),
+            rubric_hash: "9f8e7d6c5b4a".into(),
+            max_tokens: 512,
+            min_consistency_pct: 70,
+            reasoning_effort: crate::core::config::ReasoningEffort::Low,
+        }
+    }
+
+    /// What `verdict_for` decided, and how many requests that took.
+    type Decided = (
+        Result<Option<crate::core::bench::store::JudgeRow>, ChekovError>,
+        usize,
+    );
+
+    /// `verdict_for` over a canned wire.
+    fn verdict_over(
+        outcomes: Vec<Result<String, ChekovError>>,
+        row: &crate::core::bench::store::CodebaseRow,
+    ) -> Decided {
+        use crate::core::bench::runner::{ProbeWire, SamplingPins};
+        let http = CannedJudge::new(outcomes);
+        let facade = crate::core::proxy::claude::ClaudeFacade::new("gpt-oss-20b");
+        let upstream = crate::core::proxy::serve::Upstream {
+            base_url: "http://fake".into(),
+            api_key: "sekrit".into(),
+        };
+        let wire = ProbeWire {
+            http: &http,
+            facade: &facade,
+            upstream: &upstream,
+            pins: SamplingPins { seed: 42 },
+        };
+        let out = super::verdict_for(&wire, row, &judge_plan());
+        (out, http.sent.get())
+    }
+
+    fn body_crossing() -> crate::core::bench::store::CodebaseRow {
+        crossing_row(crate::core::bench::codebase::TaskTier::FunctionBody)
+    }
+
+    /// Both orders answered the same thing: one verdict, the raw answers kept
+    /// beside it, and exactly two requests spent on it.
+    #[test]
+    fn two_agreeing_orders_are_one_verdict_and_cost_exactly_two_requests() {
+        use crate::core::bench::store::DecidedBy;
+        let (out, sent) = verdict_over(
+            vec![Ok(judge_reply(true)), Ok(judge_reply(true))],
+            &body_crossing(),
+        );
+        let row = out.expect("a verdict").expect("a judge row");
+        assert_eq!(
+            (row.equivalent, row.gold_first, row.prediction_first),
+            (Some(true), Some(true), Some(true))
+        );
+        assert_eq!(row.decided_by, DecidedBy::SwapAgreement);
+        assert_eq!(sent, 2, "one request per order, and no more");
+    }
+
+    /// A judge that ANSWERS a non-2xx is up and reachable: its refusal skips
+    /// this crossing and the phase goes on. A judge that is not answering at
+    /// all stops the phase with the rows so far intact.
+    #[test]
+    fn a_refusal_skips_the_crossing_and_a_dead_socket_stops_the_phase() {
+        use crate::core::bench::store::DecidedBy;
+        let (out, _) = verdict_over(
+            vec![Err(judge_refused()), Err(judge_refused())],
+            &body_crossing(),
+        );
+        let row = out
+            .expect("a refusal is not the phase's error")
+            .expect("a judge row");
+        assert_eq!(row.decided_by, DecidedBy::Skipped);
+        assert!(
+            row.skipped
+                .as_deref()
+                .is_some_and(|s| s.starts_with("judge refused: ")),
+            "{:?}",
+            row.skipped
+        );
+        let (out, _) = verdict_over(
+            vec![Err(socket_down("connection refused"))],
+            &body_crossing(),
+        );
+        assert!(matches!(out, Err(ChekovError::EndpointDown { .. })));
+    }
+
+    /// The three crossings the judge is never asked about: another tier, an
+    /// identical pair, and one the compiler already rejected. None of them
+    /// reaches the wire, and none of them records time it did not spend.
+    #[test]
+    fn a_settled_crossing_records_its_row_without_a_request() {
+        use crate::core::bench::codebase::TaskTier;
+        use crate::core::bench::store::{DecidedBy, ExecRow, ExecScore};
+        let (out, sent) = verdict_over(vec![], &crossing_row(TaskTier::InFile));
+        assert!(out.expect("not an error").is_none(), "not a judge row");
+        assert_eq!(sent, 0);
+
+        let mut identical = body_crossing();
+        identical.prediction.clone_from(&identical.gold);
+        let (out, sent) = verdict_over(vec![], &identical);
+        let row = out.expect("a row").expect("a judge row");
+        assert_eq!(
+            (row.decided_by, row.equivalent),
+            (DecidedBy::Identical, Some(true))
+        );
+        assert_eq!(sent, 0);
+        assert!(row.judge_secs.abs() < f64::EPSILON, "{}", row.judge_secs);
+
+        let mut broken = body_crossing();
+        broken.exec = Some(ExecRow {
+            compile: ExecScore::Value(0.0),
+            ..ExecRow::skipped("")
+        });
+        let (out, sent) = verdict_over(vec![], &broken);
+        let row = out.expect("a row").expect("a judge row");
+        assert_eq!(row.decided_by, DecidedBy::Skipped);
+        assert_eq!(row.skipped.as_deref(), Some("did not compile"));
+        assert_eq!(sent, 0);
+        assert!(row.judge_secs.abs() < f64::EPSILON, "{}", row.judge_secs);
     }
 
     #[test]
