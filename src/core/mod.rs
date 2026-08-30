@@ -20,3 +20,4 @@ pub mod registry;
 pub mod server;
 pub mod stats;
 pub mod toolparser;
+pub mod tune;
