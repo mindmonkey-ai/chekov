@@ -844,20 +844,26 @@ struct RunInputs<'a> {
     prepared: Option<&'a crate::core::bench::codebase::Prepared>,
 }
 
-/// `codebase: {n} tasks from {repo} @ {head[..12]}`, with the shortfall
-/// parenthetical appended only when sampling actually fell short.
+/// `codebase: {n} tasks from {repo} @ {head[..12]}`, with what the
+/// `#[cfg(test)]` cutter took and the shortfall parenthetical appended only
+/// when there is something to say.
 fn codebase_plan_line(
     prepared: &crate::core::bench::codebase::Prepared,
     repo: &std::path::Path,
 ) -> String {
     let head12 = &prepared.head[..12.min(prepared.head.len())];
+    let elided = if prepared.cfg_test_files == 0 {
+        String::new()
+    } else {
+        format!(", tests elided in {} files", prepared.cfg_test_files)
+    };
     let shortfall = if prepared.shortfall.is_empty() {
         String::new()
     } else {
         format!(" ({})", prepared.shortfall.join(", "))
     };
     format!(
-        "codebase: {} tasks from {} @ {head12}{shortfall}\n",
+        "codebase: {} tasks from {} @ {head12}{elided}{shortfall}\n",
         prepared.tasks.len(),
         repo.display()
     )
@@ -2311,6 +2317,7 @@ mod tests {
             excluded: Excluded {
                 doc_comment: 0,
                 cross_file: "n/a: same-file".into(),
+                cfg_test_lines: 11,
             },
         }
     }
@@ -2325,6 +2332,8 @@ mod tests {
             ],
             shortfall: vec![],
             symbols: Symbols::default(),
+            cfg_test_lines: 11,
+            cfg_test_files: 1,
         }
     }
 

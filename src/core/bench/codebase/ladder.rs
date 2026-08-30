@@ -669,6 +669,7 @@ mod tests {
             excluded: Excluded {
                 doc_comment: 0,
                 cross_file: "n/a: same-file".into(),
+                cfg_test_lines: 0,
             },
         }
     }

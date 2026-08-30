@@ -125,7 +125,10 @@ branch you're on — with work in progress, bench a clone rather than the copy
 you are editing. Only tiers 1–5 (exact, edit similarity, identifier F1,
 parse, repo-symbol existence) are scored; tiers 6–7 (compile gate, covering
 test) and cross-file context are deferred to slice B. Masks are
-boundary-scanned, not AST-derived, and the report always says so. chekov
+boundary-scanned, not AST-derived, and the report always says so. A file with
+inline unit tests is kept and its `#[cfg(test)]` items are cut out before
+anything is sampled — the header's `tests elided: L lines in F files` says what
+that came to, so the model is never offered a test module as its answer. chekov
 sends the whole file and grades over the whole file, but llama.cpp's `/infill`
 windows the prompt at its batch size (about ¾·`n_batch` tokens of prefix and
 ¼·`n_batch` of suffix), so a long file reaches the model only in part — the

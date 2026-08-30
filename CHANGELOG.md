@@ -7,6 +7,20 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Changed
+- `capability bench --codebase` keeps a file that contains `#[cfg(test)]` and
+  cuts the test items out of it, instead of excluding the whole file. Idiomatic
+  Rust keeps its unit tests inline, so the old rule left 7 of chekov's own 63
+  source files eligible — the benchmark was sampling the repository's
+  leftovers. Each `#[cfg(test)]`-attributed item is now cut from its attribute
+  line through the matching `}` or terminating `;`, literal-aware (a brace
+  inside a string in the test module cannot end the cut early, and the
+  attribute inside a string or a comment is not a cut point), before masking
+  and before the repo symbol set is built. Nothing goes quiet: every row
+  carries its file's `excluded.cfg_test_lines`, the report header adds
+  `; tests elided: L lines in F files`, and the dry-run plan line adds
+  `, tests elided in F files`. Any repository with inline tests now yields a
+  different task set, so its set hash — and so its `corpus_id` — changes; the
+  stamp records which one a run used.
 - `capability graph`'s inputs legend says what the second character encodes
   — `#  kv measured   ·  kv predicted` — and ends with what it does not
   cover, derived from the cells: `overhead is a flat predicted 3.0 GiB in

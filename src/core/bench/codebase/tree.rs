@@ -1,6 +1,10 @@
 //! The repository side of codebase mode: the clean-tree gate, HEAD, a
 //! detached worktree to read from, and the Rust file walk with the leakage
-//! filter's test-file rule applied at the source.
+//! filter's test-FILE rule applied at the source.
+//!
+//! A file with inline `#[cfg(test)]` items is not a test file and is handed
+//! back whole; `codebase::prepare` cuts those items out. The walk knows file
+//! names and file sizes, not Rust.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -192,8 +196,7 @@ fn source_text(path: &Path, oversized: &mut usize) -> Option<String> {
         *oversized += 1;
         return None;
     }
-    let text = std::fs::read_to_string(path).ok()?;
-    (!text.contains("#[cfg(test)]")).then_some(text)
+    std::fs::read_to_string(path).ok()
 }
 
 #[cfg(test)]
@@ -318,13 +321,22 @@ mod tests {
         assert_clean(&dir).expect("the repo is untouched");
     }
 
+    /// A file with an inline `#[cfg(test)]` module is kept, and kept verbatim:
+    /// the cut is `prepare`'s job, so the walk stays ignorant of Rust beyond
+    /// the file's name and its size.
     #[test]
-    fn rust_sources_skip_tests_and_cfg_test_files_and_count_what_they_passed() {
+    fn rust_sources_skip_test_named_files_and_hand_back_inline_tests_uncut() {
         let dir = repo("walk");
         let sources = rust_sources(&dir);
-        let paths: Vec<&str> = sources.files.iter().map(|(p, _)| p.as_str()).collect();
-        assert_eq!(paths, vec!["src/lib.rs"], "{paths:?}");
-        assert!(sources.files[0].1.contains("pub fn a()"));
+        let mut paths: Vec<&str> = sources.files.iter().map(|(p, _)| p.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(paths, vec!["src/cov.rs", "src/lib.rs"], "{paths:?}");
+        let cov = sources
+            .files
+            .iter()
+            .find(|(p, _)| p.as_str() == "src/cov.rs")
+            .expect("src/cov.rs is eligible now");
+        assert!(cov.1.contains("#[cfg(test)]"), "the tree does not cut");
         assert_eq!(
             sources.scanned, 2,
             "src/lib.rs and src/cov.rs; tests/ is not walked"

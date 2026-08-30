@@ -170,8 +170,9 @@ fn body_after(text: &str, from: usize) -> Option<Range<usize>> {
 }
 
 /// Index of the `}` matching the `{` at `open`, skipping strings, chars and
-/// comments.
-fn matching_close(text: &str, open: usize) -> Option<usize> {
+/// comments. Shared with the `#[cfg(test)]` cutter, which needs the same
+/// literal-aware match to find where a test module ends.
+pub(crate) fn matching_close(text: &str, open: usize) -> Option<usize> {
     let mut depth = 0_i64;
     let mut scanner = Scanner::new(&text[open..]);
     while let Some((i, c)) = scanner.next_code_char() {

@@ -912,7 +912,7 @@ Sampling is deterministic: a seeded RNG keyed on `git rev-parse HEAD`, so the sa
 
 **Leakage filter — mandatory, and the single most important correctness control.** "Future context leakage" is a documented critical flaw in repo-derived benchmarks: after removing a function's definition, its test file, its callers and its docstring still reveal it. Before assembling context for masked symbol S, chekov drops:
 
-(a) every file matching test globs — `tests/`, `*_test.*`, `test_*.py`, `*.spec.*`, and any file containing `#[cfg(test)]`;
+(a) every file matching test globs — `tests/`, `*_test.*`, `test_*.py`, `*.spec.*`. A file containing `#[cfg(test)]` is **kept**: each `#[cfg(test)]`-attributed item is cut from its text (attribute through the matching `}` or the terminating `;`, literal-aware) before masking and before the symbol set is built, and the report prints how many lines were elided (amended 2026-08-29 — excluding the whole file left 7 of 63 files eligible on an idiomatic Rust repo);
 (b) every file whose text contains S's identifier;
 (c) the doc-comment or docstring immediately preceding the masked span;
 (d) any README/docs file naming S.
@@ -1150,7 +1150,7 @@ The `HttpClient` seam change (`get_range` + `head_commit`, both at once) with it
 
 Worktree isolation and the `--allow-exec` gate, the leakage filter with printed exclusion counts, HEAD-seeded sampling, `/infill` delegation with `N/A` capability recording, the SVG renderer, and the position-swapped grammar-forced binary judge with its consistency floor and printed tie fallback. Deliberately last: largest, most likely to need iteration, and every earlier slice is useful without it.
 
-*Acceptance test:* a test asserts the leakage filter drops a file containing the masked identifier, a `#[cfg(test)]` block, and the preceding doc-comment, and that the exclusion count appears in the task record; a test asserts an `/infill`-unsupported model scores `N/A` and the printed composite states the renormalization; a test asserts a judge sharing `general.architecture` with a candidate raises `JudgeFamilyConflict`; a test asserts swap disagreement records a tie and sub-70% run consistency voids the axis.
+*Acceptance test:* a test asserts the leakage filter drops a file containing the masked identifier, cuts a `#[cfg(test)]` block out of a kept file, and drops the preceding doc-comment, and that the exclusion counts appear in the task record; a test asserts an `/infill`-unsupported model scores `N/A` and the printed composite states the renormalization; a test asserts a judge sharing `general.architecture` with a candidate raises `JudgeFamilyConflict`; a test asserts swap disagreement records a tie and sub-70% run consistency voids the axis.
 
 ---
 

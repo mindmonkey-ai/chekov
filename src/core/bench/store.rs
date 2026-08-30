@@ -542,6 +542,26 @@ fn measured<'a>(rows: &[&'a TaskRow]) -> (Vec<&'a TaskRow>, usize) {
     (kept, excluded)
 }
 
+/// `; tests elided: L lines in F files`, or nothing when no row's file gave
+/// any up.
+///
+/// The rows carry a per-file count, so the sum is over distinct files, not
+/// over rows — three tasks from one file elided its tests once. A run that
+/// cut nothing omits the clause: an honest zero here is only noise.
+fn elided_note(rows: &[&TaskRow]) -> String {
+    let by_file: std::collections::BTreeMap<&str, usize> = rows
+        .iter()
+        .filter_map(|r| r.codebase.as_ref())
+        .map(|c| (c.file.as_str(), c.excluded.cfg_test_lines))
+        .collect();
+    let lines: usize = by_file.values().sum();
+    if lines == 0 {
+        return String::new();
+    }
+    let files = by_file.values().filter(|n| **n > 0).count();
+    format!("; tests elided: {lines} lines in {files} files")
+}
+
 /// ` (N unavailable, excluded)`, or nothing when everything was measured.
 fn excluded_note(excluded: usize) -> String {
     if excluded == 0 {
@@ -597,12 +617,13 @@ pub fn render_codebase(log: &RunLog) -> String {
     };
     let mut out = format!(
         "codebase     {} tasks from {} files ({} in_file, {} function_body) — {}; \
-         context: same-file (engine window ≤ n_batch){}\n",
+         context: same-file (engine window ≤ n_batch){}{}\n",
         kept.len(),
         distinct_files(&kept),
         count(TaskTier::InFile),
         count(TaskTier::FunctionBody),
         crate::core::bench::codebase::MASK_LABEL,
+        elided_note(&kept),
         excluded_note(excluded),
     );
     for tier in [TaskTier::InFile, TaskTier::FunctionBody] {
@@ -1299,11 +1320,29 @@ mod tests {
                 excluded: Excluded {
                     doc_comment: 0,
                     cross_file: "n/a: same-file".into(),
+                    cfg_test_lines: 0,
                 },
                 symbols_score: Some(1.0),
                 unsupported: false,
             }),
         }
+    }
+
+    /// The same task with its file's inline tests counted as elided — the
+    /// header clause reads this and nothing else.
+    fn elided_codebase_task(id: &str, file: &str, cfg_test_lines: usize) -> Task {
+        let mut task = codebase_task(CodebaseFixture {
+            id,
+            tier: TaskTier::InFile,
+            gold: "let a = 1;",
+            prediction: "let a = 1;",
+        });
+        task.task_id = id.into();
+        if let Some(row) = task.codebase.as_mut() {
+            row.file = file.into();
+            row.excluded.cfg_test_lines = cfg_test_lines;
+        }
+        task
     }
 
     /// A codebase row nobody could answer: unavailable, with no tier-5 score
@@ -1348,6 +1387,34 @@ mod tests {
         for line in expected {
             assert!(rendered.contains(line), "{rendered}");
         }
+        assert!(
+            !rendered.contains("tests elided"),
+            "a run that cut nothing says nothing: {rendered}"
+        );
+    }
+
+    /// The clause counts lines per distinct file, not per row, and names only
+    /// the files that actually gave something up.
+    #[test]
+    fn a_codebase_block_says_how_many_test_lines_were_elided_and_from_how_many_files() {
+        let eval = scratch("codebase-elided");
+        let mut writer = RunWriter::create(&eval, "r14-model", &head()).expect("create");
+        for (id, file, lines) in [
+            ("in_file-aaa111-L7", "src/a.rs", 12),
+            ("in_file-bbb222-L7", "src/b.rs", 9),
+            ("in_file-ccc333-L7", "src/c.rs", 0),
+        ] {
+            writer
+                .append(elided_codebase_task(id, file, lines))
+                .expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains(
+                "context: same-file (engine window ≤ n_batch); tests elided: 21 lines in 2 files"
+            ),
+            "{rendered}"
+        );
     }
 
     #[test]

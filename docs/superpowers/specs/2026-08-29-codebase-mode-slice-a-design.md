@@ -97,6 +97,11 @@ leakage filter's rule (a), applied at candidate time so a test file is never
 a task either — masking an assertion measures nothing). Files over 200 KiB
 are skipped and counted.
 
+> **Amended 2026-08-29:** a file containing `#[cfg(test)]` is kept; each
+> `#[cfg(test)]`-attributed item is cut (attribute through the matching `}` or
+> the terminating `;`, literal-aware) before masking and before the symbol set
+> is built, and the report says how many lines were elided.
+
 A scanner walks the text once, tracking string literals (`"…"` with escapes,
 raw strings `r#"…"#`), char literals, line comments and block comments, so
 braces inside them never count. On each `fn` signature (regex
@@ -147,6 +152,12 @@ Leakage filter rules, and what slice A does with each:
 | (b) files containing the masked identifier | dropped from context | not applicable — no cross-file context; recorded as `n/a: same-file` |
 | (c) the doc comment above the masked span | dropped | **applied**: for `function_body` tasks the `///` block is cut from the prefix; `excluded.doc_comment = 1` |
 | (d) docs naming the symbol | dropped | not applicable — recorded as `n/a: same-file` |
+
+> **Rule (a), amended 2026-08-29:** a file containing `#[cfg(test)]` is kept;
+> each `#[cfg(test)]`-attributed item is cut (attribute through the matching
+> `}` or the terminating `;`, literal-aware) before masking and before the
+> symbol set is built, and the report says how many lines were elided. The
+> record carries the file's own count as `excluded.cfg_test_lines`.
 
 The task record carries `excluded: { doc_comment: 0|1, cross_file: "n/a: same-file" }`
 and the report prints, once per run, `context: same-file (cross-file context
