@@ -4,8 +4,15 @@
 //! run order, listing the launch-flag values each stage tries, and rewriting
 //! a launch argv to carry one candidate value under either flag spelling.
 
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::core::bench::stamp::flag_value_either;
 use crate::core::bench::sweep::DepthResult;
+use crate::core::clock::utc_compact_now;
 use crate::core::config::TuneSection;
+use crate::core::machine::pmset_therm;
 use crate::core::stats::{Comparison, Summary, compare};
 use crate::error::ChekovError;
 
@@ -397,6 +404,139 @@ pub fn stage_line(label: &CandidateLabel, outcome: &Outcome, context: &LineConte
     }
 }
 
+/// Where a trial's thermal readings came from (spec §6).
+///
+/// Named in the record so a reader knows the limitation: macOS exposes the
+/// real pressure level only through a C notification API this crate does
+/// not link.
+pub const THERMAL_SOURCE: &str = "pmset -g therm";
+
+/// A run where the baseline's own flags could not be beaten (spec §8) —
+/// the record still exists, but there is nothing to `--apply`.
+pub const DEFAULTS_WON: &str = "defaults won";
+
+/// `pmset -g therm`'s `CPU_Speed_Limit = N` line, parsed without a regex
+/// dependency for two call sites: find the line, split on `=`, trim, parse.
+#[must_use]
+pub fn parse_therm(pmset_output: &str) -> Option<u32> {
+    let line = pmset_output
+        .lines()
+        .find(|line| line.contains("CPU_Speed_Limit"))?;
+    let (_, value) = line.split_once('=')?;
+    value.trim().parse().ok()
+}
+
+/// `pmset -g therm`, read and parsed. `None` when the command failed or the
+/// output carried no speed-limit line (the nominal case).
+#[must_use]
+pub fn read_therm() -> Option<u32> {
+    parse_therm(&pmset_therm()?)
+}
+
+/// The lower of two thermal readings, but only when one is actually
+/// throttled (below 100) — two nominal readings carry no note.
+#[must_use]
+pub fn thermal_note(before: Option<u32>, after: Option<u32>) -> Option<u32> {
+    [before, after]
+        .into_iter()
+        .flatten()
+        .filter(|&pct| pct < 100)
+        .min()
+}
+
+/// The bench stamp's flag sextet, read straight off a trial's argv so a
+/// tune trial and a bench run describe a configuration in the same words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlagSextet {
+    pub kv_unified: String,
+    pub n_batch: String,
+    pub n_ubatch: String,
+    pub type_k: String,
+    pub type_v: String,
+    pub flash_attn: String,
+}
+
+/// Read the flag sextet off a launch argv (spec §8 — same name pairs as
+/// `build_head`).
+#[must_use]
+pub fn sextet(argv: &[String]) -> FlagSextet {
+    FlagSextet {
+        kv_unified: flag_value_either(argv, &["-kvu", "--kv-unified"]),
+        n_batch: flag_value_either(argv, &["-b", "--batch-size"]),
+        n_ubatch: flag_value_either(argv, &["-ub", "--ubatch-size"]),
+        type_k: flag_value_either(argv, &["-ctk", "--cache-type-k"]),
+        type_v: flag_value_either(argv, &["-ctv", "--cache-type-v"]),
+        flash_attn: flag_value_either(argv, &["-fa", "--flash-attn"]),
+    }
+}
+
+/// The probe geometry a run measured under (spec §8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Probe {
+    pub depth: u32,
+    pub repetitions: u32,
+    pub max_tokens: u32,
+}
+
+/// One launch of a tune run — the baseline or one stage's candidate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Trial {
+    pub stage: String,
+    pub value: Option<String>,
+    pub argv: Vec<String>,
+    pub stamp: FlagSextet,
+    pub outcome: String,
+    pub decode: Option<Summary>,
+    pub prefill: Option<Summary>,
+    pub prompt_n: Option<u64>,
+    /// Speed limit before and after the probe (spec §6); either below 100
+    /// marks the trial's clock as dirty without voiding it.
+    pub speed_limit_pct: [Option<u32>; 2],
+    pub reason: Option<String>,
+    pub verdict: Option<String>,
+}
+
+/// A completed `chekov tune` run (spec §8), written after every trial so a
+/// crash leaves the trials so far on disk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Record {
+    pub model: String,
+    pub quant: String,
+    pub revision: String,
+    pub machine_id: String,
+    pub engine_build_commit: String,
+    pub chekov_version: String,
+    pub probe: Probe,
+    pub thermal_source: String,
+    pub trials: Vec<Trial>,
+    /// The final incumbent's argv, when it beat the baseline; `None` means
+    /// `DEFAULTS_WON`.
+    pub winner: Option<Vec<String>>,
+    pub verdict: String,
+}
+
+/// `<dir>/<utc_compact_now>-<model>.json`, computed once per run.
+#[must_use]
+pub fn record_path(dir: &Path, model: &str) -> PathBuf {
+    dir.join(format!("{}-{model}.json", utc_compact_now()))
+}
+
+/// Pretty-print `record` to `path`, creating the parent directory first.
+pub fn write_record(path: &Path, record: &Record) -> Result<(), ChekovError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ChekovError::io(format!("creating {}", parent.display()), e))?;
+    }
+    let text = serde_json::to_string_pretty(record)
+        .map_err(|e| ChekovError::io(format!("serializing {}", path.display()), e.into()))?;
+    std::fs::write(path, text)
+        .map_err(|e| ChekovError::io(format!("writing {}", path.display()), e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Candidate, Flag, Metric, Stage, candidates, rewrite, stages, value_of};
@@ -692,6 +832,38 @@ mod tests {
         assert_eq!(super::thermal_note(Some(100), Some(100)), None);
     }
 
+    fn sample_record(argv: Vec<String>, stamp: super::FlagSextet) -> super::Record {
+        super::Record {
+            model: "m".into(),
+            quant: "Q8_0".into(),
+            revision: "abc123def456".into(),
+            machine_id: "8d41f0c2a917".into(),
+            engine_build_commit: "0f194b907".into(),
+            chekov_version: "0.1.0".into(),
+            probe: super::Probe {
+                depth: 4096,
+                repetitions: 5,
+                max_tokens: 128,
+            },
+            thermal_source: super::THERMAL_SOURCE.into(),
+            trials: vec![super::Trial {
+                stage: "baseline".into(),
+                value: None,
+                argv,
+                stamp,
+                outcome: "measured".into(),
+                decode: Some(summary(31.2, 0.3)),
+                prefill: Some(summary(402.0, 3.0)),
+                prompt_n: Some(4101),
+                speed_limit_pct: [None, Some(87)],
+                reason: None,
+                verdict: None,
+            }],
+            winner: None,
+            verdict: super::DEFAULTS_WON.into(),
+        }
+    }
+
     #[test]
     fn a_record_round_trips_and_names_its_flag_sextet() {
         let argv = argv(&[
@@ -714,35 +886,7 @@ mod tests {
             ),
             ("4096", "engine-default", "q8_0", "on")
         );
-        let record = super::Record {
-            model: "m".into(),
-            quant: "Q8_0".into(),
-            revision: "abc123def456".into(),
-            machine_id: "8d41f0c2a917".into(),
-            engine_build_commit: "0f194b907".into(),
-            chekov_version: "0.1.0".into(),
-            probe: super::Probe {
-                depth: 4096,
-                repetitions: 5,
-                max_tokens: 128,
-            },
-            thermal_source: super::THERMAL_SOURCE.into(),
-            trials: vec![super::Trial {
-                stage: "baseline".into(),
-                value: None,
-                argv: argv.clone(),
-                stamp: sextet,
-                outcome: "measured".into(),
-                decode: Some(summary(31.2, 0.3)),
-                prefill: Some(summary(402.0, 3.0)),
-                prompt_n: Some(4101),
-                speed_limit_pct: [None, Some(87)],
-                reason: None,
-                verdict: None,
-            }],
-            winner: None,
-            verdict: super::DEFAULTS_WON.into(),
-        };
+        let record = sample_record(argv, sextet);
         let dir = std::env::temp_dir().join(format!("chekov-tune-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = super::record_path(&dir, "m");

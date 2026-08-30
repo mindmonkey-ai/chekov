@@ -5,8 +5,10 @@
 //! repetition is dropped as warmup and the drop is recorded rather than
 //! quietly absorbed.
 
+use serde::{Deserialize, Serialize};
+
 /// A summarised measurement series.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Summary {
     pub median: f64,
     pub p10: f64,
