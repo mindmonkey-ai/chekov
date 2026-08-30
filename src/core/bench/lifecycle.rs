@@ -140,8 +140,11 @@ const PREFILL_TOK_S: u64 = 150;
 const DECODE_TOK_S: u64 = 60;
 const GIB: u64 = 1024 * 1024 * 1024;
 
-/// Rough wall-clock seconds for the whole plan. Integer milliseconds
-/// throughout — an estimate needs no float.
+/// Rough wall-clock seconds for the whole plan.
+///
+/// Every candidate's load and sweep, plus the judge step's own load. What the
+/// judge then SPENDS on verdicts is `judge_estimate_secs`, added by the
+/// caller. Integer milliseconds throughout — an estimate needs no float.
 #[must_use]
 pub fn estimate_secs(steps: &[BenchStep], plan: &crate::core::bench::sweep::SweepPlan) -> u64 {
     let sweep_ms: u64 = plan
@@ -161,16 +164,17 @@ pub fn estimate_secs(steps: &[BenchStep], plan: &crate::core::bench::sweep::Swee
 /// anything measured against the model once it's up. The judge is loaded
 /// but never swept — its cost is `judge_estimate_secs`, counted elsewhere.
 fn step_ms(step: &BenchStep, sweep_ms: u64) -> u64 {
-    let load_ms = step.weights_bytes.unwrap_or(0) / GIB * LOAD_MS_PER_GIB;
+    let load_ms = || step.weights_bytes.unwrap_or(0) / GIB * LOAD_MS_PER_GIB;
     match step.action {
-        StepAction::Launch => load_ms + sweep_ms,
-        StepAction::Judge => load_ms,
+        StepAction::Launch => load_ms() + sweep_ms,
+        StepAction::Judge => load_ms(),
         StepAction::UseRunning => sweep_ms,
     }
 }
 
 /// Any launch is a real side effect (a model load, a teardown) — those runs
-/// confirm; a pure reuse-the-running-server run stays gate-free.
+/// confirm, and the judge's own step is such a launch. A pure
+/// reuse-the-running-server run stays gate-free.
 #[must_use]
 pub fn needs_confirm(steps: &[BenchStep]) -> bool {
     steps

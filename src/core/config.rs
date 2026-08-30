@@ -110,7 +110,7 @@ impl Default for DoctorSection {
 }
 
 /// llama.cpp's `reasoning_effort` spellings, as the judge wire sends them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     None,
