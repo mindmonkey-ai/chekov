@@ -1444,10 +1444,10 @@ mod tests {
 
     use super::{
         CodebaseRow, DecidedBy, GradeRow, JudgeRow, Measure, RunHead, RunLog, RunWriter, Task,
-        TaskKey, TaskRow, Transport, render_run,
+        TaskKey, TaskRow, Transport, render_codebase, render_run,
     };
     use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
-    use crate::core::bench::stamp::Stamp;
+    use crate::core::bench::stamp::{JudgeStamp, Stamp};
     use crate::error::ChekovError;
 
     fn scratch(name: &str) -> PathBuf {
@@ -2755,5 +2755,150 @@ mod tests {
         }
         let block = super::render_codebase(&RunLog::load(writer.dir()).expect("load"));
         assert!(block.contains("compile +1.00  test n/a"), "{block}");
+    }
+
+    /// Bundled so `judge_verdict` stays within the 3-argument limit.
+    struct JudgeFixture<'a> {
+        id: &'a str,
+        equivalent: Option<bool>,
+        gold_first: Option<bool>,
+        prediction_first: Option<bool>,
+        decided_by: DecidedBy,
+        skipped: Option<&'a str>,
+    }
+
+    fn judge_verdict(fixture: JudgeFixture) -> Task {
+        judge_task(
+            fixture.id,
+            JudgeRow {
+                equivalent: fixture.equivalent,
+                gold_first: fixture.gold_first,
+                prediction_first: fixture.prediction_first,
+                decided_by: fixture.decided_by,
+                skipped: fixture.skipped.map(str::to_owned),
+                judge_secs: 2.1,
+            },
+        )
+    }
+
+    /// Six `function_body` crossings plus their verdicts: one identical, three
+    /// swap-agreements (two of them agreeing on `false`), one swap
+    /// disagreement, and one skipped for an off-schema reply.
+    fn judged_run() -> RunLog {
+        let eval = scratch("judged-report");
+        let mut head = head();
+        head.stamp.judge = Some(JudgeStamp {
+            model: "gpt-oss-20b".into(),
+            quant: "F16".into(),
+            revision: "1a2b3c4d5e6f".into(),
+            arch: "gpt-oss".into(),
+            rubric_hash: "9f8e7d6c5b4a".into(),
+            max_tokens: 512,
+            reasoning_effort: "low".into(),
+            min_consistency_pct: 70,
+        });
+        let mut writer = RunWriter::create(&eval, "r-judged-report", &head).expect("create");
+        for id in ["fb-1", "fb-2", "fb-3", "fb-4", "fb-5", "fb-6"] {
+            writer
+                .append(codebase_task(CodebaseFixture {
+                    id,
+                    tier: TaskTier::FunctionBody,
+                    gold: "let x = 1;\n    x",
+                    prediction: "x",
+                }))
+                .expect("append");
+        }
+        for fixture in [
+            JudgeFixture {
+                id: "fb-1",
+                equivalent: Some(true),
+                gold_first: None,
+                prediction_first: None,
+                decided_by: DecidedBy::Identical,
+                skipped: None,
+            },
+            JudgeFixture {
+                id: "fb-2",
+                equivalent: Some(true),
+                gold_first: Some(true),
+                prediction_first: Some(true),
+                decided_by: DecidedBy::SwapAgreement,
+                skipped: None,
+            },
+            JudgeFixture {
+                id: "fb-3",
+                equivalent: Some(false),
+                gold_first: Some(false),
+                prediction_first: Some(false),
+                decided_by: DecidedBy::SwapAgreement,
+                skipped: None,
+            },
+            JudgeFixture {
+                id: "fb-4",
+                equivalent: Some(false),
+                gold_first: Some(false),
+                prediction_first: Some(false),
+                decided_by: DecidedBy::SwapAgreement,
+                skipped: None,
+            },
+            JudgeFixture {
+                id: "fb-5",
+                equivalent: None,
+                gold_first: Some(true),
+                prediction_first: Some(false),
+                decided_by: DecidedBy::SwapDisagreement,
+                skipped: None,
+            },
+            JudgeFixture {
+                id: "fb-6",
+                equivalent: None,
+                gold_first: None,
+                prediction_first: None,
+                decided_by: DecidedBy::Skipped,
+                skipped: Some("reply was not the schema: yes"),
+            },
+        ] {
+            writer.append(judge_verdict(fixture)).expect("append");
+        }
+        RunLog::load(writer.dir()).expect("load")
+    }
+
+    /// A plain codebase run: no `--judge` given at all.
+    fn codebase_only_run() -> RunLog {
+        let eval = scratch("codebase-only-report");
+        let mut writer = RunWriter::create(&eval, "r-codebase-only", &head()).expect("create");
+        for task in codebase_fixtures().map(codebase_task) {
+            writer.append(task).expect("append");
+        }
+        RunLog::load(writer.dir()).expect("load")
+    }
+
+    #[test]
+    fn the_function_body_line_carries_the_equiv_cell_and_the_header_names_the_judge() {
+        let out = render_codebase(&judged_run());
+        assert!(out.contains("; judge: gpt-oss-20b (F16@1a2b3c4d5e6f, gpt-oss, effort low) rubric 9f8e7d6c5b4a, swap consistency 75% (3 of 4)"), "{out}");
+        assert!(out.contains("equiv 0.50 (n=4 judged of 6; 1 undecided)"), "identical counts as true, 2 true of 4: {out}");
+        assert!(out.contains("             judge: 1 identical, 4 called, 1 undecided, 1 skipped; 2.1 s median per verdict\n"), "{out}");
+        assert!(out.contains("             warning: 1 reply was not the schema — the grammar was not enforced for this judge and the column is measuring the prompt alone\n"), "{out}");
+        let in_file_line = out.lines().find(|l| l.contains("in_file")).unwrap_or_default();
+        assert!(!in_file_line.contains("equiv"), "other tiers print no equiv cell: {in_file_line}");
+    }
+
+    #[test]
+    fn below_the_floor_the_column_is_voided_with_both_numbers() {
+        let mut log = judged_run();
+        log.head.stamp.judge.as_mut().map(|j| j.min_consistency_pct = 80);
+        let out = render_codebase(&log);
+        assert!(out.contains("equiv voided (swap consistency 75% < 80%)"), "{out}");
+    }
+
+    #[test]
+    fn without_a_judge_the_trailer_says_so_and_an_unjudged_run_says_how_to_resume() {
+        let out = render_codebase(&codebase_only_run());
+        assert!(out.contains("             judge skipped: --judge not given\n"), "{out}");
+        let mut stamped = judged_run();
+        stamped.rows.retain(|r| r.suite != "judge");
+        let out = render_codebase(&stamped);
+        assert!(out.contains("             judge: 0 of 6 crossings judged — resume with --judge gpt-oss-20b\n"), "{out}");
     }
 }
