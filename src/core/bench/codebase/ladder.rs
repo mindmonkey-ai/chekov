@@ -235,6 +235,10 @@ pub struct Scored<'a> {
     pub task: &'a CodebaseTask,
     pub prediction: &'a str,
     pub symbols: &'a Symbols,
+    /// The extra file's text on the with-extra arm, `""` otherwise. The model
+    /// was shown that file, so its names exist for it (§6); the without arm
+    /// is scored against the page it actually saw.
+    pub extra: &'a str,
 }
 
 /// The text tiers 1–4 are scored from.
@@ -254,7 +258,11 @@ pub struct StoredText<'a> {
 /// worktree took with it, so it is scored at run time and skipped here.
 #[must_use]
 pub fn stored_tier(tier: Tier, text: &StoredText) -> Score {
-    let line_level = text.tier == TaskTier::InFile;
+    // A cross-file span is a statement, exactly as an `in_file` span is: same
+    // mask shape, one right answer expected, so tiers 1-2 mean the same thing
+    // there. Only `function_body`, where many different bodies are correct,
+    // skips them.
+    let line_level = text.tier != TaskTier::FunctionBody;
     match tier {
         Tier::Exact if line_level => Score::Value(exact(text.gold, text.prediction)),
         Tier::EditSim if line_level => Score::Value(edit_sim(text.gold, text.prediction)),
@@ -269,7 +277,7 @@ pub fn stored_tier(tier: Tier, text: &StoredText) -> Score {
 #[must_use]
 pub fn score_all(s: &Scored) -> Vec<(Tier, Score)> {
     let t = s.task;
-    let context = format!("{}{}", t.prefix, t.suffix);
+    let context = format!("{}{}{}", t.prefix, t.suffix, s.extra);
     let file_uses = file_use_symbols(&context);
     let known = Known {
         repo: s.symbols,
@@ -655,6 +663,50 @@ mod tests {
     }
 
     #[test]
+    fn a_name_only_the_extra_file_carries_exists_on_the_with_arm_and_not_without() {
+        let t = task(TaskTier::CrossFileFirst, "let a = 1;");
+        let scored = |extra| {
+            score_all(&Scored {
+                task: &t,
+                prediction: "let a = build(1);",
+                symbols: &Symbols(BTreeSet::new()),
+                extra,
+            })
+            .into_iter()
+            .find_map(|(tier, s)| match (tier, s) {
+                (Tier::Symbols, Score::Value(v)) => Some(v),
+                _ => None,
+            })
+            .expect("tier 5 has a value")
+        };
+        assert!(
+            scored("pub fn build(n: u32) -> u32 { n }\n") > scored(""),
+            "the extra file makes its names exist"
+        );
+    }
+
+    #[test]
+    fn a_cross_file_span_is_scored_on_tiers_one_and_two_like_an_in_file_span() {
+        let t = task(TaskTier::CrossFileFirst, "let a = build(1);");
+        let scores = score_all(&Scored {
+            task: &t,
+            prediction: "let a = build(1);",
+            symbols: &Symbols(BTreeSet::new()),
+            extra: "",
+        });
+        for want in [Tier::Exact, Tier::EditSim] {
+            let score = scores
+                .iter()
+                .find_map(|(tier, s)| (*tier == want).then_some(*s))
+                .expect("the tier is reported");
+            assert!(
+                matches!(score, Score::Value(v) if approx(v, 1.0)),
+                "{want:?} {score:?}"
+            );
+        }
+    }
+
+    #[test]
     fn identifiers_are_code_only_never_prose_in_a_literal_or_a_comment() {
         assert_eq!(
             identifiers("foo(\"Setting up llama\") // cpp"),
@@ -687,13 +739,13 @@ mod tests {
         );
     }
 
-    fn task(tier: TaskTier) -> CodebaseTask {
+    fn task(tier: TaskTier, gold: &str) -> CodebaseTask {
         CodebaseTask {
             id: "t".into(),
             tier,
             file: "src/a.rs".into(),
             line: 1,
-            gold: "let a = 1;".into(),
+            gold: gold.into(),
             prefix: "fn f() {\n".into(),
             suffix: "\n}\n".into(),
             excluded: Excluded {
@@ -711,21 +763,23 @@ mod tests {
     #[test]
     fn all_seven_tiers_are_reported_and_the_exec_tiers_are_skipped() {
         let known = Symbols(BTreeSet::default());
-        let t = task(TaskTier::InFile);
+        let t = task(TaskTier::InFile, "let a = 1;");
         let scores = score_all(&Scored {
             task: &t,
             prediction: "let a = 1;",
             symbols: &known,
+            extra: "",
         });
         assert_eq!(scores.len(), 7);
         assert!(matches!(scores[0], (Tier::Exact, Score::Value(v)) if approx(v, 1.0)));
         assert!(matches!(scores[5], (Tier::Compile, Score::Skipped(_))));
         assert!(matches!(scores[6], (Tier::Test, Score::Skipped(_))));
-        let body = task(TaskTier::FunctionBody);
+        let body = task(TaskTier::FunctionBody, "let a = 1;");
         let scores = score_all(&Scored {
             task: &body,
             prediction: "let a = 1;",
             symbols: &known,
+            extra: "",
         });
         assert!(
             matches!(scores[0], (Tier::Exact, Score::Skipped(_))),

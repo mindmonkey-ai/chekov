@@ -49,6 +49,63 @@ pub(crate) fn probe_measure(timings: &runner::Timings) -> store::Measure {
     }
 }
 
+/// The `arm` a cross-file row records.
+pub const NO_EXTRA: &str = "no_extra";
+/// The `arm` a cross-file row records when the defining file went up with it.
+pub const WITH_EXTRA: &str = "extra";
+
+/// One crossing of one task: the id it is recorded under, the arm it names,
+/// and whether the defining file goes up with it.
+struct Arm {
+    id: String,
+    label: Option<&'static str>,
+    with_extra: bool,
+}
+
+/// The arms one task is crossed on: one for the same-file tiers, two for
+/// `cross_file_first` — without the defining file, then with it, in that
+/// fixed order (§5). Distinct ids mean `--resume` skips per arm.
+fn arms(task: &CodebaseTask) -> Vec<Arm> {
+    if task.tier != super::TaskTier::CrossFileFirst {
+        return vec![Arm {
+            id: task.id.clone(),
+            label: None,
+            with_extra: false,
+        }];
+    }
+    vec![
+        Arm {
+            id: task.id.clone(),
+            label: Some(NO_EXTRA),
+            with_extra: false,
+        },
+        Arm {
+            id: format!("{}+extra", task.id),
+            label: Some(WITH_EXTRA),
+            with_extra: true,
+        },
+    ]
+}
+
+/// One arm's crossing inputs (§4 — keeps `infill_or_latch` at 3 parameters).
+struct Crossing<'a> {
+    task: &'a CodebaseTask,
+    with_extra: bool,
+}
+
+/// What this arm sends beside the file: the defining file on the "extra"
+/// arm, nothing on the `no_extra` arm or on a same-file tier.
+fn extra_chunk<'a>(crossing: &'a Crossing) -> Option<runner::ExtraChunk<'a>> {
+    if !crossing.with_extra {
+        return None;
+    }
+    let extra = crossing.task.extra.as_ref()?;
+    Some(runner::ExtraChunk {
+        filename: &extra.path,
+        text: &crossing.task.extra_text,
+    })
+}
+
 /// One codebase task through `/infill`, or the reason it could not be
 /// measured.
 ///
@@ -60,18 +117,19 @@ pub(crate) fn probe_measure(timings: &runner::Timings) -> store::Measure {
 /// the tasks that did answer.
 fn infill_or_latch(
     wire: &runner::ProbeWire,
-    task: &CodebaseTask,
+    crossing: &Crossing,
     latch: &mut Option<String>,
 ) -> Result<ProbeArtifact, Unavailable> {
     use crate::core::bench::runner::{InfillOutcome, InfillTask, cross_infill};
     if let Some(reason) = latch {
         return Err(Unavailable::unsupported(reason.clone()));
     }
+    let task = crossing.task;
     let infill_task = InfillTask {
         prefix: &task.prefix,
         suffix: &task.suffix,
         gold_lines: task.gold.lines().count().max(1),
-        extra: None,
+        extra: extra_chunk(crossing),
     };
     match cross_infill(wire, &infill_task) {
         Ok(InfillOutcome::Answered(artifact)) => Ok(artifact),
@@ -123,31 +181,57 @@ impl Unavailable {
     }
 }
 
-/// What one codebase task's outcome needs to become a row (§4 — keeps
+/// What one arm's outcome needs to become a row (§4 — keeps
 /// `record_codebase_task` at 3 params).
 struct Recorded<'a> {
     outcome: Result<ProbeArtifact, Unavailable>,
     symbols: &'a ladder::Symbols,
+    arm: &'a Arm,
 }
 
-/// Tier 5 for one prediction against the worktree's symbol set, or `None`
-/// when the ladder skips it — never a zero standing in for "not scored".
-fn symbols_tier_score(
-    task: &CodebaseTask,
-    prediction: &str,
-    symbols: &ladder::Symbols,
-) -> Option<f64> {
-    use crate::core::bench::codebase::ladder::{Score, Scored, Tier, score_all};
-    score_all(&Scored {
+/// Tier 5 for one prediction, or `None` when the ladder skips it — never a
+/// zero standing in for "not scored".
+fn symbols_tier_score(scored: &ladder::Scored) -> Option<f64> {
+    ladder::score_all(scored)
+        .into_iter()
+        .find_map(|(tier, score)| match (tier, score) {
+            (ladder::Tier::Symbols, ladder::Score::Value(v)) => Some(v),
+            _ => None,
+        })
+}
+
+/// What tier 5 is scored against, once `Recorded` has given up its outcome.
+struct Scoring<'a> {
+    symbols: &'a ladder::Symbols,
+    arm: &'a Arm,
+}
+
+/// Tier 5 for an answered arm, and `None` for one nobody answered — a task
+/// with no prediction has no score, and a stored `0.0` would read as one.
+fn tier_five(task: &CodebaseTask, parts: &RowParts, scoring: &Scoring) -> Option<f64> {
+    if parts.grade.is_some() {
+        return None;
+    }
+    symbols_tier_score(&scored_for(task, &parts.prediction, scoring))
+}
+
+/// Tier 5's inputs for this arm: the with-extra arm was shown G, so G's
+/// names exist for it; the without arm was not, and is scored without them.
+fn scored_for<'a>(
+    task: &'a CodebaseTask,
+    prediction: &'a str,
+    scoring: &Scoring<'a>,
+) -> ladder::Scored<'a> {
+    ladder::Scored {
         task,
         prediction,
-        symbols,
-    })
-    .into_iter()
-    .find_map(|(tier, score)| match (tier, score) {
-        (Tier::Symbols, Score::Value(v)) => Some(v),
-        _ => None,
-    })
+        symbols: scoring.symbols,
+        extra: if scoring.arm.with_extra {
+            &task.extra_text
+        } else {
+            ""
+        },
+    }
 }
 
 /// Assemble and append one codebase row: an answered task's raw prediction
@@ -159,15 +243,16 @@ fn record_codebase_task(
     task: &CodebaseTask,
     recorded: Recorded,
 ) -> Result<(), ChekovError> {
-    let parts = row_parts(recorded.outcome);
-    let symbols_score = parts
-        .grade
-        .is_none()
-        .then(|| symbols_tier_score(task, &parts.prediction, recorded.symbols))
-        .flatten();
+    let Recorded {
+        outcome,
+        symbols,
+        arm,
+    } = recorded;
+    let parts = row_parts(outcome);
+    let symbols_score = tier_five(task, &parts, &Scoring { symbols, arm });
     sink.writer.append(store::Task {
         suite: "codebase".into(),
-        task_id: task.id.clone(),
+        task_id: arm.id.clone(),
         measure: parts.measure,
         grade: parts.grade,
         transport: store::Transport::Buffered,
@@ -183,6 +268,9 @@ fn record_codebase_task(
             excluded: task.excluded.clone(),
             symbols_score,
             unsupported: parts.unsupported,
+            arm: arm.label.map(str::to_owned),
+            extra: arm.with_extra.then(|| task.extra.clone()).flatten(),
+            also_first_uses: task.also_first_uses.clone(),
         }),
     })
 }
@@ -214,9 +302,10 @@ fn row_parts(outcome: Result<ProbeArtifact, Unavailable>) -> RowParts {
 
 /// Every sampled task through `/infill`, recorded with its raw prediction.
 ///
-/// A model without FIM records every task unavailable with the reason and
-/// stops firing — a capability, never a zero. A task that failed for any
-/// other reason is unavailable on its own, and the rest still run.
+/// A cross-file task is crossed twice — without the defining file, then with
+/// it — and each arm is its own row and its own `--resume` key. A model
+/// without FIM records every arm unavailable with the reason and stops
+/// firing: a capability, never a zero.
 pub fn run_codebase(
     sink: &mut Sink,
     wire: &runner::ProbeWire,
@@ -224,18 +313,25 @@ pub fn run_codebase(
 ) -> Result<(), ChekovError> {
     let mut unsupported: Option<String> = None;
     for task in &prepared.tasks {
-        if sink.is_done(&TaskKey::buffered("codebase", &task.id)) {
-            continue;
+        for arm in arms(task) {
+            if sink.is_done(&TaskKey::buffered("codebase", &arm.id)) {
+                continue;
+            }
+            let crossing = Crossing {
+                task,
+                with_extra: arm.with_extra,
+            };
+            let outcome = infill_or_latch(wire, &crossing, &mut unsupported);
+            record_codebase_task(
+                sink,
+                task,
+                Recorded {
+                    outcome,
+                    symbols: &prepared.symbols,
+                    arm: &arm,
+                },
+            )?;
         }
-        let outcome = infill_or_latch(wire, task, &mut unsupported);
-        record_codebase_task(
-            sink,
-            task,
-            Recorded {
-                outcome,
-                symbols: &prepared.symbols,
-            },
-        )?;
     }
     Ok(())
 }
@@ -246,7 +342,9 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::core::bench::codebase::ladder::Symbols;
-    use crate::core::bench::codebase::{CodebaseTask, Counts, Excluded, Prepared, TaskTier};
+    use crate::core::bench::codebase::{
+        CodebaseTask, Counts, Excluded, ExtraFile, Prepared, TaskTier,
+    };
     use crate::core::bench::runner;
     use crate::core::bench::store::{RunHead, RunLog, RunWriter, TaskRow};
     use crate::core::hub::{HttpClient, JsonRequest};
@@ -259,6 +357,7 @@ mod tests {
     struct ScriptedInfill {
         replies: RefCell<Vec<Result<String, ChekovError>>>,
         posts: RefCell<usize>,
+        bodies: RefCell<Vec<String>>,
     }
 
     impl HttpClient for ScriptedInfill {
@@ -266,8 +365,9 @@ mod tests {
             unreachable!("the codebase run only POSTs")
         }
 
-        fn post_json(&self, _req: &JsonRequest) -> Result<String, ChekovError> {
+        fn post_json(&self, req: &JsonRequest) -> Result<String, ChekovError> {
             *self.posts.borrow_mut() += 1;
+            self.bodies.borrow_mut().push(req.body.clone());
             let mut replies = self.replies.borrow_mut();
             assert!(!replies.is_empty(), "one POST more than the script allows");
             replies.remove(0)
@@ -363,15 +463,64 @@ mod tests {
         .to_string()
     }
 
-    /// Drive `run_codebase` over the two fixtures with a scripted upstream:
-    /// the rows it wrote, and how many times the wire was actually asked.
-    fn drive_codebase(
+    /// One cross-file task with a defining file to send on the second arm.
+    fn cross_task() -> CodebaseTask {
+        CodebaseTask {
+            id: "cross_file_first-abc123-L2".into(),
+            tier: TaskTier::CrossFileFirst,
+            file: "src/user.rs".into(),
+            line: 2,
+            gold: "let a = build(1);".into(),
+            prefix: "pub fn run() {\n".into(),
+            suffix: "\n    a\n}\n".into(),
+            excluded: Excluded {
+                doc_comment: 0,
+                cross_file: "sent src/defs.rs (0.1 KiB); withheld 0 (contain the answer)".into(),
+                cfg_test_lines: 0,
+                cross_file_withheld: 0,
+            },
+            also_first_uses: vec!["Widget".into()],
+            extra: Some(ExtraFile {
+                path: "src/defs.rs".into(),
+                bytes: 34,
+                truncated: false,
+            }),
+            extra_text: "pub fn build(n: u32) -> u32 { n + 1 }\n".into(),
+        }
+    }
+
+    fn prepared_cross() -> Prepared {
+        Prepared {
+            head: "4818813deeaa11112222333344445555666677".into(),
+            set_hash: "abcdef123456".into(),
+            tasks: vec![cross_task()],
+            shortfall: vec![],
+            symbols: Symbols::default(),
+            cfg_test_lines: 0,
+            cfg_test_files: 0,
+            counts: Counts {
+                in_file: 0,
+                function_body: 0,
+                cross_file_first: 1,
+            },
+        }
+    }
+
+    /// The row ledger `--resume` reads.
+    type Done = (String, String, crate::core::bench::store::Transport);
+
+    /// Drive `run_codebase` over one prepared set with a scripted upstream and
+    /// a `--resume` ledger: the rows, the ask count, and the bodies sent.
+    fn drive(
         name: &str,
-        replies: Vec<Result<String, ChekovError>>,
-    ) -> (Vec<TaskRow>, usize) {
+        prepared: &Prepared,
+        script: (Vec<Result<String, ChekovError>>, Vec<Done>),
+    ) -> (Vec<TaskRow>, usize, Vec<serde_json::Value>) {
+        let (replies, done) = script;
         let http = ScriptedInfill {
             replies: RefCell::new(replies),
             posts: RefCell::new(0),
+            bodies: RefCell::new(Vec::new()),
         };
         let facade = ClaudeFacade::new("local-model");
         let up = Upstream {
@@ -389,12 +538,18 @@ mod tests {
         {
             let mut sink = super::Sink {
                 writer: &mut writer,
-                done: &[],
+                done: &done,
             };
-            super::run_codebase(&mut sink, &wire, &prepared_pair()).expect("the run completes");
+            super::run_codebase(&mut sink, &wire, prepared).expect("the run completes");
         }
         let log = RunLog::load(writer.dir()).expect("load");
-        (log.rows, http.posts.into_inner())
+        let bodies = http
+            .bodies
+            .into_inner()
+            .iter()
+            .map(|b| serde_json::from_str(b).expect("json"))
+            .collect();
+        (log.rows, http.posts.into_inner(), bodies)
     }
 
     fn refused(reason: &str) -> Result<String, ChekovError> {
@@ -413,9 +568,13 @@ mod tests {
 
     #[test]
     fn a_model_without_infill_records_every_task_unavailable_and_asks_only_once() {
-        let (rows, posts) = drive_codebase(
+        let (rows, posts, _) = drive(
             "latch",
-            vec![refused("infill is not supported by this model")],
+            &prepared_pair(),
+            (
+                vec![refused("infill is not supported by this model")],
+                vec![],
+            ),
         );
         assert_eq!(posts, 1, "the latch spares the second crossing");
         assert_eq!(rows.len(), 2);
@@ -445,9 +604,13 @@ mod tests {
 
     #[test]
     fn a_task_that_failed_for_another_reason_is_unavailable_alone() {
-        let (rows, posts) = drive_codebase(
+        let (rows, posts, _) = drive(
             "one-bad-task",
-            vec![refused("the server is out of context"), Ok(infill_200())],
+            &prepared_pair(),
+            (
+                vec![refused("the server is out of context"), Ok(infill_200())],
+                vec![],
+            ),
         );
         assert_eq!(posts, 2, "a non-capability failure never latches");
         assert_eq!(rows.len(), 2);
@@ -465,5 +628,57 @@ mod tests {
         let answered = rows[1].codebase.as_ref().expect("a codebase row");
         assert_eq!(answered.prediction, "let a = 1;");
         assert!(answered.symbols_score.is_some(), "scored at run time");
+    }
+
+    #[test]
+    fn a_cross_file_task_crosses_twice_without_then_with_the_defining_file() {
+        let (rows, posts, bodies) = drive(
+            "two-arms",
+            &prepared_cross(),
+            (vec![Ok(infill_200()), Ok(infill_200())], vec![]),
+        );
+        assert_eq!(posts, 2, "two arms, two crossings");
+        assert_eq!(bodies[0]["input_extra"], serde_json::json!([]));
+        assert_eq!(bodies[1]["input_extra"][0]["filename"], "src/defs.rs");
+        assert_eq!(
+            bodies[1]["input_extra"][0]["text"],
+            "pub fn build(n: u32) -> u32 { n + 1 }\n"
+        );
+        assert_eq!(bodies[0]["input_prefix"], bodies[1]["input_prefix"]);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].task_id, "cross_file_first-abc123-L2");
+        assert_eq!(rows[1].task_id, "cross_file_first-abc123-L2+extra");
+        let arm = |r: &TaskRow| r.codebase.as_ref().and_then(|c| c.arm.clone());
+        assert_eq!(arm(&rows[0]).as_deref(), Some("no_extra"));
+        assert_eq!(arm(&rows[1]).as_deref(), Some("extra"));
+        let extra = |r: &TaskRow| r.codebase.as_ref().and_then(|c| c.extra.clone());
+        assert!(extra(&rows[0]).is_none(), "the no_extra arm sent nothing");
+        assert_eq!(
+            extra(&rows[1]).map(|e| e.path),
+            Some("src/defs.rs".to_owned())
+        );
+        assert_eq!(
+            rows[1].codebase.as_ref().map(|c| c.also_first_uses.clone()),
+            Some(vec!["Widget".to_owned()])
+        );
+    }
+
+    #[test]
+    fn resume_skips_one_arm_and_still_owes_the_other() {
+        let done = vec![(
+            "codebase".to_owned(),
+            "cross_file_first-abc123-L2".to_owned(),
+            crate::core::bench::store::Transport::Buffered,
+        )];
+        let (rows, posts, bodies) = drive(
+            "resume-arm",
+            &prepared_cross(),
+            (vec![Ok(infill_200())], done),
+        );
+        assert_eq!(posts, 1, "only the extra arm was still owed");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task_id, "cross_file_first-abc123-L2+extra");
+        assert_eq!(bodies[0]["input_extra"][0]["filename"], "src/defs.rs");
     }
 }

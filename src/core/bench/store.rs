@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::core::bench::codebase::ladder::{self, Score, Tier, as_f64};
-use crate::core::bench::codebase::{Excluded, TaskTier};
+use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
 use crate::core::bench::stamp::{Stamp, mismatch_error};
 use crate::core::bench::sweep::curve_note;
 use crate::core::stats;
@@ -153,6 +153,18 @@ pub struct CodebaseRow {
     /// the commoner case, and claiming a capability gap is the worse error.
     #[serde(default)]
     pub unsupported: bool,
+    /// Which arm of a cross-file crossing this row is — `"no_extra"` or
+    /// `"extra"`. `None` on the same-file tiers, which have one arm and so
+    /// no arm to name. Slice-A rows load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arm: Option<String>,
+    /// The file the `extra` arm sent, and how much of it. `None` everywhere
+    /// else — including the `no_extra` arm, which sent nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra: Option<ExtraFile>,
+    /// Other names whose first use in the file also falls in this span.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_first_uses: Vec<String>,
 }
 
 /// One task to append: its identity plus what was measured.
@@ -1325,6 +1337,9 @@ mod tests {
                 },
                 symbols_score: Some(1.0),
                 unsupported: false,
+                arm: None,
+                extra: None,
+                also_first_uses: Vec::new(),
             }),
         }
     }
@@ -1362,6 +1377,20 @@ mod tests {
         }
         task.grade = Some(GradeRow::unavailable(reason.into()));
         task
+    }
+
+    /// A row written by slice A knows nothing of the arms or the withheld
+    /// count. It must still load — `deny_unknown_fields` guards the other
+    /// direction, a typo in a NEW field, and never rejects an old run.
+    #[test]
+    fn a_slice_a_codebase_row_loads_without_the_slice_b_fields() {
+        let row = r#"{"schema":1,"run_id":"r","seq":0,"suite":"codebase","task_id":"in_file-abc-L7","measure":{"prompt_n":10,"decode_samples":[20.0],"prefill_samples":[400.0],"warmup_dropped":0,"cache_n":0},"transport":"buffered","codebase":{"tier":"in_file","file":"src/a.rs","line":7,"label":"boundary-scanned (not AST)","gold":"let a = 1;","prediction":"let a = 1;","prefix":"fn f() {\n","suffix":"\n}\n","excluded":{"doc_comment":0,"cross_file":"n/a: same-file"}}}"#;
+        let parsed: super::TaskRow = serde_json::from_str(row).expect("a slice-A row loads");
+        let codebase = parsed.codebase.expect("a codebase row");
+        assert_eq!(codebase.arm, None);
+        assert_eq!(codebase.extra, None);
+        assert!(codebase.also_first_uses.is_empty());
+        assert_eq!(codebase.excluded.cross_file_withheld, 0);
     }
 
     #[test]
