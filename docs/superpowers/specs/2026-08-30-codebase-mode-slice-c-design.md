@@ -72,10 +72,12 @@ Left out, and said in every report:
 ## 2. Naming a judge
 
 `ModelEntry` gains `#[serde(default, skip_serializing_if = "Option::is_none")] role:
-Option<ModelRole>`, where `ModelRole` is a one-variant `#[serde(rename_all =
-"lowercase")]` enum (`Judge`) — parsed at the boundary, so no downstream code compares a
-string. Any other value fails registry load; that serde error is mapped to
-`JudgeRoleUnknown { name, role }`, which says the one accepted spelling. A judge entry is
+Option<ModelRole>`, where `ModelRole` is a one-variant enum (`Judge`, spelled `"judge"`)
+with a hand-written `Deserialize` — parsed at the boundary, so no downstream code
+compares a string. Any other value fails registry load through the existing
+`RegistryCorrupt`, whose reason then reads `role = "candidate" is not a role chekov
+knows; the one accepted value is "judge"` beside the entry's key path (toml names it) —
+no separate error variant, since serde already carries the message. A judge entry is
 otherwise an ordinary entry: `pull` registers it, `run` can serve it, `list` shows a
 `judge` marker. It is excluded from nothing else in this slice.
 
@@ -86,7 +88,7 @@ refusal — the run is not spent to report `N/A` at the end (§9 says why):
 | condition | error |
 |---|---|
 | not in `models.toml` | `ModelNotRegistered` (existing) |
-| `role` present with another value | `JudgeRoleUnknown { name, role }` (at registry load) |
+| `role` present with another value | `RegistryCorrupt` at registry load, reason naming the one accepted value |
 | registered without `role = "judge"` | `JudgeNoRole { name }` — "add `role = \"judge\"` to its entry" |
 | same family as any candidate (§2.1) | `JudgeFamilyConflict { judge, candidate, family }` |
 | named among `--models` | `JudgeFamilyConflict` with `candidate = judge` |
@@ -128,10 +130,34 @@ else), the `finish_reason == "length"` rate, the swap-consistency rate, and the 
 completion tokens. The judge that clears **100 % parse validity** and the 70 % floor is
 the default the README recommends; if both do, `gpt-oss-20b` (the one with a measured
 consistency number) wins; if neither does, the slice stops and this document is
-reopened — a judge that cannot be made to answer the schema is not a judge. Shape B is
-the only thing that adds wire surface: one field, `reasoning_effort`, set on judge
-requests and never on candidate probes, recorded in `JudgeStamp`. The probe's token
-distribution sets the shipped `judge_max_tokens` default for that shape.
+reopened — a judge that cannot be made to answer the schema is not a judge.
+
+**Measured 2026-08-30** (60 crossings from nine runs over chekov and pushkin, 3
+byte-identical, 114 calls per judge, llama.cpp `0f194b907`, straight to
+`/v1/chat/completions` with the forced wire's body):
+
+| judge | wire | strict parse | `length` | swap consistency | equivalent | completion tokens (median / p90 / max) | latency |
+|---|---|---|---|---|---|---|---|
+| gpt-oss-20b F16 | B: `reasoning_effort: low`, 512 | 114/114 | 0 | 55/57 = **96 %** | 6/55 | 91 / 159 / 244 | 1.06 s |
+| gemma-3-12b-it Q8_0 | A: grammar only, 32 | 114/114 | 0 | 54/57 = **95 %** | 8/54 | 8 / 8 / 13 | 0.78 s |
+| gemma-3-12b-it Q8_0 | B: `reasoning_effort: low`, 512 | 114/114 | 0 | 54/57 = 95 % | 8/54 | 8 / 8 / 13 | 0.78 s |
+
+Neither #20345 (grammar inactive while thinking) nor #21571 (sampler-init 400)
+reproduced on this engine for either judge. The judges are not degenerate: their
+`true` verdicts land on the semantically equivalent fills (`Self::Io` vs
+`ChekovError::Io`, an indentation-only difference, a hoisted `let index`, a renamed
+local) and agree with each other on 50 of 57 crossings (44 false, 6 true; 2 disagree,
+5 undecided on one side); the mean tier-5 score is 0.96 for `true` verdicts and 0.88
+for `false`. Both clear the gate; **`gpt-oss-20b` is the recommended judge** (the
+measured consistency number, Apache-2.0, and no Gemma Terms of Use) with Gemma 3 12B
+the documented alternative.
+
+**What the probe settled for the shipped design:** one uniform judge wire — every
+judge request carries `reasoning_effort` (`[bench] judge_reasoning_effort`, an enum of
+llama.cpp's `none | low | medium | high`, default `low`; Gemma's template ignores it,
+gpt-oss needs it) and `max_tokens` = `[bench] judge_max_tokens`, default **512** (2×
+the largest reply seen; a non-thinking judge stops at ~8 tokens regardless). The
+field is stamped in `JudgeStamp`; candidate probes never carry it.
 
 The plan gains one step after the candidates: `judge <name>  launch + teardown  weights
 X GiB`. `--dry-run` prints it and the estimate adds `+ judge: 2 orders × <crossings>
@@ -225,19 +251,23 @@ pub struct JudgeRow {
     pub equivalent: Option<bool>,     // None = the two orders disagreed
     pub gold_first: Option<bool>,     // the raw answer with the gold shown as A
     pub prediction_first: Option<bool>, // the raw answer with the prediction shown as A
-    pub decided_by: DecidedBy,        // enum: SwapAgreement | SwapDisagreement | Identical
+    pub decided_by: DecidedBy,        // enum: SwapAgreement | SwapDisagreement | Identical | Skipped
     pub skipped: Option<String>,      // "reply truncated at N tokens" | "reply was not the schema: …" | "did not compile" | …
     pub judge_secs: f64,
 }
 ```
 
-`DecidedBy` serializes `snake_case`; a raw answer is `None` when that order was skipped.
+`DecidedBy` serializes `snake_case`; a raw answer is `None` when that order was skipped,
+and a row with `skipped: Some(..)` is `DecidedBy::Skipped` — the enum says how the row
+was settled, and "not at all" is one of the ways.
 
 `TaskKey::buffered("judge", id)` makes `--resume` skip judged crossings; a resumed run
 whose stamp names a different judge is refused before anything is loaded. The stamp
 gains `judge: Option<JudgeStamp { model, quant, revision, arch, rubric_hash,
-max_tokens, reasoning_effort: Option<String> }>`, and `first_mismatch` compares it as
-one field, `judge`, after `corpus_id`.
+max_tokens, reasoning_effort, min_consistency_pct }>`, and `first_mismatch` compares it
+as one field, `judge`, after `corpus_id`. The floor rides in the stamp because the
+report is rendered from the run directory alone — a reader of a run must see the floor
+that voided (or kept) its column, not whatever `config.toml` says today.
 
 **Consistency** is computed on read, never stored: `agreements / (agreements +
 disagreements)` over rows with two answers. Below `[bench] judge_min_consistency_pct`
@@ -272,8 +302,8 @@ function_body   ident_f1 0.70  parse 0.83  symbols 0.85 (scored at run time)  co
 
 ## 7. Errors and edge cases
 
-- `JudgeNoRole`, `JudgeRoleUnknown`, `JudgeFamilyConflict`, `JudgeNeedsTheServer` — new,
-  in `error.rs`, one prefix for one feature, each with a remediation sentence.
+- `JudgeNoRole`, `JudgeFamilyConflict`, `JudgeNeedsTheServer` — new, in `error.rs`, one
+  prefix for one feature, each with a remediation sentence.
 - The judge server answers a non-2xx: `UpstreamRefused` for that crossing →
   `skipped("judge refused: <the server's words>")`; the phase continues. The judge
   server dies: the phase stops with the usual `EndpointDown`, rows so far intact.
