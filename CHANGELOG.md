@@ -143,6 +143,15 @@ All notable changes to chekov are recorded here. The format follows
   symbols cell reads `n/a` rather than averaging in a zero.
 
 ### Fixed
+- **`pull` reads a folder-per-quant repo whose folders are named after the
+  model rather than the tag.** bartowski publishes
+  `Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`: the folder is not itself a
+  quant tag, so deriving the tag from the folder alone yielded nothing for
+  every file in the repo and the whole repo was reported as "exposes no .gguf
+  files" — a layout difference presented as an empty repository. The tag is now
+  derived from the shard's own filename when the folder does not carry one.
+  unsloth's `UD-*/` folders and flat `Model-Q8_0.gguf` names derive exactly as
+  before.
 - **The non-streaming translator keeps extracted reasoning, as the streaming
   one always has.** With `--reasoning-format auto|deepseek` — or the bench's
   forced pass asking for it per request — the engine puts the reasoning in

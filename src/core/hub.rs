@@ -284,14 +284,22 @@ fn verdict_for(bytes: Option<u64>, wired_mb: Option<u64>) -> String {
 /// (`UD-Q5_K_XL/model-....gguf`), else the tag embedded in the filename
 /// (`model-Q8_0.gguf`). One source of truth for matching AND listing, so an
 /// ambiguous spec like `Q5_K_XL` can never select `UD-Q5_K_XL` files.
+///
+/// A directory that is not itself a tag (`Model-IQ3_M/Model-IQ3_M-00001-of-
+/// 00005.gguf`, the bartowski layout) falls through to the filename: the tag
+/// is in the shard's own name, and reading nothing out of it would present a
+/// full repo as "no .gguf files".
 fn derived_quant(path: &str) -> Option<String> {
     let stem = path.strip_suffix(".gguf")?;
     if !is_weights(path) {
         return None;
     }
-    if let Some((dir, _)) = path.split_once('/') {
-        return quant_like(dir).then(|| dir.to_owned());
+    if let Some((dir, _)) = path.split_once('/')
+        && quant_like(dir)
+    {
+        return Some(dir.to_owned());
     }
+    let stem = stem.rsplit('/').next().unwrap_or(stem);
     let stem = strip_shard_suffix(stem);
     stem.char_indices()
         .filter(|&(_, c)| c == '-')
@@ -658,6 +666,29 @@ mod tests {
         assert!(quants.contains(&"UD-Q5_K_XL".to_owned()), "{quants:?}");
         assert!(quants.contains(&"UD-Q4_K_XL".to_owned()), "{quants:?}");
         assert!(quants.contains(&"Q8_0".to_owned()), "{quants:?}");
+    }
+
+    #[test]
+    fn a_named_folder_per_quant_derives_the_tag_from_the_shard_name() {
+        // bartowski layout: the folder repeats the model name, the tag is in the file.
+        let tag = |p: &str| super::derived_quant(p);
+        assert_eq!(
+            tag("Ornith-1.5-397B-IQ3_M/Ornith-1.5-397B-IQ3_M-00001-of-00005.gguf").as_deref(),
+            Some("IQ3_M")
+        );
+        assert_eq!(
+            tag("Ornith-1.5-397B-Q3_K_XL/Ornith-1.5-397B-Q3_K_XL-00003-of-00005.gguf").as_deref(),
+            Some("Q3_K_XL")
+        );
+        assert_eq!(
+            tag("UD-Q5_K_XL/Model-UD-Q5_K_XL-00001-of-00006.gguf").as_deref(),
+            Some("UD-Q5_K_XL")
+        );
+        assert_eq!(
+            tag("Ornith-1.5-397B-imatrix.gguf"),
+            None,
+            "calibration data is not a quant"
+        );
     }
 
     #[test]
