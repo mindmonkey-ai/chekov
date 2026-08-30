@@ -276,6 +276,12 @@ then `chekov pull unsloth/GLM-5.3-Flash-GGUF:UD-Q3_K_XL --model-loc
 222.7 GiB budget before KV), then `chekov capability bench --models
 glm-5.3-flash`. Qwen3.8-Flash-Next (`qwen4exp`) IS on master and is being
 benched in the same pass.
+Status check 2026-08-30: PR #27754 is still an open DRAFT (unslothai branch,
+updated 2026-08-30, `mergeable_state: blocked`) — still not on master. The PR
+body confirms the model carries an MTP block at layer index 45 (relevant to the
+MTP-awareness idea below). Sizing note: 1-bit dynamic is ~93-100 GB, so even
+when the PR merges this model is Studio-class only — it cannot fit a 48 GB
+M4 Max under any published quant.
 Proposed 2026-08-28 — status: BLOCKED (upstream)
 
 ## A cell's second character ignores the overhead's provenance (2026-08-28)
@@ -400,4 +406,62 @@ clearest separation in the run, and the section printed a single blended
 `context lift` row comparing the two models' lifts per tier with the same paired
 sign test over tasks present in both arms of both runs. Rationale: the tier that
 separates models should be the tier `compare` reads best.
+Proposed 2026-08-30 — status: OPEN
+
+## Bench a foreign runtime: MTPLX and MLX servers as first-class candidates (2026-08-30)
+MTPLX (mtplx.com, Apache-2.0, MLX-native) decodes Qwen 3.5/3.6/3.8 — and
+community MTP-grafted builds of our own bench subjects, e.g.
+`philipjohnbasile/ornith-ai-Ornith-1.5-35B-A3B-V2-MTPLX` and
+`wang-yang/Ornith-1.0-35B-MTPLX` (measured 1.53x on an M3 Max) — around
+1.4-2.2x faster than autoregressive on the same Apple hardware, by running the
+model's own multi-token-prediction head as a drafter with exact rejection
+sampling (claim: output distribution unchanged). One independent write-up also
+measured the same 27B model at 10.5 tok/s under llama.cpp vs 18.3 under MLX —
+runtime choice alone was +74%. chekov already benches through its own
+translator against a running server (`StepAction::UseRunning`), so most of the
+plumbing exists; the gaps are (a) codebase mode rides llama.cpp's `/infill`,
+so a foreign OpenAI/Anthropic-compatible server needs a chat-completions FIM
+fallback for the codebase corpus, and (b) the stamp assumes a llama.cpp engine
+commit — it needs a runtime name+version field so `compare` refuses across
+runtimes by a named field instead of comparing incomparables. Payoff: chekov
+becomes the referee that can measure MTPLX's speed claim AND test its
+exactness claim empirically — same corpus, same HEAD, tiers 1-7 llama.cpp vs
+MTPLX, with the B2 exec tiers checking that the "identical" fills still
+compile and pass. Nobody else's harness can do that today.
+Proposed 2026-08-30 — status: OPEN
+
+## MTP-head awareness: `explain` reports it, bench measures it (2026-08-30)
+Qwen 3.5+/3.8, Gemma 4 and GLM-5.x ship native MTP heads in their weights
+(GLM-5.3-Flash's llama.cpp PR names its MTP block at layer 45), and llama.cpp
+currently drops them on the floor — the entire MTPLX niche exists because
+runtimes ignore a ~2x decode speedup already sitting in the artifact.
+`capability explain` reads GGUF headers; teach it to detect and report "carries
+a native MTP head (unused by this engine)" so the fit/recommend story names the
+latent speed. When llama.cpp lands an MTP decode path, bench grows a
+speculative row (accept rate by depth, measured speedup vs the AR baseline);
+until then it is an honest "engine has no MTP path" skip in the existing
+skip-with-reason machinery, never a zero.
+Proposed 2026-08-30 — status: OPEN
+
+## `chekov tune`: per-machine launch-flag autotune with an honest verdict (2026-08-30)
+Sweep `n_batch`/`n_ubatch`/KV cache types/`flash_attn` against a fixed probe on
+THIS machine, save the winning argv per model with the measured before/after,
+and print "defaults won" when nothing beats them — the honest-verdict pattern
+`mtplx tune` uses (it keeps the AR baseline and refuses to save a depth that
+did not win). Optionally record thermal pressure at run start/end in the stamp
+so a throttled run explains its own variance — MTPLX pins fans for clean
+timing; chekov can at least say when the clock was dirty. Fits the §12
+portability-sweep idea: tuned-per-machine beats tuned-for-this-desk.
+Proposed 2026-08-30 — status: OPEN
+
+## New benchable models on a 48 GB Mac (survey 2026-08-30)
+Qwen3.8-27B dense (released ~2026-08; qwen3_5-family arch, llama.cpp support
+live, Ollama ships `qwen3.8:27b`): Q4 is ~16-18 GiB — fits the 48 GB M4 Max
+beside `ornith-1.5-35b-a3b`, and is the natural head-to-head since Ornith 1.5
+builds on the Qwen 3.5 base line. A Qwen3.8-9B exists (community quants on HF)
+for the small lane vs `ornith-1.5-9b`. NOT benchable on 48 GB:
+Qwen3.8-Flash-Next (125B-A6B + 51B n-gram; 1-bit GGUF ~73 GB, ~83 GB resident
+even with the n-gram table on SSD — 96 GB+ machines) and GLM-5.3-Flash
+(320B-A18B; 1-bit ~93-100 GB, and still blocked upstream — see the BLOCKED
+entry above). Both remain Studio-class candidates only.
 Proposed 2026-08-30 — status: OPEN
