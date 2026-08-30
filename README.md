@@ -546,7 +546,8 @@ extra_flags = ["--reasoning-format", "none",
 ```
 
 An entry that `capability bench --judge <NAME>` should serve needs one more
-field, added by hand — `pull` never writes it and `role` gates nothing else:
+field, added by hand — `pull` never writes it, and `role` gates nothing else,
+though `chekov list` marks the entry that carries it in its `ROLE` column:
 `role = "judge"` on that `[models.<name>]` table. Any other value is refused
 at registry load, naming the one accepted value: `role = "candidate" is not a
 role chekov knows; the one accepted value is "judge"`.
