@@ -149,7 +149,11 @@ pub fn assemble(text: &str, picked: &Picked, cfg_test_lines: usize) -> CodebaseT
             doc_comment,
             cross_file: NO_CROSS_FILE.to_owned(),
             cfg_test_lines,
+            cross_file_withheld: 0,
         },
+        also_first_uses: Vec::new(),
+        extra: None,
+        extra_text: String::new(),
     }
 }
 

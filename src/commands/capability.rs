@@ -2318,7 +2318,11 @@ mod tests {
                 doc_comment: 0,
                 cross_file: "n/a: same-file".into(),
                 cfg_test_lines: 11,
+                cross_file_withheld: 0,
             },
+            also_first_uses: Vec::new(),
+            extra: None,
+            extra_text: String::new(),
         }
     }
 

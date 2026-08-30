@@ -18,6 +18,7 @@ pub const MASK_LABEL: &str = "boundary-scanned (not AST)";
 pub enum TaskTier {
     InFile,
     FunctionBody,
+    CrossFileFirst,
 }
 
 impl TaskTier {
@@ -26,6 +27,7 @@ impl TaskTier {
         match self {
             Self::InFile => "in_file",
             Self::FunctionBody => "function_body",
+            Self::CrossFileFirst => "cross_file_first",
         }
     }
 }
@@ -42,6 +44,24 @@ pub struct Excluded {
     pub cross_file: String,
     #[serde(default)]
     pub cfg_test_lines: usize,
+    /// Rule (b): files other than the defining one whose text contains the
+    /// gold verbatim, and so were kept out of the context. Counted even in
+    /// B1, where only the defining file is ever sent, so the number exists
+    /// before it starts to bite.
+    #[serde(default)]
+    pub cross_file_withheld: u32,
+}
+
+/// The one other file a cross-file task was shown, as the row records it.
+///
+/// The text is not stored: it is the file at this run's HEAD, and a 32 KiB
+/// copy on every row would swamp `results.jsonl` with what the worktree can
+/// reproduce.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraFile {
+    pub path: String,
+    pub bytes: u64,
+    pub truncated: bool,
 }
 
 /// One assembled task: what the model sees, what was hidden, and the answer.
@@ -55,6 +75,13 @@ pub struct CodebaseTask {
     pub prefix: String,
     pub suffix: String,
     pub excluded: Excluded,
+    /// Other names whose first use in this file also falls in this span —
+    /// informational, carried onto the row.
+    pub also_first_uses: Vec<String>,
+    /// What the "extra" arm sent, or `None` for the other tiers.
+    pub extra: Option<ExtraFile>,
+    /// The extra file's bytes, empty when there is no extra. Not serialised.
+    pub extra_text: String,
 }
 
 use std::path::Path;

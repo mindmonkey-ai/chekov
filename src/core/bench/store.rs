@@ -1321,6 +1321,7 @@ mod tests {
                     doc_comment: 0,
                     cross_file: "n/a: same-file".into(),
                     cfg_test_lines: 0,
+                    cross_file_withheld: 0,
                 },
                 symbols_score: Some(1.0),
                 unsupported: false,
