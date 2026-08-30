@@ -386,3 +386,18 @@ invented; the docs' examples do not assume this machine; and CI or a test pins
 that no machine constant is hard-coded outside config. Rationale: the tool is
 "for Apple Silicon", not "for this desk".
 Proposed 2026-08-29 — status: OPEN
+
+## `compare` shows the cross-file arms and the lift side by side (2026-08-30)
+The codebase section of `capability compare` pairs rows by task id and groups them
+by tier label, so a `cross_file_first` task's two arms (`<id>` and `<id>+extra`)
+land in one group of twelve and the per-model `context lift` — the number B1
+exists to produce — is not compared at all. On the first B1 pair (pushkin,
+`20260830T070907Z-ornith-1.5-397b` vs `20260830T072140Z-qwen3.8-flash-next`) the
+lifts were `+0.17/−0.01/−0.02/−0.17/−0.13` vs `+0.33/+0.31/+0.37/−0.17/+0.24`, the
+clearest separation in the run, and the section printed a single blended
+`cross_file_first` line. Proposal: split the group into `cross_file_first` and
+`cross_file_first+extra` (pair by full task id, as the report does) and add a
+`context lift` row comparing the two models' lifts per tier with the same paired
+sign test over tasks present in both arms of both runs. Rationale: the tier that
+separates models should be the tier `compare` reads best.
+Proposed 2026-08-30 — status: OPEN
