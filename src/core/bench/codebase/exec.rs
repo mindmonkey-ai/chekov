@@ -466,6 +466,276 @@ pub fn revert(env: &Env, file: &str, original: &str) -> Result<(), ChekovError> 
     })
 }
 
+/// At most this many covering tests are run for one crossing (spec §4).
+///
+/// Tier 7's question is whether the fill kept the code working, not how much
+/// of the suite it survives; five is enough to answer it inside the timeout.
+pub const CAP: usize = 5;
+
+/// The crate a masked file belongs to.
+pub struct Crate {
+    pub name: String,
+    pub root: PathBuf,
+}
+
+/// Only the two keys tier 7 needs, out of a manifest chekov does not own.
+///
+/// No `deny_unknown_fields` here, unlike every struct chekov defines the
+/// schema for: this one reads someone else's file, and a manifest with a
+/// `[dependencies]` table is not a schema error.
+#[derive(serde::Deserialize)]
+struct Manifest {
+    package: Option<ManifestPackage>,
+}
+
+#[derive(serde::Deserialize)]
+struct ManifestPackage {
+    name: String,
+}
+
+/// The nearest `Cargo.toml` at or above `file` with a `[package] name`.
+///
+/// A virtual workspace root has no `[package]`, so a file with no nearer
+/// manifest belongs to no crate and tier 7 records `no crate` — `-p` needs a
+/// package name, and inventing one would run the wrong tests.
+#[must_use]
+pub fn crate_of(worktree: &Path, file: &str) -> Option<Crate> {
+    let mut dir = worktree.join(file).parent()?.to_path_buf();
+    loop {
+        if let Some(name) = package_name(&dir.join("Cargo.toml")) {
+            return Some(Crate { name, root: dir });
+        }
+        if dir == worktree || !dir.pop() {
+            return None;
+        }
+    }
+}
+
+fn package_name(manifest: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let parsed: Manifest = toml::from_str(&text).ok()?;
+    parsed.package.map(|p| p.name)
+}
+
+/// `#[test]` functions in the crate whose body mentions one of `symbols` as a
+/// whole word outside literals and comments. File order, capped at `CAP`.
+///
+/// The walk covers `tests/` too: the task set's own walk skips it on purpose
+/// (masking an assertion measures nothing), and that is exactly where an
+/// integration test covering the masked symbol lives.
+#[must_use]
+pub fn covering_tests(root: &Path, symbols: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    for (_, text) in crate_rust_files(root) {
+        tests_in(&text, symbols, &mut found);
+        if found.len() >= CAP {
+            found.truncate(CAP);
+            return found;
+        }
+    }
+    found
+}
+
+/// Every `*.rs` under the crate — `tests/` included, `target/` and `.git/`
+/// excluded — as `(relative path, text)`, sorted by path.
+fn crate_rust_files(root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    walk_crate(root, root, &mut out);
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn walk_crate(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if path.is_dir() {
+            if !matches!(name.as_str(), "target" | ".git") {
+                walk_crate(root, &path, out);
+            }
+        } else {
+            // `take_rs` answers `None` for a non-`.rs` file or an unreadable
+            // one; neither is worth reporting, and the `Option` is `must_use`.
+            let _ = take_rs(root, &path, out);
+        }
+    }
+}
+
+fn take_rs(root: &Path, path: &Path, out: &mut Vec<(String, String)>) -> Option<()> {
+    if !path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
+    {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let relative = path.strip_prefix(root).ok()?.to_string_lossy().into_owned();
+    out.push((relative, text));
+    Some(())
+}
+
+/// One file's covering tests, appended in source order.
+fn tests_in(text: &str, symbols: &[String], out: &mut Vec<String>) {
+    let code = super::ladder::code_only(text);
+    for at in test_attribute_offsets(&code) {
+        let Some((name, body)) = test_fn_after(&code, at) else {
+            continue;
+        };
+        if symbols.iter().any(|s| mentions(&code[body.clone()], s)) {
+            out.push(name);
+        }
+        if out.len() >= CAP {
+            return;
+        }
+    }
+}
+
+/// Every offset of a `#[test]` attribute at the start of a line.
+///
+/// Read from the literal-blanked text, so `"#[test]"` inside a string is not
+/// one. `#[test]` is the whole trimmed line — `#[test_case]` is a different
+/// attribute and does not match.
+fn test_attribute_offsets(code: &str) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    let mut at = 0;
+    for line in code.split_inclusive('\n') {
+        if line.trim() == "#[test]" {
+            offsets.push(at + line.len());
+        }
+        at += line.len();
+    }
+    offsets
+}
+
+/// The `fn <name>` below a `#[test]`, and the byte range of its body.
+///
+/// Attribute lines and blank lines between the two are stepped over — an
+/// `#[ignore]` under the `#[test]` does not stop it being a test — and
+/// anything else ends the search.
+fn test_fn_after(code: &str, from: usize) -> Option<(String, std::ops::Range<usize>)> {
+    let mut at = from;
+    loop {
+        let line = &code[at..code[at..].find('\n').map_or(code.len(), |i| at + i + 1)];
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("fn ") {
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
+            let open = at + code[at..].find('{')?;
+            let close = super::masker::matching_close(code, open)?;
+            return Some((rest[..end].to_owned(), open + 1..close));
+        }
+        if !(trimmed.is_empty() || trimmed.starts_with('#')) {
+            return None;
+        }
+        at += line.len();
+        if at >= code.len() {
+            return None;
+        }
+    }
+}
+
+/// `symbol` as a whole word somewhere in `code`.
+fn mentions(code: &str, symbol: &str) -> bool {
+    code.match_indices(symbol).any(|(at, _)| {
+        let before = code[..at].chars().next_back();
+        let after = code[at + symbol.len()..].chars().next();
+        !before.is_some_and(word_char) && !after.is_some_and(word_char)
+    })
+}
+
+const fn word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Tier 7's inputs (§4 — keeps `run_tests` at one parameter).
+pub struct TestRun<'a> {
+    pub env: &'a Env,
+    pub krate: &'a str,
+    pub tests: &'a [String],
+}
+
+/// What tier 7 saw. `Skipped` is never a fail: a timeout, an offline
+/// registry, or a test module that will not build are all things the fill
+/// cannot be blamed for.
+#[derive(Debug)]
+pub enum TestVerdict {
+    Passed,
+    Failed(String),
+    Skipped(String),
+}
+
+/// Every candidate, stopping at the first that does not pass.
+///
+/// Tier 7 passes only when all of them pass, so there is nothing to learn
+/// from running the rest — and the timeout budget is per invocation.
+#[must_use]
+pub fn run_tests(run: &TestRun) -> (TestVerdict, f64) {
+    let mut spent = 0.0;
+    for name in run.tests {
+        let (verdict, secs) = one_test(run, name);
+        spent += secs;
+        if !matches!(verdict, TestVerdict::Passed) {
+            return (verdict, spent);
+        }
+    }
+    (TestVerdict::Passed, spent)
+}
+
+fn one_test(run: &TestRun, name: &str) -> (TestVerdict, f64) {
+    let timeout = run.env.timeouts.test;
+    let outcome = run_cargo(&CargoRun {
+        program: &run.env.cargo,
+        args: &["test", "-p", run.krate, "--offline", "--", name, "--exact"],
+        cwd: &run.env.worktree.path,
+        target_dir: &run.env.target_dir,
+        timeout,
+    });
+    let Ok(outcome) = outcome else {
+        return (
+            TestVerdict::Skipped(format!("cargo test failed to run: {name}")),
+            0.0,
+        );
+    };
+    (test_verdict(&outcome, name, timeout), outcome.secs)
+}
+
+fn test_verdict(outcome: &CargoOutcome, name: &str, timeout: Duration) -> TestVerdict {
+    if outcome.timed_out {
+        return TestVerdict::Skipped(format!("test timed out after {} s", timeout.as_secs()));
+    }
+    if let Some(line) = needs_network(&outcome.stderr) {
+        return TestVerdict::Skipped(format!("needs network: {line}"));
+    }
+    if outcome.status == Some(0) {
+        return TestVerdict::Passed;
+    }
+    TestVerdict::Failed(format!("{name}: {}", failure_text(outcome)))
+}
+
+/// The most useful line cargo left behind, or a plain statement that it left
+/// none — never an empty string standing in for a reason.
+fn failure_text(outcome: &CargoOutcome) -> String {
+    outcome
+        .stdout
+        .lines()
+        .chain(outcome.stderr.lines())
+        .map(str::trim)
+        .find(|line| line.contains("FAILED") || line.starts_with("error"))
+        .map_or_else(
+            || {
+                format!(
+                    "cargo test exited {:?} with no failure line",
+                    outcome.status
+                )
+            },
+            str::to_owned,
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -838,6 +1108,216 @@ mod tests {
         let found = super::needs_network(stderr).expect("cargo said it needed the registry");
         assert!(found.contains("no matching package named"), "{found}");
         assert_eq!(super::needs_network("error: mismatched types\n"), None);
+    }
+
+    /// A tiny crate on disk: `Cargo.toml`, a `src/` file, and whatever else
+    /// the test wants.
+    fn crate_fixture(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = scratch(name);
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"widget\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        for (path, text) in files {
+            let full = dir.join(path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).expect("parent");
+            }
+            std::fs::write(full, text).expect("file");
+        }
+        dir
+    }
+
+    #[test]
+    fn the_crate_is_the_nearest_manifest_with_a_package_name() {
+        let root = crate_fixture("crate-of", &[("src/deep/a.rs", "fn f() {}\n")]);
+        let found = super::crate_of(&root, "src/deep/a.rs").expect("a crate");
+        assert_eq!(found.name, "widget");
+        assert_eq!(found.root, root);
+    }
+
+    /// A virtual workspace root has no `[package]`, so a file under one with
+    /// no nearer manifest belongs to no crate.
+    #[test]
+    fn a_workspace_root_without_a_package_is_no_crate() {
+        let dir = scratch("virtual-workspace");
+        std::fs::create_dir_all(dir.join("src")).expect("src");
+        std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"a\"]\n")
+            .expect("manifest");
+        std::fs::write(dir.join("src/a.rs"), "fn f() {}\n").expect("a.rs");
+        assert!(super::crate_of(&dir, "src/a.rs").is_none());
+    }
+
+    #[test]
+    fn a_covering_test_is_found_inline_and_in_the_tests_directory() {
+        let root = crate_fixture(
+            "covering",
+            &[
+                (
+                    "src/lib.rs",
+                    "pub fn alpha() -> u8 { 1 }\npub fn beta() -> u8 { 2 }\n\n\
+                     #[cfg(test)]\nmod t {\n    #[test]\n    fn covers_alpha() {\n        \
+                     assert_eq!(super::alpha(), 1);\n    }\n    #[test]\n    fn covers_beta() \
+                     {\n        assert_eq!(super::beta(), 2);\n    }\n}\n",
+                ),
+                (
+                    "tests/outer.rs",
+                    "#[test]\nfn integration_alpha() {\n    assert_eq!(widget::alpha(), 1);\n}\n",
+                ),
+            ],
+        );
+        let found = super::covering_tests(&root, &["alpha".to_owned()]);
+        assert_eq!(
+            found,
+            vec!["covers_alpha".to_owned(), "integration_alpha".to_owned()]
+        );
+        assert!(super::covering_tests(&root, &["gamma".to_owned()]).is_empty());
+    }
+
+    /// `#[test]` with an attribute between it and the `fn` still counts.
+    #[test]
+    fn an_attribute_between_the_test_marker_and_the_fn_does_not_hide_it() {
+        let root = crate_fixture(
+            "adjacency",
+            &[(
+                "src/lib.rs",
+                "pub fn alpha() {}\n#[test]\n#[ignore]\nfn covers_alpha() { alpha(); }\n",
+            )],
+        );
+        assert_eq!(
+            super::covering_tests(&root, &["alpha".to_owned()]),
+            vec!["covers_alpha".to_owned()]
+        );
+    }
+
+    /// A mention inside a string or a comment is prose, not a call.
+    #[test]
+    fn a_symbol_named_only_in_a_literal_or_a_comment_does_not_cover() {
+        let root = crate_fixture(
+            "prose",
+            &[(
+                "src/lib.rs",
+                "pub fn alpha() {}\n#[test]\nfn mentions_alpha() {\n    // alpha is nice\n    \
+                 let s = \"alpha\";\n    assert!(!s.is_empty());\n}\n",
+            )],
+        );
+        assert!(super::covering_tests(&root, &["alpha".to_owned()]).is_empty());
+    }
+
+    /// Whole words only: `alphabet` is not `alpha`.
+    #[test]
+    fn a_longer_identifier_that_merely_contains_the_symbol_does_not_cover() {
+        let root = crate_fixture(
+            "whole-word",
+            &[(
+                "src/lib.rs",
+                "pub fn alpha() {}\n#[test]\nfn t() {\n    let alphabet = 1;\n    \
+                 assert_eq!(alphabet, 1);\n}\n",
+            )],
+        );
+        assert!(super::covering_tests(&root, &["alpha".to_owned()]).is_empty());
+    }
+
+    #[test]
+    fn the_candidates_stop_at_five_in_file_order() {
+        use std::fmt::Write;
+        let body = (0..8).fold(String::new(), |mut out, i| {
+            let _ = write!(out, "#[test]\nfn covers_{i}() {{ alpha(); }}\n");
+            out
+        });
+        let root = crate_fixture(
+            "cap",
+            &[("src/lib.rs", &format!("pub fn alpha() {{}}\n{body}"))],
+        );
+        let found = super::covering_tests(&root, &["alpha".to_owned()]);
+        assert_eq!(found.len(), super::CAP);
+        assert_eq!(found[0], "covers_0", "file order, not hash order");
+        assert_eq!(found[4], "covers_4");
+    }
+
+    /// An `Env` over a plain directory and a named fake cargo — the runner
+    /// tests need the paths and the timeouts, and nothing git does.
+    fn env_for(dir: &Path, cargo: PathBuf, timeouts: Timeouts) -> super::Env {
+        super::Env {
+            worktree: Worktree::detached_for_test(dir.join("tree")),
+            cargo,
+            target_dir: dir.join("target"),
+            cargo_version: "cargo 1.95.0".to_owned(),
+            timeouts,
+        }
+    }
+
+    #[test]
+    fn every_candidate_must_pass_for_tier_seven_to_pass() {
+        let dir = scratch("tests-pass");
+        std::fs::create_dir_all(dir.join("tree")).expect("tree");
+        let cargo = fake_cargo(&dir, "exit 0");
+        let env = env_for(
+            &dir,
+            cargo,
+            Timeouts {
+                check: Duration::from_secs(5),
+                test: Duration::from_secs(5),
+            },
+        );
+        let (verdict, secs) = super::run_tests(&super::TestRun {
+            env: &env,
+            krate: "widget",
+            tests: &["covers_alpha".to_owned(), "covers_beta".to_owned()],
+        });
+        assert!(matches!(verdict, super::TestVerdict::Passed), "{verdict:?}");
+        assert!(secs >= 0.0);
+    }
+
+    #[test]
+    fn the_first_failing_candidate_is_named_with_cargos_text() {
+        let dir = scratch("tests-fail");
+        std::fs::create_dir_all(dir.join("tree")).expect("tree");
+        let cargo = fake_cargo(&dir, "echo 'test covers_alpha ... FAILED'\nexit 101");
+        let env = env_for(
+            &dir,
+            cargo,
+            Timeouts {
+                check: Duration::from_secs(5),
+                test: Duration::from_secs(5),
+            },
+        );
+        let (verdict, _) = super::run_tests(&super::TestRun {
+            env: &env,
+            krate: "widget",
+            tests: &["covers_alpha".to_owned()],
+        });
+        let super::TestVerdict::Failed(text) = verdict else {
+            panic!("expected a failure, got {verdict:?}");
+        };
+        assert!(text.starts_with("covers_alpha: "), "{text}");
+        assert!(text.contains("FAILED"), "{text}");
+    }
+
+    /// A hanging test under a bad fill is information, not a fail.
+    #[test]
+    fn a_test_past_its_timeout_is_skipped_and_never_failed() {
+        let dir = scratch("tests-timeout");
+        std::fs::create_dir_all(dir.join("tree")).expect("tree");
+        let cargo = fake_cargo(&dir, "sleep 30 &\nwait");
+        let env = env_for(
+            &dir,
+            cargo,
+            Timeouts {
+                check: Duration::from_secs(5),
+                test: Duration::from_millis(300),
+            },
+        );
+        let (verdict, _) = super::run_tests(&super::TestRun {
+            env: &env,
+            krate: "widget",
+            tests: &["covers_alpha".to_owned()],
+        });
+        let super::TestVerdict::Skipped(reason) = verdict else {
+            panic!("expected a skip, got {verdict:?}");
+        };
+        assert!(reason.starts_with("test timed out after "), "{reason}");
     }
 
     /// A committed crate whose `src/a.rs` bytes the revert test knows, a

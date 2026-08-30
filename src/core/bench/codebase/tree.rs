@@ -111,6 +111,17 @@ impl Worktree {
         git(&self.repo, &["worktree", "prune"], "git worktree prune")?;
         Ok(())
     }
+
+    /// A `Worktree` over a plain directory, for tests that need the PATH and
+    /// nothing git does. `removed` is pre-set so `Drop` runs no git command.
+    #[cfg(test)]
+    pub(super) const fn detached_for_test(path: PathBuf) -> Self {
+        Self {
+            path,
+            repo: PathBuf::new(),
+            removed: true,
+        }
+    }
 }
 
 /// The removal a panic or an early `?` between `add` and `remove` would
