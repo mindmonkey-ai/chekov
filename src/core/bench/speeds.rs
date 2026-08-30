@@ -244,6 +244,7 @@ mod tests {
             },
             grade: None,
             codebase: None,
+            judge: None,
         }
     }
 

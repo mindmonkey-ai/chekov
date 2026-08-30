@@ -1391,6 +1391,7 @@ fn append_unavailable(
         grade: Some(store::GradeRow::unavailable(reason)),
         transport: store::Transport::Buffered,
         codebase: None,
+        judge: None,
     })
 }
 
@@ -1442,6 +1443,7 @@ fn append_probe(
         grade: Some(verdict),
         transport: key.transport,
         codebase: None,
+        judge: None,
     })
 }
 
@@ -1518,6 +1520,7 @@ fn run_throughput(
             grade: None,
             transport: store::Transport::Buffered,
             codebase: None,
+            judge: None,
         })?;
     }
     Ok(())

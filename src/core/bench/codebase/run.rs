@@ -302,6 +302,7 @@ fn record_codebase_task(
             n_predict: Some(runner::n_predict_for(gold_lines(task))),
             exec,
         }),
+        judge: None,
     })
 }
 
