@@ -117,9 +117,10 @@ The registry stores the absolute path; everything else works unchanged.
 | `completions <shell>` | Emit shell completions for `bash`, `elvish`, `fish`, `powershell` or `zsh` on stdout — what `make install` runs to write `shell/_chekov`. |
 
 **Codebase mode** (`capability bench --codebase <PATH>`) turns the user's own
-repository into a graded infill benchmark: 24 deterministic same-file Rust
-tasks are sampled from `HEAD` (`[bench] codebase_tasks` in `config.toml`),
-masked out, and run through `/infill`. It requires a clean tree and runs in a
+repository into a graded infill benchmark: 24 deterministic Rust tasks — 12
+same-file `in_file` spans, 6 `function_body` bodies, 6 `cross_file_first`
+call sites — are sampled from `HEAD` (`[bench] codebase_tasks` in
+`config.toml`), masked out, and run through `/infill`. It requires a clean tree and runs in a
 detached worktree, so the benchmark never touches uncommitted changes or the
 branch you're on — with work in progress, bench a clone rather than the copy
 you are editing. Six of the 24 tasks are `cross_file_first`: the mask is the

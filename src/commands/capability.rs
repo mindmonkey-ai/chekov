@@ -897,7 +897,7 @@ fn bench_steps(
 }
 
 /// The wall-clock estimate: the sweep, the agentic crossings, and the
-/// codebase set (6s per sampled task).
+/// codebase set (6s per crossing — a `cross_file_first` task is two).
 fn bench_estimate(
     steps: &[crate::core::bench::lifecycle::BenchStep],
     plan: &crate::core::bench::sweep::SweepPlan,
