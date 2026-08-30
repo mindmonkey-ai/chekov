@@ -1043,7 +1043,7 @@ fn run_candidate(
         StepAction::UseRunning => {
             crate::core::server::live_pid(&ctx.config).ok_or(ChekovError::ServerNotRunning)?
         }
-        StepAction::Launch => launch_candidate(ctx, eff)?,
+        StepAction::Launch | StepAction::Judge => launch_candidate(ctx, eff)?,
     };
     let setup = BenchSetup {
         eff: eff.clone(),
