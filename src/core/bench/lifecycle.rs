@@ -310,7 +310,10 @@ mod tests {
         assert!(wait_budget_released(instant_policy(3), &mut || None).is_err());
     }
 
-    use super::{BenchStep, StepAction, estimate_secs, needs_confirm, render_plan};
+    use super::{
+        BenchStep, GIB, StepAction, estimate_secs, judge_estimate_secs, needs_confirm,
+        render_plan,
+    };
     use crate::core::bench::sweep::SweepPlan;
 
     fn plan() -> SweepPlan {
@@ -361,5 +364,34 @@ mod tests {
             "an unknown size is stated, never invented: {rendered}"
         );
         assert!(rendered.contains("min estimated"), "{rendered}");
+    }
+
+    #[test]
+    fn a_judge_step_confirms_loads_and_never_sweeps() {
+        let steps = [
+            BenchStep {
+                model: "ornith-1.5-35b-a3b".into(),
+                action: StepAction::Launch,
+                weights_bytes: Some(GIB),
+            },
+            BenchStep {
+                model: "gpt-oss-20b".into(),
+                action: StepAction::Judge,
+                weights_bytes: Some(GIB),
+            },
+        ];
+        let plan = crate::core::bench::sweep::SweepPlan {
+            depths: vec![1024],
+            repetitions: 1,
+            max_tokens: 60,
+        };
+        let one = estimate_secs(&steps[..1], &plan);
+        let both = estimate_secs(&steps, &plan);
+        assert_eq!(both - one, 4, "a judge step costs its load (4 s/GiB) and no sweep");
+        assert!(needs_confirm(&steps[1..]));
+        assert!(render_plan(&steps, both).contains(
+            "  gpt-oss-20b  judge: launch + teardown  weights 1.0 GiB\n"
+        ));
+        assert_eq!(judge_estimate_secs(6), 24);
     }
 }
