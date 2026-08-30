@@ -2,6 +2,7 @@
 //! graded same-file infill tasks (spec §8, slice A).
 
 pub mod crossfile;
+pub mod exec;
 pub mod filter;
 pub mod ladder;
 pub mod masker;

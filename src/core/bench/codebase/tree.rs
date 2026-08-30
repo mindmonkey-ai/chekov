@@ -13,7 +13,12 @@ use crate::error::ChekovError;
 
 const MAX_FILE_BYTES: u64 = 200 * 1024;
 
-fn git(repo: &Path, args: &[&str], step: &str) -> Result<String, ChekovError> {
+/// `git -C repo <args>`, with the step named in the failure.
+///
+/// `pub(super)` for `exec::revert`: undoing a splice is `git checkout --` in
+/// the same worktree, and a second spawn helper beside this one would be a
+/// second place for the error contract to drift.
+pub(super) fn git(repo: &Path, args: &[&str], step: &str) -> Result<String, ChekovError> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
