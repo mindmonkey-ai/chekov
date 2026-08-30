@@ -315,6 +315,7 @@ mod tests {
                 hermes_ok: true,
                 ctx_size,
                 extra_flags,
+                role: None,
             },
         );
         (cfg, reg.effective("m").expect("registered"))

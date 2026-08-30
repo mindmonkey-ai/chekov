@@ -128,6 +128,7 @@ mod tests {
                 hermes_ok: false,
                 ctx_size: None,
                 extra_flags: vec![],
+                role: None,
             },
         );
         reg.active = Some("m".into());

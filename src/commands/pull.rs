@@ -73,6 +73,7 @@ impl NewModel {
             hermes_ok: true,
             ctx_size: None,
             extra_flags: vec![],
+            role: None,
         }
     }
 }

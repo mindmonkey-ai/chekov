@@ -59,6 +59,27 @@ impl Default for Defaults {
     }
 }
 
+/// What a registered model is FOR beyond serving: today only `"judge"`, the
+/// role `bench --judge` requires. Parsed at the boundary — nothing downstream
+/// compares a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelRole {
+    Judge,
+}
+
+impl<'de> Deserialize<'de> for ModelRole {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        match raw.as_str() {
+            "judge" => Ok(Self::Judge),
+            other => Err(serde::de::Error::custom(format!(
+                "role = \"{other}\" is not a role chekov knows; the one accepted value is \"judge\""
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelEntry {
@@ -76,6 +97,10 @@ pub struct ModelEntry {
     /// Appended AFTER the default flags — concatenation, not replacement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_flags: Vec<String>,
+    /// `role = "judge"` marks a model `bench --judge` may use. Absent on every
+    /// entry that is only served.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<ModelRole>,
 }
 
 /// Fully resolved launch parameters for one model.
