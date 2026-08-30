@@ -424,8 +424,11 @@ impl RunLog {
 /// found it. A run that already names a judge is left alone: `resume` compares
 /// that judge like any other field.
 pub fn adopt_judge(run_dir: &Path, incoming: &Stamp) -> Result<(), ChekovError> {
+    if incoming.judge.is_none() {
+        return Ok(());
+    }
     let mut log = RunLog::load(run_dir)?;
-    if log.head.stamp.judge.is_some() || incoming.judge.is_none() {
+    if log.head.stamp.judge.is_some() {
         return Ok(());
     }
     let mut candidate = log.head.stamp.clone();

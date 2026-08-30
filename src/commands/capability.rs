@@ -1519,7 +1519,8 @@ fn verdict_for(
 }
 
 /// A crossing nobody has decided: both orders asked, and what they settle to.
-/// `judge_secs` is one order's share of the pair.
+/// `judge_secs` is what the crossing cost — both orders, not one order's
+/// share: the trailer's median is per crossing.
 fn judged_verdict(
     ask: &JudgeAsk,
     pair: &crate::core::bench::judge::Pair,
@@ -1540,7 +1541,7 @@ fn judged_verdict(
         prediction_first: answer(&prediction_first),
         decided_by: verdict.decided_by,
         skipped: verdict.skipped,
-        judge_secs: started.elapsed().as_secs_f64() / 2.0,
+        judge_secs: started.elapsed().as_secs_f64(),
     })
 }
 

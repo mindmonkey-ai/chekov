@@ -83,7 +83,7 @@ impl JudgePlan {
         crate::core::bench::stamp::JudgeStamp {
             model: self.judge.name.clone(),
             quant: entry.quant.clone(),
-            revision: entry.revision[..12.min(entry.revision.len())].to_owned(),
+            revision: entry.revision.chars().take(12).collect(),
             arch: self.arch.clone(),
             rubric_hash: self.rubric_hash.clone(),
             max_tokens: self.max_tokens,
@@ -537,9 +537,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_plan_stamps_what_it_was_built_from() {
-        let plan = super::JudgePlan {
+    fn plan_at(revision: &str) -> super::JudgePlan {
+        super::JudgePlan {
             judge: crate::core::registry::Effective {
                 name: "gpt-oss-20b".into(),
                 ctx_size: 98_304,
@@ -547,7 +546,7 @@ mod tests {
                 entry: crate::core::registry::ModelEntry {
                     repo: "unsloth/gpt-oss-20b-GGUF".into(),
                     quant: "F16".into(),
-                    revision: "d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4".into(),
+                    revision: revision.to_owned(),
                     path: "models/gpt-oss-20b@d449b42d93e1".into(),
                     first_shard: "gpt-oss-20b-F16.gguf".into(),
                     hermes_ok: true,
@@ -561,8 +560,12 @@ mod tests {
             max_tokens: 512,
             min_consistency_pct: 70,
             reasoning_effort: crate::core::config::ReasoningEffort::Low,
-        };
-        let stamp = plan.stamp();
+        }
+    }
+
+    #[test]
+    fn the_plan_stamps_what_it_was_built_from() {
+        let stamp = plan_at("d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4").stamp();
         assert_eq!(
             (
                 stamp.model.as_str(),
@@ -572,5 +575,16 @@ mod tests {
             ),
             ("gpt-oss-20b", "d449b42d93e1", "low", 512)
         );
+    }
+
+    /// `revision` is hand-editable, so the twelve is twelve CHARACTERS —
+    /// slicing bytes panics when one straddles the boundary.
+    #[test]
+    fn a_revision_is_shortened_on_a_char_boundary() {
+        assert_eq!(
+            plan_at("0123456789a€bcdef").stamp().revision,
+            "0123456789a€"
+        );
+        assert_eq!(plan_at("abc").stamp().revision, "abc");
     }
 }
