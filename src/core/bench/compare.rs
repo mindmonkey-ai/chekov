@@ -890,6 +890,23 @@ mod tests {
     }
 
     #[test]
+    fn a_differing_judge_does_not_refuse_the_comparison() {
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut b = run("m2", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        b.head.stamp.judge = Some(crate::core::bench::stamp::JudgeStamp {
+            model: "gpt-oss-20b".into(),
+            quant: "F16".into(),
+            revision: "d449b42d93e1".into(),
+            arch: "gpt-oss".into(),
+            rubric_hash: "9f8e7d6c5b4a".into(),
+            max_tokens: 512,
+            reasoning_effort: "low".into(),
+            min_consistency_pct: 70,
+        });
+        assert!(super::assert_same_environment(&a, &b).is_ok());
+    }
+
+    #[test]
     fn differing_models_under_one_environment_compare_fine() {
         // weights_revision and quant are the SUBJECT of the comparison.
         let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 20.0, 21.0, 22.0]);

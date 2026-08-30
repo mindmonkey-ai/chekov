@@ -235,4 +235,34 @@ mod tests {
         assert_eq!(parsed.cargo_version, None);
         assert_eq!(parsed.exec_target, "none");
     }
+
+    fn judged() -> super::JudgeStamp {
+        super::JudgeStamp {
+            model: "gpt-oss-20b".into(),
+            quant: "F16".into(),
+            revision: "d449b42d93e1".into(),
+            arch: "gpt-oss".into(),
+            rubric_hash: "9f8e7d6c5b4a".into(),
+            max_tokens: 512,
+            reasoning_effort: "low".into(),
+            min_consistency_pct: 70,
+        }
+    }
+
+    #[test]
+    fn a_differing_judge_is_the_last_field_named_and_an_absent_one_round_trips() {
+        let mut with = stamp();
+        with.judge = Some(judged());
+        let mut other = with.clone();
+        other.judge.as_mut().map(|j| j.rubric_hash = "000000000000".into());
+        assert_eq!(first_mismatch(&with, &other), Some("judge"));
+        assert_eq!(first_mismatch(&with, &stamp()), Some("judge"), "absent vs present differs");
+        let json = serde_json::to_string(&stamp()).expect("json");
+        assert!(!json.contains("\"judge\""), "no judge, no key: {json}");
+        let back: Stamp = serde_json::from_str(&json).expect("parse");
+        assert_eq!(back.judge, None);
+        let mut ctx_differs = with.clone();
+        ctx_differs.ctx = 1;
+        assert_eq!(first_mismatch(&with, &ctx_differs), Some("ctx"), "earlier fields still win");
+    }
 }
