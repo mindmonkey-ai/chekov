@@ -675,4 +675,90 @@ mod tests {
             "  kv         f16      skipped: exceeds the GPU budget by 4120 MiB"
         );
     }
+
+    #[test]
+    fn the_thermal_readout_is_the_speed_limit_when_throttled_and_none_when_nominal() {
+        assert_eq!(
+            super::parse_therm("CPU_Speed_Limit \t= 87\nCPU_Available_CPUs = 24\n"),
+            Some(87)
+        );
+        assert_eq!(
+            super::parse_therm("Note: No thermal warning level has been recorded\n"),
+            None
+        );
+        assert_eq!(super::parse_therm(""), None);
+        assert_eq!(super::thermal_note(None, None), None);
+        assert_eq!(super::thermal_note(Some(100), Some(87)), Some(87));
+        assert_eq!(super::thermal_note(Some(100), Some(100)), None);
+    }
+
+    #[test]
+    fn a_record_round_trips_and_names_its_flag_sextet() {
+        let argv = argv(&[
+            "--flash-attn",
+            "on",
+            "-ctk",
+            "q8_0",
+            "--cache-type-v",
+            "q8_0",
+            "--batch-size",
+            "4096",
+        ]);
+        let sextet = super::sextet(&argv);
+        assert_eq!(
+            (
+                sextet.n_batch.as_str(),
+                sextet.n_ubatch.as_str(),
+                sextet.type_k.as_str(),
+                sextet.flash_attn.as_str()
+            ),
+            ("4096", "engine-default", "q8_0", "on")
+        );
+        let record = super::Record {
+            model: "m".into(),
+            quant: "Q8_0".into(),
+            revision: "abc123def456".into(),
+            machine_id: "8d41f0c2a917".into(),
+            engine_build_commit: "0f194b907".into(),
+            chekov_version: "0.1.0".into(),
+            probe: super::Probe {
+                depth: 4096,
+                repetitions: 5,
+                max_tokens: 128,
+            },
+            thermal_source: super::THERMAL_SOURCE.into(),
+            trials: vec![super::Trial {
+                stage: "baseline".into(),
+                value: None,
+                argv: argv.clone(),
+                stamp: sextet,
+                outcome: "measured".into(),
+                decode: Some(summary(31.2, 0.3)),
+                prefill: Some(summary(402.0, 3.0)),
+                prompt_n: Some(4101),
+                speed_limit_pct: [None, Some(87)],
+                reason: None,
+                verdict: None,
+            }],
+            winner: None,
+            verdict: super::DEFAULTS_WON.into(),
+        };
+        let dir = std::env::temp_dir().join(format!("chekov-tune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = super::record_path(&dir, "m");
+        assert!(
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-m.json")),
+            "{}",
+            path.display()
+        );
+        super::write_record(&path, &record).expect("written");
+        let back: super::Record =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(back.verdict, "defaults won");
+        assert_eq!(back.trials[0].speed_limit_pct, [None, Some(87)]);
+        assert!(back.winner.is_none());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
 }
