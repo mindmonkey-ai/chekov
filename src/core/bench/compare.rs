@@ -112,12 +112,18 @@ pub struct TierDelta {
     pub verdict: Comparison,
 }
 
-/// Tasks a group lost because one run or the other could not answer them.
+/// Tasks a group lost, and why: one run could not answer them, or — for the
+/// lift — one run measured only one of the two arms.
 #[derive(Debug)]
 pub struct GroupDrop {
     pub group: String,
     pub dropped: usize,
+    pub reason: &'static str,
 }
+
+const DROP_UNAVAILABLE: &str = "unavailable in one run";
+const DROP_ONE_ARM: &str = "measured on one arm only in one run";
+const LIFT_GROUP: &str = "context lift";
 
 #[derive(Debug)]
 pub struct CodebaseComparison {
@@ -418,11 +424,19 @@ fn compare_codebase(pair: &RunPair) -> CodebaseComparison {
     for group in tier_groups(pair) {
         let (pairs, lost) = group_pairs(pair, group);
         dropped.push(GroupDrop {
-            group: group.label().to_owned(),
+            group: group.label(),
             dropped: lost,
+            reason: DROP_UNAVAILABLE,
         });
         tiers.extend(group_tiers(&pairs, group));
     }
+    let (lifts, lost) = lift_pairs(pair);
+    tiers.extend(lift_deltas(&lifts));
+    dropped.push(GroupDrop {
+        group: LIFT_GROUP.to_owned(),
+        dropped: lost,
+        reason: DROP_ONE_ARM,
+    });
     let (equiv, judge_note) = compare_judge(pair);
     tiers.extend(equiv);
     CodebaseComparison {
@@ -501,17 +515,51 @@ fn compare_judge(pair: &RunPair) -> (Option<TierDelta>, Option<String>) {
     }
 }
 
-/// Every tier group the runs actually recorded, in the order it first
-/// appears. The taxonomy can grow, so nothing here names two of them.
-fn tier_groups(pair: &RunPair) -> Vec<TaskTier> {
-    let mut groups: Vec<TaskTier> = Vec::new();
+/// One line of the codebase section: a task tier and, for the cross-file
+/// tier, which arm — the two arms are two measurements, and a mean over both
+/// would hide exactly the number B1 exists to produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodeGroup {
+    tier: TaskTier,
+    with_extra: bool,
+}
+
+impl CodeGroup {
+    fn of(row: &CodebaseRow) -> Self {
+        use crate::core::bench::codebase::run::WITH_EXTRA;
+        Self {
+            tier: row.tier,
+            with_extra: row.tier == TaskTier::CrossFileFirst
+                && row.arm.as_deref() == Some(WITH_EXTRA),
+        }
+    }
+
+    /// `cross_file_first+extra` for the arm that was shown the defining file;
+    /// the tier's own label everywhere else — the report's spelling.
+    fn label(self) -> String {
+        if self.with_extra {
+            format!(
+                "{}{}",
+                self.tier.label(),
+                crate::core::bench::codebase::ARM_EXTRA_SUFFIX
+            )
+        } else {
+            self.tier.label().to_owned()
+        }
+    }
+}
+
+/// Every group the runs actually recorded, in the order it first appears.
+/// The taxonomy can grow, so nothing here names two of them.
+fn tier_groups(pair: &RunPair) -> Vec<CodeGroup> {
+    let mut groups: Vec<CodeGroup> = Vec::new();
     let seen = codebase_rows(pair.a)
         .chain(codebase_rows(pair.b))
         .filter_map(|r| r.codebase.as_ref())
-        .map(|c| c.tier);
-    for tier in seen {
-        if !groups.contains(&tier) {
-            groups.push(tier);
+        .map(CodeGroup::of);
+    for group in seen {
+        if !groups.contains(&group) {
+            groups.push(group);
         }
     }
     groups
@@ -519,7 +567,7 @@ fn tier_groups(pair: &RunPair) -> Vec<TaskTier> {
 
 /// One group's tasks as both runs answered them, and how many were dropped
 /// because one run or the other could not answer.
-fn group_pairs<'a>(pair: &RunPair<'a>, group: TaskTier) -> (Vec<CodePair<'a>>, usize) {
+fn group_pairs<'a>(pair: &RunPair<'a>, group: CodeGroup) -> (Vec<CodePair<'a>>, usize) {
     let mut pairs = Vec::new();
     let mut dropped = 0;
     for row_a in codebase_rows(pair.a).filter(|r| in_group(r, group)) {
@@ -535,12 +583,14 @@ fn group_pairs<'a>(pair: &RunPair<'a>, group: TaskTier) -> (Vec<CodePair<'a>>, u
     (pairs, dropped)
 }
 
-fn in_group(row: &TaskRow, group: TaskTier) -> bool {
-    row.codebase.as_ref().is_some_and(|c| c.tier == group)
+fn in_group(row: &TaskRow, group: CodeGroup) -> bool {
+    row.codebase
+        .as_ref()
+        .is_some_and(|c| CodeGroup::of(c) == group)
 }
 
 /// One delta per ladder tier that has a value on both sides.
-fn group_tiers(pairs: &[CodePair], group: TaskTier) -> Vec<TierDelta> {
+fn group_tiers(pairs: &[CodePair], group: CodeGroup) -> Vec<TierDelta> {
     [
         Tier::Exact,
         Tier::EditSim,
@@ -553,15 +603,21 @@ fn group_tiers(pairs: &[CodePair], group: TaskTier) -> Vec<TierDelta> {
     .collect()
 }
 
-fn tier_delta(pairs: &[CodePair], group: TaskTier, tier: Tier) -> Option<TierDelta> {
+fn tier_delta(pairs: &[CodePair], group: CodeGroup, tier: Tier) -> Option<TierDelta> {
     let values: Vec<(f64, f64)> = pairs.iter().filter_map(|p| tier_values(p, tier)).collect();
+    delta_over(group.label(), tier.label(), &values)
+}
+
+/// The paired sign test over one column of `(a, b)` values, as one report
+/// row — or `None` when nothing was measured on both sides.
+fn delta_over(group: String, tier: &str, values: &[(f64, f64)]) -> Option<TierDelta> {
     if values.is_empty() {
         return None;
     }
-    let wins = win_counts(&values);
+    let wins = win_counts(values);
     Some(TierDelta {
-        group: group.label().to_owned(),
-        tier: tier.label().to_owned(),
+        group,
+        tier: tier.to_owned(),
         mean_a: mean(values.iter().map(|v| v.0)),
         mean_b: mean(values.iter().map(|v| v.1)),
         a_better: wins.a,
@@ -569,6 +625,126 @@ fn tier_delta(pairs: &[CodePair], group: TaskTier, tier: Tier) -> Option<TierDel
         ties: wins.ties,
         verdict: sign_test(wins.a, wins.b),
     })
+}
+
+// ----------------------------------------------------------- context lift
+
+/// One cross-file task's two arms, `(no_extra, extra)`, as one run answered
+/// them.
+type Arms<'a> = (&'a CodebaseRow, &'a CodebaseRow);
+
+/// One cross-file task measured on both arms in both runs.
+struct LiftPair<'a> {
+    a: Arms<'a>,
+    b: Arms<'a>,
+}
+
+/// A column of the lift row: the ladder tiers recomputed from stored text,
+/// tier 5 from its stored score, and the exec tiers from theirs.
+#[derive(Clone, Copy)]
+enum LiftTier {
+    Ladder(Tier),
+    Compile,
+    Test,
+}
+
+impl LiftTier {
+    const ALL: [Self; 7] = [
+        Self::Ladder(Tier::Exact),
+        Self::Ladder(Tier::EditSim),
+        Self::Ladder(Tier::IdentF1),
+        Self::Ladder(Tier::Parse),
+        Self::Ladder(Tier::Symbols),
+        Self::Compile,
+        Self::Test,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Ladder(tier) => tier.label(),
+            Self::Compile => Tier::Compile.label(),
+            Self::Test => Tier::Test.label(),
+        }
+    }
+
+    /// This tier's value on one row, or `None` where the row has none.
+    fn value(self, row: &CodebaseRow) -> Option<f64> {
+        use crate::core::bench::store::ExecScore;
+        let exec_value = |score: &ExecScore| match score {
+            ExecScore::Value(v) => Some(*v),
+            ExecScore::Skipped(_) => None,
+        };
+        match self {
+            Self::Ladder(Tier::Symbols) => row.symbols_score,
+            Self::Ladder(tier) => value_of(row, tier),
+            Self::Compile => exec_value(&row.exec.as_ref()?.compile),
+            Self::Test => exec_value(&row.exec.as_ref()?.test),
+        }
+    }
+
+    /// `extra − no_extra` on one task, or `None` when either arm lacks a value.
+    fn lift(self, arms: Arms) -> Option<f64> {
+        Some(self.value(arms.1)? - self.value(arms.0)?)
+    }
+}
+
+/// The cross-file rows one run answered, keyed by task: the arms it has.
+fn arms_of(
+    log: &RunLog,
+) -> std::collections::BTreeMap<&str, (Option<&CodebaseRow>, Option<&CodebaseRow>)> {
+    use crate::core::bench::codebase::base_id;
+    use crate::core::bench::codebase::run::WITH_EXTRA;
+    let mut arms: std::collections::BTreeMap<&str, (Option<&CodebaseRow>, Option<&CodebaseRow>)> =
+        std::collections::BTreeMap::new();
+    for row in codebase_rows(log).filter(|r| !is_unavailable(r)) {
+        let Some(code) = row.codebase.as_ref() else {
+            continue;
+        };
+        if code.tier != TaskTier::CrossFileFirst {
+            continue;
+        }
+        let entry = arms.entry(base_id(&row.task_id)).or_default();
+        if code.arm.as_deref() == Some(WITH_EXTRA) {
+            entry.1 = Some(code);
+        } else {
+            entry.0 = Some(code);
+        }
+    }
+    arms
+}
+
+/// Every task measured on both arms in both runs, and how many tasks both
+/// runs touched but one of them measured on one arm only.
+fn lift_pairs<'a>(pair: &RunPair<'a>) -> (Vec<LiftPair<'a>>, usize) {
+    let (arms_a, arms_b) = (arms_of(pair.a), arms_of(pair.b));
+    let mut pairs = Vec::new();
+    let mut dropped = 0;
+    for (id, a) in &arms_a {
+        let Some(b) = arms_b.get(id) else { continue };
+        match (a, b) {
+            ((Some(a0), Some(a1)), (Some(b0), Some(b1))) => pairs.push(LiftPair {
+                a: (a0, a1),
+                b: (b0, b1),
+            }),
+            _ => dropped += 1,
+        }
+    }
+    (pairs, dropped)
+}
+
+/// One `context lift` row per tier with a lift on both sides: A's per-task
+/// lifts against B's, through the same paired sign test as every tier.
+fn lift_deltas(pairs: &[LiftPair]) -> Vec<TierDelta> {
+    LiftTier::ALL
+        .into_iter()
+        .filter_map(|tier| {
+            let values: Vec<(f64, f64)> = pairs
+                .iter()
+                .filter_map(|p| Some((tier.lift(p.a)?, tier.lift(p.b)?)))
+                .collect();
+            delta_over(LIFT_GROUP.to_owned(), tier.label(), &values)
+        })
+        .collect()
 }
 
 /// One task's pair of values on this tier, or `None` when either side skips
@@ -847,8 +1023,8 @@ fn dropped_block(dropped: &[GroupDrop]) -> String {
 
 fn drop_line(drop: &GroupDrop) -> String {
     format!(
-        "  {} task(s) dropped from {}: unavailable in one run\n",
-        drop.dropped, drop.group
+        "  {} task(s) dropped from {}: {}\n",
+        drop.dropped, drop.group, drop.reason
     )
 }
 
@@ -1146,6 +1322,8 @@ mod tests {
         task_id: String,
         tier: TaskTier,
         prediction: &'static str,
+        /// The cross-file arm this row is — `None` on the same-file tiers.
+        arm: Option<&'static str>,
     }
 
     fn codebase_row(seq: usize, case: CodeCase) -> TaskRow {
@@ -1175,7 +1353,7 @@ mod tests {
                 },
                 symbols_score: None,
                 unsupported: false,
-                arm: None,
+                arm: case.arm.map(str::to_owned),
                 extra: None,
                 also_first_uses: Vec::new(),
                 name: None,
@@ -1197,11 +1375,13 @@ mod tests {
                 task_id: task_id.clone(),
                 tier,
                 prediction: if a_right { GOLD } else { OTHER },
+                arm: None,
             });
             b.push(CodeCase {
                 task_id,
                 tier,
                 prediction: if a_right { OTHER } else { GOLD },
+                arm: None,
             });
         }
         (a, b)
@@ -1238,6 +1418,111 @@ mod tests {
     /// `float_cmp` is on, and it is right to be: these are means of divisions.
     fn approx(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    // ------------------------------------------------- cross-file fixtures
+
+    /// One cross-file task's two arms for one run: what the model answered
+    /// without the defining file, then with it.
+    fn cross_arms(index: usize, without: &'static str, with: &'static str) -> Vec<CodeCase> {
+        use crate::core::bench::codebase::ARM_EXTRA_SUFFIX;
+        use crate::core::bench::codebase::run::{NO_EXTRA, WITH_EXTRA};
+        let base = format!("cff-{index}");
+        vec![
+            CodeCase {
+                task_id: base.clone(),
+                tier: TaskTier::CrossFileFirst,
+                prediction: without,
+                arm: Some(NO_EXTRA),
+            },
+            CodeCase {
+                task_id: format!("{base}{ARM_EXTRA_SUFFIX}"),
+                tier: TaskTier::CrossFileFirst,
+                prediction: with,
+                arm: Some(WITH_EXTRA),
+            },
+        ]
+    }
+
+    /// Six cross-file tasks. A is wrong without the defining file and right
+    /// with it (a lift of +1 on `exact`, every task); B is the mirror image
+    /// (−1). The blended group would read 0.50 vs 0.50 and hide all of it.
+    fn cross_file_pair() -> (RunLog, RunLog) {
+        let a = (0..6).flat_map(|i| cross_arms(i, OTHER, GOLD)).collect();
+        let b = (0..6).flat_map(|i| cross_arms(i, GOLD, OTHER)).collect();
+        (codebase_run("m1", a), codebase_run("m2", b))
+    }
+
+    #[test]
+    fn the_two_cross_file_arms_are_compared_apart_not_blended() {
+        let (a, b) = cross_file_pair();
+        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let without = tier_of(&compared.codebase.tiers, "cross_file_first", "exact");
+        assert!(
+            approx(without.mean_a, 0.0) && approx(without.mean_b, 1.0),
+            "{without:?}"
+        );
+        let with = tier_of(&compared.codebase.tiers, "cross_file_first+extra", "exact");
+        assert!(
+            approx(with.mean_a, 1.0) && approx(with.mean_b, 0.0),
+            "{with:?}"
+        );
+        let rendered = render_comparison(&RunPair { a: &a, b: &b }, &compared);
+        assert!(
+            rendered
+                .lines()
+                .any(|l| l.trim_start().starts_with("cross_file_first+extra")),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn the_context_lift_is_compared_per_task_with_the_paired_sign_test() {
+        let (a, b) = cross_file_pair();
+        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let lift = tier_of(&compared.codebase.tiers, "context lift", "exact");
+        assert!(
+            approx(lift.mean_a, 1.0) && approx(lift.mean_b, -1.0),
+            "{lift:?}"
+        );
+        assert_eq!((lift.a_better, lift.b_better, lift.ties), (6, 0, 0));
+        assert_eq!(lift.verdict, Comparison::Faster, "six of six is a finding");
+        let rendered = render_comparison(&RunPair { a: &a, b: &b }, &compared);
+        assert!(
+            rendered
+                .lines()
+                .any(|l| l.trim_start().starts_with("context lift")
+                    && l.contains("1.00 vs -1.00  (Δ +2.00)")
+                    && l.ends_with("m1 is better")),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_task_measured_on_one_arm_only_leaves_the_lift_and_is_counted() {
+        let (a, mut b) = cross_file_pair();
+        b.rows.retain(|r| r.task_id != "cff-5+extra");
+        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let lift = tier_of(&compared.codebase.tiers, "context lift", "exact");
+        assert_eq!(
+            lift.a_better + lift.b_better + lift.ties,
+            5,
+            "five tasks have both arms in both runs"
+        );
+        let drop = compared
+            .codebase
+            .dropped
+            .iter()
+            .find(|d| d.group == "context lift")
+            .expect("the lift reports what it lost");
+        assert_eq!(drop.dropped, 1);
+        let rendered = render_comparison(&RunPair { a: &a, b: &b }, &compared);
+        assert!(
+            rendered.contains(
+                "1 task(s) dropped from context lift: measured on one arm only in one run\n"
+            ),
+            "{rendered}"
+        );
     }
 
     // --------------------------------------------------------------- agentic
@@ -1534,6 +1819,7 @@ mod tests {
                         task_id: id.into(),
                         tier: TaskTier::FunctionBody,
                         prediction: GOLD,
+                        arm: None,
                     },
                 )
             })

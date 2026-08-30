@@ -17,10 +17,18 @@ pub const MASK_LABEL: &str = "boundary-scanned (not AST)";
 
 /// What the with-extra arm's `task_id` ends in (§5).
 ///
-/// `run::arms` writes it and `store::base_id` strips it back off to pair the
-/// two arms of one task: two literals, and a run whose ids the report could
-/// not pair would show every task as two.
+/// `run::arms` writes it and `base_id` strips it back off to pair the two
+/// arms of one task: two literals, and a run whose ids the report could not
+/// pair would show every task as two.
 pub const ARM_EXTRA_SUFFIX: &str = "+extra";
+
+/// A cross-file task's id without its arm suffix — the two arms are one task.
+/// Lives beside the suffix so the report and `compare` cannot strip it two
+/// different ways.
+#[must_use]
+pub fn base_id(task_id: &str) -> &str {
+    task_id.strip_suffix(ARM_EXTRA_SUFFIX).unwrap_or(task_id)
+}
 
 /// Which kind of span was masked (`RepoBench` taxonomy; cross-file is slice B).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

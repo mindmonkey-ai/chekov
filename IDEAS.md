@@ -406,7 +406,12 @@ clearest separation in the run, and the section printed a single blended
 `context lift` row comparing the two models' lifts per tier with the same paired
 sign test over tasks present in both arms of both runs. Rationale: the tier that
 separates models should be the tier `compare` reads best.
-Proposed 2026-08-30 — status: OPEN
+SHIPPED 2026-08-30 as proposed: groups are (tier, arm) — `cross_file_first` and
+`cross_file_first+extra` — and a `context lift` group compares the per-task
+lifts (extra − no_extra) on tiers 1-5, compile and test under the paired sign
+test; a task both runs touched but one measured on one arm only is dropped
+from the lift with its own drop line.
+Proposed 2026-08-30 — status: SHIPPED
 
 ## Bench a foreign runtime: MTPLX and MLX servers as first-class candidates (2026-08-30)
 MTPLX (mtplx.com, Apache-2.0, MLX-native) decodes Qwen 3.5/3.6/3.8 — and
