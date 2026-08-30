@@ -207,6 +207,7 @@ mod tests {
             hermes_ok: true,
             ctx_size: None,
             extra_flags: vec!["--reasoning-format".into(), "none".into()],
+            role: None,
         }
     }
 
@@ -291,5 +292,33 @@ mod tests {
             .expect_err("active is protected")
             .to_string();
         assert!(msg.contains("chekov use"), "no remediation in: {msg}");
+    }
+
+    #[test]
+    fn a_judge_role_round_trips_and_an_absent_one_loads_as_none() {
+        let mut entry = sample_entry();
+        entry.role = Some(super::ModelRole::Judge);
+        let text = toml::to_string(&entry).expect("serialize");
+        assert!(text.contains("role = \"judge\""), "{text}");
+        let back: super::ModelEntry = toml::from_str(&text).expect("parse");
+        assert_eq!(back.role, Some(super::ModelRole::Judge));
+        let plain: super::ModelEntry =
+            toml::from_str(&toml::to_string(&sample_entry()).expect("serialize")).expect("parse");
+        assert_eq!(plain.role, None, "no field means no role, not an error");
+    }
+
+    #[test]
+    fn an_unknown_role_is_refused_naming_the_one_accepted_value() {
+        let text = format!(
+            "{}role = \"candidate\"\n",
+            toml::to_string(&sample_entry()).expect("serialize")
+        );
+        let err = toml::from_str::<super::ModelEntry>(&text)
+            .expect_err("a role chekov does not know")
+            .to_string();
+        assert!(
+            err.contains("role = \"candidate\" is not a role chekov knows; the one accepted value is \"judge\""),
+            "{err}"
+        );
     }
 }
