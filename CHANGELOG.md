@@ -35,6 +35,25 @@ All notable changes to chekov are recorded here. The format follows
   only on a real refusal now, never on a dead socket.
 
 ### Added
+- `capability bench --codebase` adds the `cross_file_first` tier: the mask is
+  the first use in a file of a symbol declared in exactly one **other** file,
+  found over the elided texts with a declaration index — never an ambiguous
+  name (declared in two or more files), never a name the file declares itself,
+  never a `use` line, and never a hit inside a string or a comment. The
+  default 24 tasks now split 12 / 6 / 6 rather than 16 / 8. Each cross-file
+  task is crossed **twice**: once with nothing but its own file, once with the
+  defining file sent as llama.cpp's `input_extra` — capped at 32 KiB and
+  otherwise windowed on the declaration line, with `truncated` and the exact
+  bytes on the row. The report prints both arms and the `context lift` between
+  them over the tasks answered in both, with what was sent (files, KiB,
+  truncated) and what the leakage filter's rule (b) withheld — every other
+  file whose text contains the answer verbatim, never the defining file,
+  without which the tier is unanswerable. The two arms take distinct task ids
+  (`<id>` and `<id>+extra`), so `--resume` skips per arm and an arm that
+  failed is one unavailable row. Because the set hash covers the new tier's
+  ids, any repository that yields cross-file tasks gets a new `corpus_id`:
+  runs recorded before this slice are not comparable with runs after it, and
+  `compare` refuses them by that field, as it should.
 - `chekov pull` shows a per-shard progress line while a file is in flight:
   `  shard 2/5  12.3 / 39.9 GB  31%  97 MiB/s  ETA 4m29s`, with the rate
   measured over the last five seconds so a stall shows up as it happens

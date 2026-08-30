@@ -844,14 +844,15 @@ struct RunInputs<'a> {
     prepared: Option<&'a crate::core::bench::codebase::Prepared>,
 }
 
-/// `codebase: {n} tasks from {repo} @ {head[..12]}`, with what the
-/// `#[cfg(test)]` cutter took and the shortfall parenthetical appended only
-/// when there is something to say.
+/// `codebase: {n} tasks from {repo} @ {head[..12]} ({tier census})`, with what
+/// the `#[cfg(test)]` cutter took and the shortfall parenthetical appended
+/// only when there is something to say.
 fn codebase_plan_line(
     prepared: &crate::core::bench::codebase::Prepared,
     repo: &std::path::Path,
 ) -> String {
     let head12 = &prepared.head[..12.min(prepared.head.len())];
+    let census = crate::core::bench::codebase::tier_counts_clause(prepared.counts);
     let elided = if prepared.cfg_test_files == 0 {
         String::new()
     } else {
@@ -863,10 +864,18 @@ fn codebase_plan_line(
         format!(" ({})", prepared.shortfall.join(", "))
     };
     format!(
-        "codebase: {} tasks from {} @ {head12}{elided}{shortfall}\n",
+        "codebase: {} tasks from {} @ {head12} ({census}){elided}{shortfall}\n",
         prepared.tasks.len(),
         repo.display()
     )
+}
+
+/// Six seconds per CROSSING, not per task: a cross-file task is crossed
+/// twice, so the estimate is `(in_file + function_body + 2 × cross) × 6`.
+fn codebase_estimate_secs(prepared: &crate::core::bench::codebase::Prepared) -> u64 {
+    let c = prepared.counts;
+    let crossings = c.in_file + c.function_body + 2 * c.cross_file_first;
+    u64::try_from(crossings).unwrap_or(0) * 6
 }
 
 /// The plan's steps, one per candidate.
@@ -895,7 +904,7 @@ fn bench_estimate(
     inputs: &RunInputs,
 ) -> Result<u64, ChekovError> {
     use crate::core::bench::lifecycle;
-    let codebase_secs = inputs.prepared.map_or(0, |p| p.tasks.len() as u64 * 6);
+    let codebase_secs = inputs.prepared.map_or(0, codebase_estimate_secs);
     Ok(lifecycle::estimate_secs(steps, plan)
         + agentic_estimate_secs(inputs.args.suite)?
         + codebase_secs)
@@ -1842,6 +1851,81 @@ mod tests {
         assert_eq!(
             super::effective_suite(Some(Suite::All), true),
             Some(Suite::All)
+        );
+    }
+
+    use crate::core::bench::codebase::ladder::Symbols;
+    use crate::core::bench::codebase::{CodebaseTask, Counts, Excluded, Prepared, TaskTier};
+
+    /// A task shaped only enough to be counted — the plan line reads
+    /// `tasks.len()` and `counts`, nothing else.
+    fn plan_task(line: usize) -> CodebaseTask {
+        CodebaseTask {
+            id: format!("in_file-abc123-L{line}"),
+            tier: TaskTier::InFile,
+            file: "src/a.rs".into(),
+            line,
+            gold: "let a = 1;".into(),
+            prefix: "fn f() {\n".into(),
+            suffix: "\n}\n".into(),
+            excluded: Excluded {
+                doc_comment: 0,
+                cross_file: "n/a: same-file".into(),
+                cfg_test_lines: 0,
+                cross_file_withheld: 0,
+            },
+            also_first_uses: vec![],
+            extra: None,
+            extra_text: String::new(),
+        }
+    }
+
+    fn prepared_counts(in_file: usize, function_body: usize, cross: usize) -> Prepared {
+        Prepared {
+            head: "4818813deeaa11112222333344445555666677".into(),
+            set_hash: "abcdef123456".into(),
+            tasks: (0..in_file + function_body + cross)
+                .map(plan_task)
+                .collect(),
+            shortfall: vec![],
+            symbols: Symbols::default(),
+            cfg_test_lines: 0,
+            cfg_test_files: 0,
+            counts: Counts {
+                in_file,
+                function_body,
+                cross_file_first: cross,
+            },
+        }
+    }
+
+    #[test]
+    fn the_plan_line_names_every_tier_and_the_second_arm() {
+        let line =
+            super::codebase_plan_line(&prepared_counts(12, 6, 6), std::path::Path::new("/r"));
+        assert_eq!(
+            line,
+            "codebase: 24 tasks from /r @ 4818813deeaa (12 in_file, 6 function_body, \
+             6 cross_file_first × 2 arms)\n",
+            "{line}"
+        );
+        let none =
+            super::codebase_plan_line(&prepared_counts(12, 12, 0), std::path::Path::new("/r"));
+        assert!(
+            none.contains("(12 in_file, 12 function_body, 0 cross_file_first)"),
+            "no second arm to announce: {none}"
+        );
+    }
+
+    #[test]
+    fn the_estimate_counts_a_cross_file_task_twice() {
+        assert_eq!(
+            super::codebase_estimate_secs(&prepared_counts(12, 6, 6)),
+            180
+        );
+        assert_eq!(
+            super::codebase_estimate_secs(&prepared_counts(12, 12, 0)),
+            144
         );
     }
 

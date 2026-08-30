@@ -15,9 +15,11 @@ task shape that already discriminates: same-file infill in Rust.
 
 Left to later slices, and said in every report so nothing is over-claimed:
 
-- **Slice B** — `cross_file_first` tasks with `input_extra` context, which is
-  where the leakage filter's rules (a), (b) and (d) become live; tiers 6
-  (compile gate) and 7 (covering test) behind `--allow-exec`.
+- **Slice B1** — `cross_file_first` tasks with `input_extra` context, which is
+  where the leakage filter's rules (a), (b) and (d) become live. Specified and
+  shipped: `docs/superpowers/specs/2026-08-29-codebase-mode-slice-b1-design.md`.
+- **Slice B2** — tiers 6 (compile gate) and 7 (covering test) behind
+  `--allow-exec`.
 - **Slice C** — `--judge`.
 - Other languages behind the same `MaskSource` trait.
 - Any composite score (§7.5 is a separate decision).

@@ -100,7 +100,7 @@ The registry stores the absolute path; everything else works unchanged.
 | `capability recommend [--ctx N] [--role agent\|chat] [--refresh] [--limit N]` | Ranks the registered models for this machine. Gates first — anything that exceeds the budget, or cannot be sized, is listed with its reason rather than dropped. Then sorts: under `--role agent` a model whose chat template has no dedicated llama.cpp tool parser is **downranked with a note, not refused**; under `--role chat` the tool parser is ignored. `--refresh` is the **only** networked path — without it chekov ranks registered models only and never reaches out. |
 | `capability explain [name] [--ctx N]` | Read one model's GGUF header and print its fit arithmetic line by line: block count, the MTP/interval layer ladder, padded context, cache type, KV bytes, weights on disk. Local file read; no network. |
 | `capability bench [--models a,b] [--suite throughput\|agentic\|all] [--fixture F] [--resume RUN] [--dry-run] [--yes]` | Measure candidates through chekov's own Anthropic↔OpenAI translator and store every run. `--models` takes a **comma-separated** list and benches them **sequentially**: bench launches and tears down its own server behind `run`'s preflight gates and **never stops a server it did not start** — a running server is reused only when it *is* the single request, and is otherwise a refusal. `--suite` defaults to `throughput`: the depth sweep over `[bench] depths`, `[bench] repetitions` per depth with the first dropped as warmup. `agentic` runs the probe set (`tool_emit`, `grammar_gap`, `instruction`), with each unconstrained case crossing both the buffered and the streamed door so an asymmetry between them is named. `all` runs both. Each run lands in `eval/<timestamp>-<model>/` as `stamp.json` (the configuration stamp plus the exact launch argv) and `results.jsonl` (one flushed append per task), so a crash loses at most one task and `--resume <RUN>` skips what that run already holds — resuming under a changed stamp is refused. `--dry-run` prints the plan and a rough wall-clock estimate as data; `--yes` pre-approves the launch confirmation; `--fixture` supplies graded probes from your own TOML (there is deliberately no compiled-in fixture). |
-| `capability bench --codebase <PATH>` | The repository at PATH (clean tree required) as 24 deterministic same-file infill tasks, sampled from HEAD (`[bench] codebase_tasks`), run through `/infill`, graded on tiers 1–5 (exact, edit similarity, identifier F1, parse, repo-symbol existence); tiers 6–7 and cross-file context are slice B. Masks are boundary-scanned, not AST, and the report says so. A model without FIM tokens is N/A, never zero. Given without `--suite`, the codebase corpus is the whole run — the throughput sweep does not come along. |
+| `capability bench --codebase <PATH>` | The repository at PATH (clean tree required) as 24 deterministic infill tasks, sampled from HEAD (`[bench] codebase_tasks`, split 12 `in_file` / 6 `function_body` / 6 `cross_file_first`), run through `/infill`, graded on tiers 1–5 (exact, edit similarity, identifier F1, parse, repo-symbol existence); tiers 6–7 are slice B2. A `cross_file_first` task masks the first use in a file of a symbol defined in **another** file, and is crossed **twice** — without that file and with it in `input_extra` — so the report can print what reading the repository buys. Masks are boundary-scanned, not AST, and the report says so. A model without FIM tokens is N/A, never zero. Given without `--suite`, the codebase corpus is the whole run — the throughput sweep does not come along. |
 | `capability compare <A> <B>` | Compare two stored bench runs, named by run id under `eval/` or by run directory. **Same environment only**: it refuses on the FIRST differing stamp field and names it, because llama.cpp does not promise bit-identical results across configurations. The subject fields (`weights_revision`, `quant`) are exempt — they are what is being compared — and a differing task set always refuses. `no significant difference` is a first-class printed outcome, never resolved into a winner. |
 | `pull <spec> [--name N] [--dry-run] [--model-loc DIR] [--license-url URL]` | Resolve revision, download (or adopt) quant-matching files, snapshot license + provenance, register. Shows a per-shard progress line on stderr (bytes, percent, rate, ETA) and resumes a partial shard from its `.part` with an HTTP `Range` request, size-verified before it is renamed into place. Idempotent: same spec+revision is a verified no-op; a NEW revision downloads but never repoints (that is `update`'s gated job). |
 | `list` | Table: active marker, name, quant, size on disk, revision. |
@@ -122,10 +122,20 @@ tasks are sampled from `HEAD` (`[bench] codebase_tasks` in `config.toml`),
 masked out, and run through `/infill`. It requires a clean tree and runs in a
 detached worktree, so the benchmark never touches uncommitted changes or the
 branch you're on — with work in progress, bench a clone rather than the copy
-you are editing. Only tiers 1–5 (exact, edit similarity, identifier F1,
-parse, repo-symbol existence) are scored; tiers 6–7 (compile gate, covering
-test) and cross-file context are deferred to slice B. Masks are
-boundary-scanned, not AST-derived, and the report always says so. A file with
+you are editing. Six of the 24 tasks are `cross_file_first`: the mask is the
+first use in a file of a symbol defined in exactly one other file, and each
+is crossed twice — once with nothing but its own file, once with the
+defining file sent as llama.cpp's `input_extra` (capped at 32 KiB, windowed
+on the declaration line when the file is larger, and the row records which).
+The report prints both arms and the `context lift` between them over the
+tasks answered in both, which is the measurement this mode exists for. A
+name declared in two or more files is ambiguous and never masked, and the
+shortfall line says how many were skipped. Only tiers 1–5 are scored; tiers
+6–7 (compile gate, covering test) are deferred to slice B2 behind
+`--allow-exec`. Because the task set now includes the new tier's ids, its
+hash — and so `corpus_id` changed: runs recorded before this are not
+comparable with runs after it, and `compare` refuses them by that field.
+Masks are boundary-scanned, not AST-derived, and the report always says so. A file with
 inline unit tests is kept and its `#[cfg(test)]` items are cut out before
 anything is sampled — the header's `tests elided: L lines in F files` says what
 that came to, so the model is never offered a test module as its answer. chekov
