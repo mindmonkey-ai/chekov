@@ -24,7 +24,7 @@ pub const fn sized(weights_bytes: u64, kv_bytes: u64) -> u64 {
     weights_bytes + kv_bytes + OVERHEAD_BYTES
 }
 
-/// Whether a launch argv puts the KV cache in q8_0 — read from the flags a
+/// Whether a launch argv puts the KV cache in `q8_0` — read from the flags a
 /// model is actually launched with, wherever the value appears in them.
 #[must_use]
 pub fn wants_q8(flags: &[String]) -> bool {
