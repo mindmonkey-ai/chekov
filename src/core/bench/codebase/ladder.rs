@@ -49,7 +49,7 @@ const BODY_SKIPPED: &str = "function_body: tiers 1-2 punish valid alternatives";
 const SYMBOLS_AT_RUN_TIME: &str = "symbols: needs the worktree, scored at run time";
 
 /// Rust keywords — never identifiers.
-const KEYWORDS: [&str; 52] = [
+pub(super) const KEYWORDS: [&str; 52] = [
     "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
     "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
     "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
@@ -59,7 +59,7 @@ const KEYWORDS: [&str; 52] = [
 
 /// Names any Rust program may use without declaring: the prelude, common
 /// std types and the methods the ladder would otherwise call fabricated.
-const PRELUDE: &[&str] = &[
+pub(super) const PRELUDE: &[&str] = &[
     "Some",
     "None",
     "Ok",
@@ -446,6 +446,18 @@ pub fn repo_symbols(files: &[(String, String)]) -> Symbols {
 }
 
 fn collect_declarations(line: &str, set: &mut BTreeSet<String>) {
+    declaration_names(line, set);
+    collect_members(line.trim(), set);
+}
+
+/// The `fn`/`struct`/`enum`/`trait`/`type`/`const`/`static`/`mod` name on
+/// this line, if any.
+///
+/// Split from `collect_declarations` because the cross-file index wants
+/// declarations only: a struct field and an enum variant are not call sites,
+/// so indexing them would make every `name:` in the repository look like a
+/// definition to cross a file for.
+pub(super) fn declaration_names(line: &str, set: &mut BTreeSet<String>) {
     let words: Vec<&str> = line
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())
@@ -459,7 +471,6 @@ fn collect_declarations(line: &str, set: &mut BTreeSet<String>) {
             set.insert((*name).to_owned());
         }
     }
-    collect_members(line.trim(), set);
 }
 
 /// Words a line-shaped scan mistakes for a declaration: `Self::x` and

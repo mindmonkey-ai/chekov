@@ -1,6 +1,7 @@
 //! `chekov capability bench --codebase` — the user's own Rust repository as
 //! graded same-file infill tasks (spec §8, slice A).
 
+pub mod crossfile;
 pub mod filter;
 pub mod ladder;
 pub mod masker;
