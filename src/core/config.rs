@@ -508,4 +508,30 @@ mod tests {
             PathBuf::from("/Users/nobody/.chekov")
         );
     }
+
+    #[test]
+    fn the_tune_section_defaults_and_parses() {
+        let cfg: super::FileConfig = toml::from_str("").expect("defaults");
+        assert_eq!(cfg.tune.depth, 4096);
+        assert_eq!(cfg.tune.flash_attn, vec!["on", "off"]);
+        assert_eq!(cfg.tune.cache_types, vec!["q8_0", "f16"]);
+        assert_eq!(cfg.tune.batch_sizes, vec![512, 1024, 2048, 4096]);
+        assert_eq!(cfg.tune.ubatch_sizes, vec![256, 512, 1024, 2048]);
+        let cfg: super::FileConfig =
+            toml::from_str("[tune]\ndepth = 2048\nbatch_sizes = [1024]\n").expect("overrides parse");
+        assert_eq!((cfg.tune.depth, cfg.tune.batch_sizes.len()), (2048, 1));
+        assert!(
+            toml::from_str::<super::FileConfig>("[tune]\ndepths = [1]\n").is_err(),
+            "unknown keys are refused"
+        );
+        let root = std::path::Path::new("/r");
+        assert_eq!(
+            super::Config {
+                root: root.to_path_buf(),
+                file: super::FileConfig::default()
+            }
+            .tune_dir(),
+            root.join("tune")
+        );
+    }
 }
