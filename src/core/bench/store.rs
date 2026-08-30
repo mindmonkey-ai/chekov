@@ -1393,8 +1393,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        CodebaseRow, GradeRow, Measure, RunHead, RunLog, RunWriter, Task, TaskRow, Transport,
-        render_run,
+        CodebaseRow, DecidedBy, GradeRow, JudgeRow, Measure, RunHead, RunLog, RunWriter, Task,
+        TaskKey, TaskRow, Transport, render_run,
     };
     use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
     use crate::core::bench::stamp::Stamp;
@@ -1667,6 +1667,51 @@ mod tests {
             "measure":{"prompt_n":4,"decode_samples":[1.0],"prefill_samples":[1.0],"warmup_dropped":0}}"#;
         let row: TaskRow = serde_json::from_str(line).expect("an old row still loads");
         assert_eq!(row.transport, Transport::Buffered);
+    }
+
+    /// A real `codebase` row from before slice C — no `judge` key at all.
+    const PRE_C_ROW: &str = r#"{"schema":1,"run_id":"20260830T072140Z-qwen3.8-flash-next","seq":64,"suite":"codebase","task_id":"in_file-1142dc-L35","transport":"buffered","measure":{"prompt_n":659,"decode_samples":[31.383755425823352],"prefill_samples":[280.5818219595511],"warmup_dropped":0,"cache_n":0},"codebase":{"tier":"in_file","file":"crates/pushkin-cli/src/verbs/list.rs","line":35,"label":"boundary-scanned (not AST)","gold":"    let entries = state::registry();","prediction":"    let entries = match state::entries() {\n        Ok(entries) => entries,\n        Err(error) => {\n            eprintln!(\"pushkin: cannot read the registry: {error}\");\n            return 1;\n        }\n    };\n","prefix":"//! `pushkin list [--prune]`: every daemon the per-user registry knows, from\n//! any directory (ADR-0010 step 1b). One line per repository: running with\n//! its pid, or stale (registered, nothing answering). `--prune` removes the\n//! stale entries' dirs; a dir with no root record is reported as unknown and\n//! never pruned — a thing we cannot name is not ours to delete.\n\nuse super::state;\nuse pushkin_daemon::protocol::{Request, Response, PROTOCOL_VERSION};\nuse pushkin_daemon::server;\n\npub struct ListArgs {\n    pub prune: bool,\n}\n\nenum Health {\n    Running(u32),\n    Stale,\n}\n\nfn health(entry: &state::Entry) -> Health {\n    match server::request_at(\n        &entry.socket(),\n        &Request::Ping {\n            v: PROTOCOL_VERSION,\n        },\n    ) {\n        Ok(Response::Pong { info }) => Health::Running(info.pid),\n        _ => Health::Stale,\n    }\n}\n\n/// Exit 0 always: an empty or stale registry is a state, not a failure.\n#[must_use]\npub fn run(args: &ListArgs) -> i32 {\n","suffix":"\n    if entries.is_empty() {\n        println!(\"pushkin: no daemons registered\");\n        return 0;\n    }\n    let mut running = 0;\n    let mut stale = 0;\n    for entry in entries {\n        match report(&entry, args.prune) {\n            Some(Health::Running(_)) => running += 1,\n            Some(Health::Stale) => stale += 1,\n            None => {}\n        }\n    }\n    // The live count is the named trigger for ADR-0012's option A: a shared\n    // process is worth revisiting only when this number gets large.\n    println!(\"{running} running, {stale} stale\");\n    0\n}\n\nfn report(entry: &state::Entry, prune: bool) -> Option<Health> {\n    let Some(root) = entry.root.as_deref() else {\n        println!(\n            \"{}  unknown (no root record; not pruned)\",\n            entry.dir.display()\n        );\n        return None;\n    };\n    let health = health(entry);\n    match health {\n        Health::Running(pid) => println!(\"{}  running (pid {pid})\", root.display()),\n        Health::Stale if prune => match std::fs::remove_dir_all(&entry.dir) {\n            Ok(()) => println!(\"{}  stale — pruned\", root.display()),\n            Err(error) => println!(\"{}  stale — prune failed: {error}\", root.display()),\n        },\n        Health::Stale => println!(\"{}  stale (no daemon answering)\", root.display()),\n    }\n    Some(health)\n}\n","excluded":{"doc_comment":0,"cross_file":"n/a: same-file","cfg_test_lines":0,"cross_file_withheld":0},"symbols_score":1.0,"unsupported":false,"n_predict":64}}"#;
+
+    #[test]
+    fn a_judge_row_round_trips_and_an_old_row_loads_without_one() {
+        let eval = scratch("judge-row");
+        let mut writer = RunWriter::create(&eval, "r-judge", &head()).expect("create");
+        writer
+            .append(Task {
+                suite: super::JUDGE_SUITE.into(),
+                task_id: "function_body-abc123-L10".into(),
+                measure: crate::core::bench::codebase::run::empty_measure(),
+                grade: None,
+                transport: Transport::Buffered,
+                codebase: None,
+                judge: Some(JudgeRow {
+                    equivalent: None,
+                    gold_first: Some(true),
+                    prediction_first: Some(false),
+                    decided_by: DecidedBy::SwapDisagreement,
+                    skipped: None,
+                    judge_secs: 2.5,
+                }),
+            })
+            .expect("append");
+        let log = RunLog::load(&eval.join("r-judge")).expect("load");
+        let row = &log.rows[0];
+        assert_eq!(row.suite, "judge");
+        let judge = row.judge.as_ref().expect("judge row");
+        assert_eq!(judge.decided_by, DecidedBy::SwapDisagreement);
+        assert_eq!(
+            (judge.gold_first, judge.prediction_first),
+            (Some(true), Some(false))
+        );
+        let text = std::fs::read_to_string(eval.join("r-judge/results.jsonl")).expect("read");
+        assert!(text.contains("\"decided_by\":\"swap_disagreement\""), "{text}");
+        assert!(log.is_done(&TaskKey::buffered("judge", "function_body-abc123-L10")));
+        assert!(
+            serde_json::from_str::<TaskRow>(PRE_C_ROW)
+                .expect("a row without the field parses")
+                .judge
+                .is_none()
+        );
     }
 
     #[test]
