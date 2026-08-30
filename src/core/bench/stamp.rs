@@ -1,4 +1,4 @@
-//! The 20-field configuration stamp (spec §7.4).
+//! The 21-field configuration stamp (spec §7.4).
 //!
 //! llama.cpp does not guarantee bit-identical results across configurations:
 //! GPU reduction kernels pick different accumulation orders and float
@@ -54,6 +54,27 @@ pub struct Stamp {
     pub chekov_version: String,
     pub prompt_set_hash: String,
     pub corpus_id: String,
+    /// The judge a run's `equiv` column was measured with (spec C §5) —
+    /// `None` when the run graded no judged column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge: Option<JudgeStamp>,
+}
+
+/// The judge a run's `equiv` column was measured with (spec C §5) — the
+/// instrument, its budget and its floor, so a report is read against what
+/// voided or kept the column, not against today's config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeStamp {
+    pub model: String,
+    pub quant: String,
+    /// The pinned HF revision, first twelve characters.
+    pub revision: String,
+    pub arch: String,
+    pub rubric_hash: String,
+    pub max_tokens: u32,
+    pub reasoning_effort: String,
+    pub min_consistency_pct: u32,
 }
 
 /// A stamp written before the exec tiers existed ran nothing, and says so.
@@ -69,7 +90,7 @@ pub const EXEC_TARGET_OFF: &str = "none";
 /// The FIRST differing field name, in declaration order — or `None` if equal.
 #[must_use]
 pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
-    let pairs: [(&'static str, bool); 20] = [
+    let pairs: [(&'static str, bool); 21] = [
         ("machine_id", a.machine_id != b.machine_id),
         (
             "engine_build_commit",
@@ -96,6 +117,7 @@ pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
         ("chekov_version", a.chekov_version != b.chekov_version),
         ("prompt_set_hash", a.prompt_set_hash != b.prompt_set_hash),
         ("corpus_id", a.corpus_id != b.corpus_id),
+        ("judge", a.judge != b.judge),
     ];
     pairs
         .iter()
@@ -170,6 +192,7 @@ mod tests {
             chekov_version: "0.1.0".into(),
             prompt_set_hash: "e19a".into(),
             corpus_id: "throughput-v1".into(),
+            judge: None,
         }
     }
 
@@ -254,15 +277,25 @@ mod tests {
         let mut with = stamp();
         with.judge = Some(judged());
         let mut other = with.clone();
-        other.judge.as_mut().map(|j| j.rubric_hash = "000000000000".into());
+        if let Some(j) = other.judge.as_mut() {
+            j.rubric_hash = "000000000000".into();
+        }
         assert_eq!(first_mismatch(&with, &other), Some("judge"));
-        assert_eq!(first_mismatch(&with, &stamp()), Some("judge"), "absent vs present differs");
+        assert_eq!(
+            first_mismatch(&with, &stamp()),
+            Some("judge"),
+            "absent vs present differs"
+        );
         let json = serde_json::to_string(&stamp()).expect("json");
         assert!(!json.contains("\"judge\""), "no judge, no key: {json}");
         let back: Stamp = serde_json::from_str(&json).expect("parse");
         assert_eq!(back.judge, None);
         let mut ctx_differs = with.clone();
         ctx_differs.ctx = 1;
-        assert_eq!(first_mismatch(&with, &ctx_differs), Some("ctx"), "earlier fields still win");
+        assert_eq!(
+            first_mismatch(&with, &ctx_differs),
+            Some("ctx"),
+            "earlier fields still win"
+        );
     }
 }

@@ -182,6 +182,7 @@ fn assert_same_environment(a: &RunLog, b: &RunLog) -> Result<(), ChekovError> {
         .weights_revision
         .clone_from(&a.head.stamp.weights_revision);
     b_env.quant.clone_from(&a.head.stamp.quant);
+    b_env.judge.clone_from(&a.head.stamp.judge);
     stamp::mismatch_error(&a.head.stamp, &b_env).map_or(Ok(()), Err)
 }
 
@@ -832,6 +833,7 @@ mod tests {
             chekov_version: "0.1.0".into(),
             prompt_set_hash: "e19a".into(),
             corpus_id: "throughput-v1".into(),
+            judge: None,
         }
     }
 

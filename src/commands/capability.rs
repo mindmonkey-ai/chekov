@@ -1702,6 +1702,7 @@ fn assemble_stamp(
         chekov_version: env!("CARGO_PKG_VERSION").to_owned(),
         prompt_set_hash: parts.prompt_set_hash,
         corpus_id: parts.corpus_id,
+        judge: None,
     }
 }
 

@@ -1481,6 +1481,7 @@ mod tests {
             chekov_version: "0.1.0".into(),
             prompt_set_hash: "e19a".into(),
             corpus_id: "throughput-v1".into(),
+            judge: None,
         }
     }
 
