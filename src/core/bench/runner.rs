@@ -1171,6 +1171,28 @@ mod tests {
     }
 
     #[test]
+    fn only_a_judge_crossing_carries_reasoning_effort() {
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let schema = serde_json::json!({"type": "object"});
+        let judge = CannedUpstream::new(openai_with_timings());
+        super::cross_forced_with(
+            &wire(&judge, &facade, &up),
+            &anthropic_request("judge it"),
+            &super::Forced { schema: &schema, reasoning_effort: Some("low") },
+        )
+        .expect("judge crossing");
+        assert_eq!(sent(&judge)["reasoning_effort"], "low", "{}", sent(&judge));
+        assert_eq!(sent(&judge)["response_format"]["type"], "json_schema");
+        assert_eq!(sent(&judge)["reasoning_format"], "deepseek");
+
+        let probe = CannedUpstream::new(openai_with_timings());
+        super::cross_forced(&wire(&probe, &facade, &up), &anthropic_request("go"), &schema)
+            .expect("forced probe");
+        assert!(sent(&probe).get("reasoning_effort").is_none(), "{}", sent(&probe));
+    }
+
+    #[test]
     fn a_missing_cache_n_is_zero_cached_not_a_missing_measurement() {
         let body = serde_json::json!({
             "choices": [{ "message": { "content": "hi" }, "finish_reason": "stop" }],
