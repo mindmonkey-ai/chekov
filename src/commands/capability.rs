@@ -1876,7 +1876,7 @@ fn compare(ctx: &Ctx, a: &std::path::Path, b: &std::path::Path) -> Result<ExitCo
     use crate::core::bench::{compare as bench_compare, store};
     let run_a = store::RunLog::load(&resolve_run(ctx, a))?;
     let run_b = store::RunLog::load(&resolve_run(ctx, b))?;
-    let rows = bench_compare::compare_runs(
+    let comparison = bench_compare::compare_runs(
         &run_a,
         &run_b,
         f64::from(ctx.config.file.bench.significance_pct),
@@ -1888,7 +1888,7 @@ fn compare(ctx: &Ctx, a: &std::path::Path, b: &std::path::Path) -> Result<ExitCo
                 a: &run_a,
                 b: &run_b
             },
-            &rows
+            &comparison
         )
     );
     Ok(ExitCode::SUCCESS)
