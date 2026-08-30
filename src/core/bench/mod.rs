@@ -6,6 +6,7 @@ pub mod codebase;
 pub mod compare;
 pub mod fixture;
 pub mod grade;
+pub mod judge;
 pub mod lifecycle;
 pub mod probes;
 pub mod probeset;
