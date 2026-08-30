@@ -1325,10 +1325,7 @@ fn judge_trailer(kept: &[&TaskRow], log: &RunLog) -> String {
         .collect();
     let total = tier_tasks(kept, TaskTier::FunctionBody);
     if rows.is_empty() {
-        return format!(
-            "             judge: 0 of {total} crossings judged — resume with --judge {}\n",
-            stamp.model
-        );
+        return unjudged_trailer(total, &stamp.model);
     }
     let count = |d: DecidedBy| rows.iter().filter(|r| r.decided_by == d).count();
     let called = rows.iter().filter(|r| r.gold_first.is_some()).count();
@@ -1349,6 +1346,18 @@ fn judge_trailer(kept: &[&TaskRow], log: &RunLog) -> String {
         out.push_str(&warning);
     }
     out
+}
+
+/// A run under a judge that holds no verdict.
+///
+/// With no `function_body` crossing there was never anything to ask about and
+/// the phase was skipped (spec C §7); otherwise the crossings are still owed
+/// and the run is resumable.
+fn unjudged_trailer(total: usize, model: &str) -> String {
+    if total == 0 {
+        return "             judge: nothing eligible\n".to_owned();
+    }
+    format!("             judge: 0 of {total} crossings judged — resume with --judge {model}\n")
 }
 
 /// `             warning: N reply was not the schema — …`, or `None` when
@@ -3067,6 +3076,22 @@ mod tests {
         )
     }
 
+    /// A judge-stamped run whose crossings are all `in_file`: there was never
+    /// a `function_body` for the judge to be asked about.
+    fn nothing_eligible_run() -> RunLog {
+        let eval = scratch("nothing-eligible-report");
+        let mut head = head();
+        head.stamp.judge = Some(judge_stamp());
+        let mut writer = RunWriter::create(&eval, "r-nothing-eligible", &head).expect("create");
+        for fixture in codebase_fixtures()
+            .into_iter()
+            .filter(|f| f.tier == TaskTier::InFile)
+        {
+            writer.append(codebase_task(fixture)).expect("append");
+        }
+        RunLog::load(writer.dir()).expect("load")
+    }
+
     /// A plain codebase run: no `--judge` given at all.
     fn codebase_only_run() -> RunLog {
         let eval = scratch("codebase-only-report");
@@ -3126,6 +3151,18 @@ mod tests {
             ),
             "{out}"
         );
+    }
+
+    /// A run the judge had nothing to ask about does not read as a run whose
+    /// judge phase is still owed — there is nothing to resume.
+    #[test]
+    fn a_run_with_no_function_body_crossing_says_nothing_was_eligible() {
+        let out = render_codebase(&nothing_eligible_run());
+        assert!(
+            out.contains("             judge: nothing eligible\n"),
+            "{out}"
+        );
+        assert!(!out.contains("resume with --judge"), "{out}");
     }
 
     /// A judge that never got an answered order still names a rate — `n/a`,

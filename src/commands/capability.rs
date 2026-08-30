@@ -1132,13 +1132,40 @@ fn confirm_launches(
     )
 }
 
-/// The judge phase, or nothing to do — `--judge` was not given.
+/// The judge phase, or nothing to do — `--judge` was not given, or no run
+/// holds a crossing the judge could be asked about (spec C §7). A judge is
+/// never loaded to record nothing.
 fn judge_phase(
     ctx: &Ctx,
     runs: &[std::path::PathBuf],
     judge: Option<&crate::core::bench::judge::JudgePlan>,
 ) -> Result<(), ChekovError> {
-    judge.map_or(Ok(()), |plan| run_judge_phase(ctx, runs, plan))
+    let Some(plan) = judge else {
+        return Ok(());
+    };
+    if eligible_crossings(runs)? == 0 {
+        eprintln!("chekov bench: judge skipped — nothing eligible");
+        return Ok(());
+    }
+    run_judge_phase(ctx, runs, plan)
+}
+
+/// How many stored crossings the judge would be asked about, across every run
+/// — the same eligibility the phase itself applies, read before it launches.
+fn eligible_crossings(runs: &[std::path::PathBuf]) -> Result<usize, ChekovError> {
+    use crate::core::bench::judge::eligibility;
+    use crate::core::bench::store::{self, RunLog};
+    let mut total = 0;
+    for dir in runs {
+        total += RunLog::load(dir)?
+            .rows
+            .iter()
+            .filter(|r| r.suite == "codebase" && !store::is_unavailable(r))
+            .filter_map(|r| r.codebase.as_ref())
+            .filter(|row| eligibility(row).is_some())
+            .count();
+    }
+    Ok(total)
 }
 
 /// Every candidate, each one's run directory printed as it lands.
@@ -2619,6 +2646,105 @@ mod tests {
         super::role_check(&judge_entry(name), name)
             .and_then(|()| super::server_check(&resolved))
             .err()
+    }
+
+    /// One run directory on disk holding the given codebase crossings.
+    fn run_dir_with(
+        name: &str,
+        tiers: &[crate::core::bench::codebase::TaskTier],
+    ) -> std::path::PathBuf {
+        use crate::core::bench::store::{RunHead, RunWriter};
+        let eval = std::env::temp_dir()
+            .join("chekov-test-judge-eligible")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&eval);
+        std::fs::create_dir_all(&eval).expect("scratch dir");
+        let head = RunHead {
+            model: "ornith-1.5-35b-a3b".into(),
+            machine_brand: None,
+            launch_args: vec![],
+            forced_reasoning_format: None,
+            stamp: eligible_stamp(),
+        };
+        let mut writer = RunWriter::create(&eval, "r-eligible", &head).expect("create");
+        for (n, tier) in tiers.iter().enumerate() {
+            writer
+                .append(crossing_task(&format!("t-{n}"), *tier))
+                .expect("append");
+        }
+        writer.dir().to_path_buf()
+    }
+
+    fn eligible_stamp() -> crate::core::bench::stamp::Stamp {
+        crate::core::bench::stamp::Stamp {
+            machine_id: "8d41f0c2a917".into(),
+            engine_build_commit: "dda1b0d67".into(),
+            weights_revision: "fbbaed45c2f0/model-00001.gguf".into(),
+            quant: "Q8_0".into(),
+            ctx: 262_144,
+            n_parallel: 1,
+            kv_unified: "engine-default".into(),
+            n_batch: "engine-default".into(),
+            n_ubatch: "engine-default".into(),
+            type_k: "q8_0".into(),
+            type_v: "q8_0".into(),
+            flash_attn: "on".into(),
+            allow_exec: false,
+            cargo_version: None,
+            exec_target: "none".into(),
+            seed: 42,
+            temperature_milli: 0,
+            chekov_version: "0.1.0".into(),
+            prompt_set_hash: "e19a".into(),
+            corpus_id: "codebase:4818813deeaa:abcdef123456".into(),
+            judge: None,
+        }
+    }
+
+    /// One answered codebase crossing — a prediction that differs from the
+    /// gold, so a `function_body` one is a crossing the judge would be asked.
+    fn crossing_task(
+        id: &str,
+        tier: crate::core::bench::codebase::TaskTier,
+    ) -> crate::core::bench::store::Task {
+        crate::core::bench::store::Task {
+            suite: "codebase".into(),
+            task_id: id.to_owned(),
+            measure: crate::core::bench::codebase::run::empty_measure(),
+            grade: None,
+            transport: crate::core::bench::store::Transport::Buffered,
+            codebase: Some(crate::core::bench::store::CodebaseRow {
+                tier,
+                file: "src/a.rs".into(),
+                line: 7,
+                label: "<mask>".into(),
+                gold: "let a = 1;".into(),
+                prediction: "let b = 2;".into(),
+                prefix: "fn f() {\n".into(),
+                suffix: "\n}\n".into(),
+                excluded: crate::core::bench::codebase::Excluded::default(),
+                symbols_score: Some(1.0),
+                unsupported: false,
+                arm: None,
+                extra: None,
+                also_first_uses: Vec::new(),
+                name: None,
+                n_predict: Some(64),
+                exec: None,
+            }),
+            judge: None,
+        }
+    }
+
+    /// A judge is never loaded to record nothing: a run with no answered
+    /// `function_body` crossing has nothing for it to be asked about.
+    #[test]
+    fn a_run_without_a_function_body_crossing_has_nothing_for_the_judge() {
+        use crate::core::bench::codebase::TaskTier;
+        let none = run_dir_with("in-file-only", &[TaskTier::InFile, TaskTier::InFile]);
+        assert_eq!(super::eligible_crossings(&[none]).expect("load"), 0);
+        let some = run_dir_with("one-body", &[TaskTier::InFile, TaskTier::FunctionBody]);
+        assert_eq!(super::eligible_crossings(&[some]).expect("load"), 1);
     }
 
     #[test]
