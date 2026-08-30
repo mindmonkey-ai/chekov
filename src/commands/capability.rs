@@ -132,6 +132,13 @@ pub struct BenchOpts {
     /// and wall-clock timeouts; not a sandbox.
     #[arg(long)]
     pub allow_exec: bool,
+    /// A registered `role = "judge"` model, loaded in its own phase after
+    /// every candidate is down, answering one position-swapped binary
+    /// question per `function_body` crossing (spec C). Refused before any
+    /// launch when it lacks the role, shares a family with a candidate, or
+    /// would have to stop a server bench did not start.
+    #[arg(long, requires = "codebase")]
+    pub judge: Option<String>,
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -773,6 +780,79 @@ fn resolve_candidates(
         .collect()
 }
 
+/// A judge is named on purpose: the role is the naming, and its absence is a
+/// refusal rather than a silently-ordinary model.
+fn role_check(eff: &crate::core::registry::Effective, name: &str) -> Result<(), ChekovError> {
+    if eff.entry.role == Some(crate::core::registry::ModelRole::Judge) {
+        return Ok(());
+    }
+    Err(ChekovError::JudgeNoRole {
+        name: name.to_owned(),
+    })
+}
+
+/// The judge phase loads after every candidate is down — which it cannot do
+/// while a server bench did not start holds the budget.
+fn server_check(
+    candidates: &[(
+        crate::core::registry::Effective,
+        crate::core::bench::lifecycle::StepAction,
+    )],
+) -> Result<(), ChekovError> {
+    use crate::core::bench::lifecycle::StepAction;
+    if candidates
+        .iter()
+        .any(|(_, action)| *action == StepAction::UseRunning)
+    {
+        return Err(ChekovError::JudgeNeedsTheServer);
+    }
+    Ok(())
+}
+
+/// `general.architecture` from a model's first shard — the family check
+/// cannot proceed without it, so a missing shard is the existing preflight
+/// refusal, not a guess.
+fn arch_of(ctx: &Ctx, eff: &crate::core::registry::Effective) -> Result<String, ChekovError> {
+    let path = crate::core::server::shard_path(&ctx.config, eff);
+    Ok(crate::core::gguf::read_geometry(&path)?.arch)
+}
+
+/// `--judge`, resolved before any launch: role, no foreign server to stop,
+/// no shared family — each a refusal that names its remedy.
+fn resolve_judge(
+    ctx: &Ctx,
+    args: &BenchArgs,
+    candidates: &[(
+        crate::core::registry::Effective,
+        crate::core::bench::lifecycle::StepAction,
+    )],
+) -> Result<Option<crate::core::bench::judge::JudgePlan>, ChekovError> {
+    use crate::core::bench::judge;
+    let Some(name) = args.judge else {
+        return Ok(None);
+    };
+    let eff = ctx.registry()?.effective(name)?;
+    role_check(&eff, name)?;
+    server_check(candidates)?;
+    let arch = arch_of(ctx, &eff)?;
+    let archs: Vec<(String, String)> = candidates
+        .iter()
+        .map(|(c, _)| Ok((c.name.clone(), arch_of(ctx, c)?)))
+        .collect::<Result<_, ChekovError>>()?;
+    if let Some(conflict) = judge::family_conflict((name, &arch), &archs) {
+        return Err(conflict);
+    }
+    let bench_cfg = &ctx.config.file.bench;
+    Ok(Some(judge::JudgePlan {
+        judge: eff,
+        arch,
+        rubric_hash: judge::rubric_hash(),
+        max_tokens: bench_cfg.judge_max_tokens,
+        min_consistency_pct: bench_cfg.judge_min_consistency_pct,
+        reasoning_effort: bench_cfg.judge_reasoning_effort,
+    }))
+}
+
 /// Wait for `/health` (watching the pid) then assert the loaded `/props`
 /// context; returns what the server actually loaded.
 fn ensure_ready(
@@ -802,6 +882,7 @@ struct BenchArgs<'a> {
     suite: Option<crate::core::bench::lifecycle::Suite>,
     codebase: Option<&'a std::path::Path>,
     allow_exec: bool,
+    judge: Option<&'a str>,
 }
 
 impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
@@ -815,6 +896,7 @@ impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
             suite: effective_suite(opts.suite, opts.codebase.is_some()),
             codebase: opts.codebase.as_deref(),
             allow_exec: opts.allow_exec,
+            judge: opts.judge.as_deref(),
         }
     }
 }
@@ -865,6 +947,12 @@ fn prepare_codebase(
 struct RunInputs<'a> {
     args: &'a BenchArgs<'a>,
     prepared: Option<&'a crate::core::bench::codebase::Prepared>,
+    /// The judge phase's plan, resolved before any launch — `None` without
+    /// `--judge`.
+    judge: Option<&'a crate::core::bench::judge::JudgePlan>,
+    /// How many candidates the judge will be asked about: every crossing is
+    /// judged once per candidate run.
+    candidates: usize,
 }
 
 /// `codebase: {n} tasks from {repo} @ {head[..12]} ({tier census})`, with what
@@ -915,22 +1003,43 @@ fn codebase_estimate_secs(
     u64::try_from(crossings).unwrap_or(0) * per_crossing
 }
 
-/// The plan's steps, one per candidate.
+/// The plan's steps, one per candidate — and the judge's own step last, the
+/// one load that happens after every candidate is down.
 fn bench_steps(
     ctx: &Ctx,
     candidates: &[(
         crate::core::registry::Effective,
         crate::core::bench::lifecycle::StepAction,
     )],
+    judge: Option<&crate::core::bench::judge::JudgePlan>,
 ) -> Vec<crate::core::bench::lifecycle::BenchStep> {
-    candidates
+    use crate::core::bench::lifecycle::{BenchStep, StepAction};
+    let mut steps: Vec<BenchStep> = candidates
         .iter()
-        .map(|(eff, action)| crate::core::bench::lifecycle::BenchStep {
+        .map(|(eff, action)| BenchStep {
             model: eff.name.clone(),
             action: *action,
             weights_bytes: weights_on_disk(ctx, &eff.entry),
         })
-        .collect()
+        .collect();
+    if let Some(plan) = judge {
+        steps.push(BenchStep {
+            model: plan.judge.name.clone(),
+            action: StepAction::Judge,
+            weights_bytes: weights_on_disk(ctx, &plan.judge.entry),
+        });
+    }
+    steps
+}
+
+/// Every `function_body` crossing of every candidate run — what the judge
+/// phase will be asked, and zero when `--judge` was not given.
+fn judge_crossings(inputs: &RunInputs) -> u64 {
+    let (Some(_), Some(prepared)) = (inputs.judge, inputs.prepared) else {
+        return 0;
+    };
+    u64::try_from(prepared.counts.function_body).unwrap_or(0)
+        * u64::try_from(inputs.candidates).unwrap_or(0)
 }
 
 /// The wall-clock estimate: the sweep, the agentic crossings, and the
@@ -946,11 +1055,12 @@ fn bench_estimate(
         .map_or(0, |p| codebase_estimate_secs(p, inputs.args.allow_exec));
     Ok(lifecycle::estimate_secs(steps, plan)
         + agentic_estimate_secs(inputs.args.suite)?
-        + codebase_secs)
+        + codebase_secs
+        + lifecycle::judge_estimate_secs(judge_crossings(inputs)))
 }
 
-/// The dry-run plan: the codebase line (when prepared) ahead of the step
-/// table.
+/// The dry-run plan: the codebase line (when prepared) and the judge's own
+/// line ahead of the step table.
 fn render_dry_run(
     steps: &[crate::core::bench::lifecycle::BenchStep],
     estimate: u64,
@@ -961,40 +1071,74 @@ fn render_dry_run(
     if let (Some(p), Some(repo)) = (inputs.prepared, inputs.args.codebase) {
         out.push_str(&codebase_plan_line(p, repo, inputs.args.allow_exec));
     }
+    if inputs.judge.is_some() {
+        out.push_str(&judge_plan_line(judge_crossings(inputs)));
+    }
     out.push_str(&render_plan(steps, estimate));
     out
 }
 
+/// What the judge phase adds to the plan: two orders a crossing, at the
+/// measured seconds a verdict.
+fn judge_plan_line(crossings: u64) -> String {
+    use crate::core::bench::lifecycle::JUDGE_SECS_PER_VERDICT;
+    format!("+ judge: 2 orders × {crossings} verdicts, ~{JUDGE_SECS_PER_VERDICT} s each\n")
+}
+
 fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
-    use crate::core::bench::{lifecycle, sweep};
+    use crate::core::bench::sweep;
     // The user's own repository is asked about first: a dirty tree is refused
     // before a single question about servers or models is asked.
     let prepared = prepare_codebase(ctx, args)?;
     let candidates = resolve_candidates(ctx, args)?;
+    let judge = resolve_judge(ctx, args, &candidates)?;
     let inputs = RunInputs {
         args,
         prepared: prepared.as_ref(),
+        judge: judge.as_ref(),
+        candidates: candidates.len(),
     };
     let plan: sweep::SweepPlan = (&ctx.config.file.bench).into();
-    let steps = bench_steps(ctx, &candidates);
+    let steps = bench_steps(ctx, &candidates, judge.as_ref());
     let estimate = bench_estimate(&steps, &plan, &inputs)?;
     if args.dry_run {
         print!("{}", render_dry_run(&steps, estimate, &inputs));
         return finish_codebase(prepared).map(|()| ExitCode::SUCCESS);
     }
-    if lifecycle::needs_confirm(&steps) {
-        super::confirm(
-            &format!(
-                "bench {} candidate(s) with launch + teardown, ~{} min estimated",
-                steps.len(),
-                estimate.div_ceil(60)
-            ),
-            args.yes,
-        )?;
-    }
-    let outcome = run_candidates(ctx, &candidates, &inputs);
+    confirm_launches(&steps, estimate, args.yes)?;
+    let outcome = run_candidates(ctx, &candidates, &inputs)
+        .and_then(|dirs| judge_phase(ctx, &dirs, judge.as_ref()));
     finish_codebase(prepared)?;
-    outcome
+    outcome.map(|()| ExitCode::SUCCESS)
+}
+
+/// The gate any launch step asks for — a model load and a teardown are real
+/// side effects, and a pure reuse run stays gate-free.
+fn confirm_launches(
+    steps: &[crate::core::bench::lifecycle::BenchStep],
+    estimate: u64,
+    yes: bool,
+) -> Result<(), ChekovError> {
+    if !crate::core::bench::lifecycle::needs_confirm(steps) {
+        return Ok(());
+    }
+    super::confirm(
+        &format!(
+            "bench {} candidate(s) with launch + teardown, ~{} min estimated",
+            steps.len(),
+            estimate.div_ceil(60)
+        ),
+        yes,
+    )
+}
+
+/// The judge phase, or nothing to do — `--judge` was not given.
+fn judge_phase(
+    ctx: &Ctx,
+    runs: &[std::path::PathBuf],
+    judge: Option<&crate::core::bench::judge::JudgePlan>,
+) -> Result<(), ChekovError> {
+    judge.map_or(Ok(()), |plan| run_judge_phase(ctx, runs, plan))
 }
 
 /// Every candidate, each one's run directory printed as it lands.
@@ -1005,12 +1149,14 @@ fn run_candidates(
         crate::core::bench::lifecycle::StepAction,
     )],
     inputs: &RunInputs,
-) -> Result<ExitCode, ChekovError> {
+) -> Result<Vec<std::path::PathBuf>, ChekovError> {
+    let mut dirs = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let dir = run_candidate(ctx, candidate, inputs)?;
         println!("run: {}", dir.display());
+        dirs.push(dir);
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(dirs)
 }
 
 /// The worktree and the scratch target directory, removed with the run.
@@ -1050,7 +1196,7 @@ fn run_candidate(
         pid,
     };
     let dir = measure_candidate(ctx, &setup, inputs)?;
-    if *action == StepAction::Launch {
+    if matches!(action, StepAction::Launch | StepAction::Judge) {
         teardown_candidate(ctx, pid)?;
     }
     Ok(dir)
@@ -1074,6 +1220,9 @@ fn head_inputs<'a>(
             allow_exec: p.exec.allowed(),
             cargo_version: p.exec.cargo_version(),
         }),
+        judge: inputs
+            .judge
+            .map(crate::core::bench::judge::JudgePlan::stamp),
     }
 }
 
@@ -1161,6 +1310,186 @@ fn teardown_candidate(ctx: &Ctx, pid: i32) -> Result<(), ChekovError> {
         lifecycle::wait_budget_released(policy, &mut || machine::live_gpu_free(&cfg.engine_dir()))?;
     eprintln!("chekov bench: budget released ({free} MiB free)");
     Ok(())
+}
+
+/// Launch the judge once, judge every run directory, tear it down (spec C §3).
+fn run_judge_phase(
+    ctx: &Ctx,
+    runs: &[std::path::PathBuf],
+    plan: &crate::core::bench::judge::JudgePlan,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::runner;
+    use crate::core::bench::store::{RunLog, render_codebase};
+    use crate::core::proxy::claude::ClaudeFacade;
+    use crate::core::proxy::serve::Upstream;
+    let pid = launch_candidate(ctx, &plan.judge)?;
+    let upstream = Upstream {
+        base_url: ctx.config.base_url(),
+        api_key: ctx.config.file.server.api_key.clone(),
+    };
+    let ready = ensure_ready(
+        ctx,
+        &upstream,
+        &BenchSetup {
+            eff: plan.judge.clone(),
+            pid,
+        },
+    );
+    let facade = ClaudeFacade::new(&plan.judge.name);
+    let wire = runner::ProbeWire {
+        http: ctx.http.as_ref(),
+        facade: &facade,
+        upstream: &upstream,
+        pins: runner::SamplingPins {
+            seed: ctx.config.file.bench.seed,
+        },
+    };
+    let outcome = ready.and_then(|_| {
+        runs.iter().try_for_each(|dir| {
+            let verdicts = judge_run(&wire, dir, plan)?;
+            eprintln!(
+                "chekov bench: judge '{}' — {verdicts} verdict(s) for {}",
+                plan.judge.name,
+                dir.display()
+            );
+            print!("{}", render_codebase(&RunLog::load(dir)?));
+            Ok::<(), ChekovError>(())
+        })
+    });
+    teardown_candidate(ctx, pid)?;
+    outcome
+}
+
+/// Every eligible `function_body` crossing of one run, appended as it lands.
+fn judge_run(
+    wire: &crate::core::bench::runner::ProbeWire,
+    dir: &std::path::Path,
+    plan: &crate::core::bench::judge::JudgePlan,
+) -> Result<usize, ChekovError> {
+    use crate::core::bench::store::{self, RunLog, RunWriter, TaskKey};
+    let log = RunLog::load(dir)?;
+    let eval = dir.parent().ok_or_else(|| ChekovError::BenchRunInvalid {
+        path: dir.to_path_buf(),
+        reason: "no parent directory".into(),
+    })?;
+    let run_id = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let (mut writer, _) = RunWriter::resume(eval, run_id, &log.head)?;
+    let mut count = 0;
+    for row in log
+        .rows
+        .iter()
+        .filter(|r| r.suite == "codebase" && !store::is_unavailable(r))
+    {
+        if log.is_done(&TaskKey::buffered(store::JUDGE_SUITE, &row.task_id)) {
+            continue;
+        }
+        let Some(codebase) = row.codebase.as_ref() else {
+            continue;
+        };
+        let Some(judge_row) = verdict_for(wire, codebase, plan)? else {
+            continue;
+        };
+        writer.append(store::Task {
+            suite: store::JUDGE_SUITE.into(),
+            task_id: row.task_id.clone(),
+            measure: crate::core::bench::codebase::run::empty_measure(),
+            grade: None,
+            transport: store::Transport::Buffered,
+            codebase: None,
+            judge: Some(judge_row),
+        })?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// One crossing's judge row, or `None` when the row is not a judge row at all.
+fn verdict_for(
+    wire: &crate::core::bench::runner::ProbeWire,
+    row: &crate::core::bench::store::CodebaseRow,
+    plan: &crate::core::bench::judge::JudgePlan,
+) -> Result<Option<crate::core::bench::store::JudgeRow>, ChekovError> {
+    use crate::core::bench::judge::{self, Eligibility};
+    use crate::core::bench::store::{DecidedBy, JudgeRow};
+    let settled = |equivalent, decided_by, skipped| JudgeRow {
+        equivalent,
+        gold_first: None,
+        prediction_first: None,
+        decided_by,
+        skipped,
+        judge_secs: 0.0,
+    };
+    let pair = match judge::eligibility(row) {
+        None => return Ok(None),
+        Some(Eligibility::Identical) => {
+            return Ok(Some(settled(Some(true), DecidedBy::Identical, None)));
+        }
+        Some(Eligibility::Skipped(reason)) => {
+            return Ok(Some(settled(
+                None,
+                DecidedBy::Skipped,
+                Some(reason.to_owned()),
+            )));
+        }
+        Some(Eligibility::Judge(pair)) => pair,
+    };
+    let schema = judge::schema();
+    let ask = JudgeAsk {
+        wire,
+        forced: plan.forced(&schema),
+        max_tokens: plan.max_tokens,
+    };
+    judged_verdict(&ask, &pair).map(Some)
+}
+
+/// A crossing nobody has decided: both orders asked, and what they settle to.
+/// `judge_secs` is one order's share of the pair.
+fn judged_verdict(
+    ask: &JudgeAsk,
+    pair: &crate::core::bench::judge::Pair,
+) -> Result<crate::core::bench::store::JudgeRow, ChekovError> {
+    use crate::core::bench::judge::{Reply, combine, requests};
+    use crate::core::bench::store::JudgeRow;
+    let [first, second] = requests(pair, ask.max_tokens);
+    let started = std::time::Instant::now();
+    let (gold_first, prediction_first) = (ask_judge(ask, &first)?, ask_judge(ask, &second)?);
+    let verdict = combine(&gold_first, &prediction_first);
+    let answer = |r: &Reply| match r {
+        Reply::Answer(b) => Some(*b),
+        Reply::Skipped(_) => None,
+    };
+    Ok(JudgeRow {
+        equivalent: verdict.equivalent,
+        gold_first: answer(&gold_first),
+        prediction_first: answer(&prediction_first),
+        decided_by: verdict.decided_by,
+        skipped: verdict.skipped,
+        judge_secs: started.elapsed().as_secs_f64() / 2.0,
+    })
+}
+
+/// One judge request's wire and what it forces, bundled (§4).
+struct JudgeAsk<'a> {
+    wire: &'a crate::core::bench::runner::ProbeWire<'a>,
+    forced: crate::core::bench::runner::Forced<'a>,
+    max_tokens: u32,
+}
+
+/// One order's reply. A judge server that answers a non-2xx is up and
+/// reachable: its refusal skips THIS crossing (spec C §7) and the phase goes
+/// on. Every other error stops the phase with the rows so far intact.
+fn ask_judge(
+    ask: &JudgeAsk,
+    req: &crate::core::proxy::http::HttpRequest,
+) -> Result<crate::core::bench::judge::Reply, ChekovError> {
+    use crate::core::bench::judge::{Reply, parse_reply};
+    match crate::core::bench::runner::cross_forced_with(ask.wire, req, &ask.forced) {
+        Ok(artifact) => Ok(parse_reply(&artifact.anthropic_body, ask.max_tokens)),
+        Err(refused @ ChekovError::UpstreamRefused { .. }) => {
+            Ok(Reply::Skipped(format!("judge refused: {refused}")))
+        }
+        Err(other) => Err(other),
+    }
 }
 
 /// What the suites need beyond the sink and `Ctx` (§4).
@@ -1453,9 +1782,12 @@ fn open_run(
     head: &crate::core::bench::store::RunHead,
     resume: Option<&str>,
 ) -> Result<(crate::core::bench::store::RunWriter, Vec<Done>), ChekovError> {
-    use crate::core::bench::store::RunWriter;
+    use crate::core::bench::store::{self, RunWriter};
     let eval = ctx.config.eval_dir();
     if let Some(run_id) = resume {
+        // A run recorded before it had a judge takes this one; a run that
+        // already names a different judge is left for `resume` to refuse.
+        store::adopt_judge(&eval.join(run_id), head.stamp.judge.as_ref())?;
         let (writer, log) = RunWriter::resume(&eval, run_id, head)?;
         let done = log
             .rows
@@ -1598,6 +1930,9 @@ struct HeadInputs<'a> {
     /// The codebase run, when there is one — drives `corpus_id` ahead of
     /// `suite`/`fixture`, and the three exec fields.
     codebase: Option<CodebaseHead<'a>>,
+    /// The judge this run's `equiv` column will be measured with, when
+    /// `--judge` was given — the instrument, its budget and its floor.
+    judge: Option<crate::core::bench::stamp::JudgeStamp>,
 }
 
 impl HeadInputs<'_> {
@@ -1702,7 +2037,7 @@ fn assemble_stamp(
         chekov_version: env!("CARGO_PKG_VERSION").to_owned(),
         prompt_set_hash: parts.prompt_set_hash,
         corpus_id: parts.corpus_id,
-        judge: None,
+        judge: inputs.judge.clone(),
     }
 }
 
@@ -2132,6 +2467,7 @@ mod tests {
                 allow_exec: false,
                 cargo_version: None,
             }),
+            judge: None,
         };
         assert!(!off.allow_exec());
         assert_eq!(off.cargo_version(), None);
