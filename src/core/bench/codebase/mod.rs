@@ -99,6 +99,24 @@ pub struct Counts {
     pub cross_file_first: usize,
 }
 
+/// `12 in_file, 6 function_body, 6 cross_file_first × 2 arms`.
+///
+/// The tier census the dry-run line and the report header both print, from
+/// one place so the two cannot drift. `× 2 arms` is dropped when no
+/// cross-file task was sampled: there is no second arm to announce.
+#[must_use]
+pub fn tier_counts_clause(counts: Counts) -> String {
+    let arms = if counts.cross_file_first == 0 {
+        ""
+    } else {
+        " × 2 arms"
+    };
+    format!(
+        "{} in_file, {} function_body, {} cross_file_first{arms}",
+        counts.in_file, counts.function_body, counts.cross_file_first
+    )
+}
+
 /// Everything one `--codebase` run needs, sampled once before launch — the
 /// worktree is gone by the time this returns.
 pub struct Prepared {

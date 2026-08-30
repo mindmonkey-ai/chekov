@@ -44,7 +44,7 @@ pub enum Score {
     Skipped(&'static str),
 }
 
-const EXEC_SKIPPED: &str = "slice B (--allow-exec)";
+const EXEC_SKIPPED: &str = "slice B2 (--allow-exec)";
 const BODY_SKIPPED: &str = "function_body: tiers 1-2 punish valid alternatives";
 const SYMBOLS_AT_RUN_TIME: &str = "symbols: needs the worktree, scored at run time";
 

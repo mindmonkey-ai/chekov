@@ -602,14 +602,15 @@ fn distinct_files(rows: &[&TaskRow]) -> usize {
         .len()
 }
 
-/// The codebase block: counts and labels, then one line per tier group
-/// with the mean of every tier that has a value.
+/// The codebase block: counts and labels, then one line per tier group —
+/// two of them for `cross_file_first`, one per arm — and the lift between
+/// the arms.
 ///
 /// The header says `engine window ≤ n_batch` because llama.cpp's `/infill`
-/// caps the prefix at ~¾·`n_batch` tokens and the suffix at ~¼·`n_batch`:
-/// chekov sends the whole file and grades over the whole file, but a long
-/// file reaches the model only in part. Truncating here instead would make
-/// the tiers score a different question than the one the spec asks.
+/// caps the prefix at ~¾·`n_batch` tokens and the suffix at ~¼·`n_batch`;
+/// `extra from ctx` because the extra chunk is bounded by the context, not
+/// by the batch. chekov sends whole files and grades over whole files, but a
+/// long file reaches the model only in part.
 #[must_use]
 pub fn render_codebase(log: &RunLog) -> String {
     let rows: Vec<&TaskRow> = rows_of(log, "codebase")
@@ -622,27 +623,87 @@ pub fn render_codebase(log: &RunLog) -> String {
     if kept.is_empty() {
         return codebase_na_line(&rows);
     }
-    let count = |tier: TaskTier| {
-        kept.iter()
-            .filter(|r| r.codebase.as_ref().is_some_and(|c| c.tier == tier))
-            .count()
-    };
-    let mut out = format!(
-        "codebase     {} tasks from {} files ({} in_file, {} function_body) — {}; \
-         context: same-file (engine window ≤ n_batch){}{}\n",
-        kept.len(),
-        distinct_files(&kept),
-        count(TaskTier::InFile),
-        count(TaskTier::FunctionBody),
-        crate::core::bench::codebase::MASK_LABEL,
-        elided_note(&kept),
-        excluded_note(excluded),
-    );
-    for tier in [TaskTier::InFile, TaskTier::FunctionBody] {
-        out.push_str(&tier_line(&kept, tier));
-    }
-    out.push_str("             tiers 6-7 skipped: slice B (--allow-exec)\n");
+    let mut out = codebase_header(&kept, excluded);
+    out.push_str(&scores_line(
+        "in_file",
+        &group(&kept, TaskTier::InFile, None),
+    ));
+    out.push_str(&scores_line(
+        "function_body",
+        &group(&kept, TaskTier::FunctionBody, None),
+    ));
+    out.push_str(&cross_lines(&kept));
+    out.push_str("             tiers 6-7 skipped: slice B2 (--allow-exec)\n");
     out
+}
+
+fn codebase_header(kept: &[&TaskRow], excluded: usize) -> String {
+    let counts = crate::core::bench::codebase::Counts {
+        in_file: tier_tasks(kept, TaskTier::InFile),
+        function_body: tier_tasks(kept, TaskTier::FunctionBody),
+        cross_file_first: tier_tasks(kept, TaskTier::CrossFileFirst),
+    };
+    format!(
+        "codebase     {} tasks, {} crossings, from {} files ({}) — {}; context: same-file, \
+         plus the defining file for cross_file_first (engine window ≤ n_batch; extra from \
+         ctx){}{}\n",
+        distinct_tasks(kept),
+        kept.len(),
+        distinct_files(kept),
+        crate::core::bench::codebase::tier_counts_clause(counts),
+        crate::core::bench::codebase::MASK_LABEL,
+        elided_note(kept),
+        excluded_note(excluded),
+    )
+}
+
+/// The cross-file tier's two arm lines and the lift — or, when no cross-file
+/// task was sampled, one line saying that rather than three empty ones.
+fn cross_lines(kept: &[&TaskRow]) -> String {
+    use crate::core::bench::codebase::run::{NO_EXTRA, WITH_EXTRA};
+    let without = group(kept, TaskTier::CrossFileFirst, Some(NO_EXTRA));
+    if without.is_empty() {
+        return "             cross_file_first        none sampled — no unambiguous \
+                cross-file first use in this repository\n"
+            .to_owned();
+    }
+    let with = group(kept, TaskTier::CrossFileFirst, Some(WITH_EXTRA));
+    format!(
+        "{}{}{}",
+        scores_line("cross_file_first", &without),
+        scores_line("cross_file_first+extra", &with),
+        lift_line(kept)
+    )
+}
+
+/// A cross-file task's id without its arm suffix — the two arms are one task.
+fn base_id(task_id: &str) -> &str {
+    task_id.strip_suffix("+extra").unwrap_or(task_id)
+}
+
+/// Distinct tasks behind these rows: the header counts tasks, the crossings
+/// count is `rows.len()`.
+fn distinct_tasks(rows: &[&TaskRow]) -> usize {
+    rows.iter()
+        .map(|r| base_id(&r.task_id))
+        .collect::<std::collections::BTreeSet<&str>>()
+        .len()
+}
+
+fn tier_tasks(rows: &[&TaskRow], tier: TaskTier) -> usize {
+    rows.iter()
+        .filter(|r| r.codebase.as_ref().is_some_and(|c| c.tier == tier))
+        .map(|r| base_id(&r.task_id))
+        .collect::<std::collections::BTreeSet<&str>>()
+        .len()
+}
+
+/// One tier's rows, optionally restricted to one arm.
+fn group<'a>(rows: &[&'a TaskRow], tier: TaskTier, arm: Option<&str>) -> Vec<&'a CodebaseRow> {
+    rows.iter()
+        .filter_map(|r| r.codebase.as_ref())
+        .filter(|c| c.tier == tier && arm.is_none_or(|a| c.arm.as_deref() == Some(a)))
+        .collect()
 }
 
 /// The whole-suite N/A line, which only a run where NOTHING was answered
@@ -664,27 +725,126 @@ fn codebase_na_line(rows: &[&TaskRow]) -> String {
     }
 }
 
-fn tier_line(rows: &[&TaskRow], tier: TaskTier) -> String {
-    let group: Vec<&CodebaseRow> = rows
-        .iter()
-        .filter_map(|r| r.codebase.as_ref())
-        .filter(|c| c.tier == tier)
-        .collect();
+/// One line of tier means for a group, at the 24-wide label column every
+/// line of the block shares.
+fn scores_line(label: &str, group: &[&CodebaseRow]) -> String {
     if group.is_empty() {
         return String::new();
     }
     let mut cells = Vec::new();
     for t in [Tier::Exact, Tier::EditSim, Tier::IdentF1, Tier::Parse] {
-        if let Some(mean) = tier_mean(&group, t) {
+        if let Some(mean) = tier_mean(group, t) {
             cells.push(format!("{} {mean:.2}", t.label()));
         }
     }
-    cells.push(symbols_cell(&group));
+    cells.push(symbols_cell(group));
     format!(
-        "             {:<14} {}   (n={})\n",
-        tier.label(),
+        "             {label:<24}{}   (n={})\n",
         cells.join("   "),
         group.len()
+    )
+}
+
+/// The per-tier difference of arm means over the tasks measured in BOTH arms.
+///
+/// A task unavailable in either arm never reaches `kept`, so it is excluded
+/// here by construction — a difference against a missing arm is not a
+/// measurement, and would read as a lift of exactly the arm that answered.
+fn lift_line(kept: &[&TaskRow]) -> String {
+    let pairs = arm_pairs(kept);
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let mut cells = Vec::new();
+    for t in [Tier::Exact, Tier::EditSim, Tier::IdentF1, Tier::Parse] {
+        if let Some(delta) = tier_delta(&pairs, t) {
+            cells.push(format!("{} {delta:+.2}", t.label()));
+        }
+    }
+    if let Some(delta) = symbols_delta(&pairs) {
+        cells.push(format!("symbols {delta:+.2}"));
+    }
+    format!(
+        "             {:<24}{}   ({})\n",
+        "context lift",
+        cells.join("  "),
+        lift_note(kept, &pairs)
+    )
+}
+
+/// `(no_extra, extra)` for every cross-file task measured in both arms.
+fn arm_pairs<'a>(kept: &[&'a TaskRow]) -> Vec<(&'a CodebaseRow, &'a CodebaseRow)> {
+    use crate::core::bench::codebase::run::{NO_EXTRA, WITH_EXTRA};
+    let with = arm_map(kept, WITH_EXTRA);
+    arm_map(kept, NO_EXTRA)
+        .into_iter()
+        .filter_map(|(id, without)| with.get(id).map(|w| (without, *w)))
+        .collect()
+}
+
+/// The cross-file rows of one arm, keyed by the task they belong to.
+fn arm_map<'a>(
+    kept: &[&'a TaskRow],
+    arm: &str,
+) -> std::collections::BTreeMap<&'a str, &'a CodebaseRow> {
+    kept.iter()
+        .filter_map(|r| Some((base_id(&r.task_id), r.codebase.as_ref()?)))
+        .filter(|(_, c)| c.tier == TaskTier::CrossFileFirst && c.arm.as_deref() == Some(arm))
+        .collect()
+}
+
+/// The mean of `with − without` for the tiers recomputed from stored text.
+fn tier_delta(pairs: &[(&CodebaseRow, &CodebaseRow)], tier: Tier) -> Option<f64> {
+    let deltas: Vec<f64> = pairs
+        .iter()
+        .filter_map(|(a, b)| match (recompute(a, tier), recompute(b, tier)) {
+            (Score::Value(x), Score::Value(y)) => Some(y - x),
+            _ => None,
+        })
+        .collect();
+    if deltas.is_empty() {
+        return None;
+    }
+    Some(deltas.iter().sum::<f64>() / as_f64(deltas.len()))
+}
+
+/// Tier 5's lift, from the scores stored at run time on both arms.
+fn symbols_delta(pairs: &[(&CodebaseRow, &CodebaseRow)]) -> Option<f64> {
+    let deltas: Vec<f64> = pairs
+        .iter()
+        .filter_map(|(a, b)| Some(b.symbols_score? - a.symbols_score?))
+        .collect();
+    if deltas.is_empty() {
+        return None;
+    }
+    Some(deltas.iter().sum::<f64>() / as_f64(deltas.len()))
+}
+
+/// `6 files sent, 41.2 KiB, 1 truncated; 2 withheld`, prefixed `n=k of N; `
+/// when a task was measured on one arm only — the lift never runs quietly
+/// over fewer tasks than the tier has.
+fn lift_note(kept: &[&TaskRow], pairs: &[(&CodebaseRow, &CodebaseRow)]) -> String {
+    let total = tier_tasks(kept, TaskTier::CrossFileFirst);
+    let sent: Vec<&crate::core::bench::codebase::ExtraFile> =
+        pairs.iter().filter_map(|(_, b)| b.extra.as_ref()).collect();
+    let bytes: usize = sent
+        .iter()
+        .map(|e| usize::try_from(e.bytes).unwrap_or(0))
+        .sum();
+    let truncated = sent.iter().filter(|e| e.truncated).count();
+    let withheld: u32 = pairs
+        .iter()
+        .map(|(_, b)| b.excluded.cross_file_withheld)
+        .sum();
+    let scope = if pairs.len() == total {
+        String::new()
+    } else {
+        format!("n={} of {total}; ", pairs.len())
+    };
+    format!(
+        "{scope}{} files sent, {:.1} KiB, {truncated} truncated; {withheld} withheld",
+        sent.len(),
+        as_f64(bytes) / 1024.0,
     )
 }
 
@@ -890,7 +1050,7 @@ mod tests {
         CodebaseRow, GradeRow, Measure, RunHead, RunLog, RunWriter, Task, TaskRow, Transport,
         render_run,
     };
-    use crate::core::bench::codebase::{Excluded, TaskTier};
+    use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
     use crate::core::bench::stamp::Stamp;
     use crate::error::ChekovError;
 
@@ -1361,6 +1521,35 @@ mod tests {
         task
     }
 
+    /// One arm of a cross-file task: same span, same gold, different context
+    /// and so a different prediction.
+    fn cross_arm(id: &str, arm: &str, prediction: &str) -> Task {
+        let mut task = codebase_task(CodebaseFixture {
+            id,
+            tier: TaskTier::InFile,
+            gold: "let a = build(1);",
+            prediction,
+        });
+        task.task_id = id.into();
+        if let Some(row) = task.codebase.as_mut() {
+            row.tier = TaskTier::CrossFileFirst;
+            row.arm = Some(arm.into());
+            row.also_first_uses = vec!["Widget".into()];
+            row.symbols_score = Some(if arm == "extra" { 1.0 } else { 0.5 });
+            if arm == "extra" {
+                row.extra = Some(ExtraFile {
+                    path: "src/defs.rs".into(),
+                    bytes: 2048,
+                    truncated: false,
+                });
+                row.excluded.cross_file =
+                    "sent src/defs.rs (2.0 KiB); withheld 2 (contain the answer)".into();
+                row.excluded.cross_file_withheld = 2;
+            }
+        }
+        task
+    }
+
     /// A codebase row nobody could answer: unavailable, with no tier-5 score
     /// and the crossing's own verdict on whether the model can infill at all.
     fn unavailable_codebase_task(id: &str, reason: &str, unsupported: bool) -> Task {
@@ -1391,6 +1580,114 @@ mod tests {
         assert_eq!(codebase.extra, None);
         assert!(codebase.also_first_uses.is_empty());
         assert_eq!(codebase.excluded.cross_file_withheld, 0);
+        assert_eq!(codebase.excluded.cfg_test_lines, 0);
+    }
+
+    #[test]
+    fn the_block_reports_both_arms_and_the_lift_between_them() {
+        let eval = scratch("codebase-arms");
+        let mut writer = RunWriter::create(&eval, "r20-model", &head()).expect("create");
+        for task in codebase_fixtures().into_iter().take(2).map(codebase_task) {
+            writer.append(task).expect("append");
+        }
+        for (id, arm, prediction) in [
+            (
+                "cross_file_first-abc123-L4",
+                "no_extra",
+                "let a = guess(1);",
+            ),
+            (
+                "cross_file_first-abc123-L4+extra",
+                "extra",
+                "let a = build(1);",
+            ),
+        ] {
+            writer
+                .append(cross_arm(id, arm, prediction))
+                .expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        for line in [
+            "codebase     3 tasks, 4 crossings, from 1 files (2 in_file, 0 function_body, \
+             1 cross_file_first × 2 arms) — boundary-scanned (not AST); context: same-file, \
+             plus the defining file for cross_file_first (engine window ≤ n_batch; extra from ctx)",
+            "             cross_file_first        exact 0.00",
+            "             cross_file_first+extra  exact 1.00",
+            "             context lift            exact +1.00",
+            "(1 files sent, 2.0 KiB, 0 truncated; 2 withheld)",
+            "             tiers 6-7 skipped: slice B2 (--allow-exec)",
+        ] {
+            assert!(rendered.contains(line), "{line}\n---\n{rendered}");
+        }
+        assert!(
+            rendered.contains("symbols +0.50"),
+            "tier 5's lift comes from the stored scores: {rendered}"
+        );
+    }
+
+    /// A cross-file task answered on only one arm cannot contribute a
+    /// difference, so it leaves the lift — and the line says so.
+    #[test]
+    fn a_task_measured_on_one_arm_only_is_excluded_from_the_lift() {
+        let eval = scratch("codebase-half-arm");
+        let mut writer = RunWriter::create(&eval, "r21-model", &head()).expect("create");
+        for (id, arm, prediction) in [
+            (
+                "cross_file_first-abc123-L4",
+                "no_extra",
+                "let a = guess(1);",
+            ),
+            (
+                "cross_file_first-abc123-L4+extra",
+                "extra",
+                "let a = build(1);",
+            ),
+            (
+                "cross_file_first-abc123-L9",
+                "no_extra",
+                "let a = guess(2);",
+            ),
+        ] {
+            writer
+                .append(cross_arm(id, arm, prediction))
+                .expect("append");
+        }
+        writer
+            .append(unavailable_codebase_task(
+                "cross_file_first-abc123-L9+extra",
+                "the server stopped answering",
+                false,
+            ))
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("(n=1 of 2; 1 files sent, 2.0 KiB, 0 truncated; 2 withheld)"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("(1 unavailable, excluded)"), "{rendered}");
+    }
+
+    #[test]
+    fn a_run_without_cross_file_tasks_says_so_instead_of_printing_three_empty_lines() {
+        let eval = scratch("codebase-no-cross");
+        let mut writer = RunWriter::create(&eval, "r22-model", &head()).expect("create");
+        for task in codebase_fixtures().map(codebase_task) {
+            writer.append(task).expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("(2 in_file, 1 function_body, 0 cross_file_first)"),
+            "no arms to announce when there are no cross tasks: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "             cross_file_first        none sampled — no unambiguous \
+                 cross-file first use in this repository"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("context lift"), "{rendered}");
+        assert!(!rendered.contains("cross_file_first+extra"), "{rendered}");
     }
 
     #[test]
@@ -1407,12 +1704,13 @@ mod tests {
         );
         let rendered = render_run(&log);
         let expected = [
-            "codebase     3 tasks from 1 files (2 in_file, 1 function_body) — \
-             boundary-scanned (not AST); context: same-file (engine window ≤ n_batch)",
-            "in_file        exact 0.50   edit_sim",
+            "codebase     3 tasks, 3 crossings, from 1 files (2 in_file, 1 function_body, \
+             0 cross_file_first) — boundary-scanned (not AST); context: same-file, plus the \
+             defining file for cross_file_first (engine window ≤ n_batch; extra from ctx)",
+            "in_file                 exact 0.50   edit_sim",
             "symbols 1.00 (scored at run time)   (n=2)",
-            "function_body  ident_f1",
-            "tiers 6-7 skipped: slice B (--allow-exec)",
+            "function_body           ident_f1",
+            "tiers 6-7 skipped: slice B2 (--allow-exec)",
         ];
         for line in expected {
             assert!(rendered.contains(line), "{rendered}");
@@ -1441,7 +1739,7 @@ mod tests {
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
             rendered.contains(
-                "context: same-file (engine window ≤ n_batch); tests elided: 21 lines in 2 files"
+                "(engine window ≤ n_batch; extra from ctx); tests elided: 21 lines in 2 files"
             ),
             "{rendered}"
         );
@@ -1463,11 +1761,15 @@ mod tests {
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
-            rendered.contains("codebase     2 tasks from 1 files (2 in_file, 0 function_body)"),
+            rendered.contains(
+                "codebase     2 tasks, 2 crossings, from 1 files (2 in_file, 0 function_body, \
+                 0 cross_file_first)"
+            ),
             "{rendered}"
         );
         assert!(
-            rendered.contains("(engine window ≤ n_batch) (1 unavailable, excluded)"),
+            rendered
+                .contains("(engine window ≤ n_batch; extra from ctx) (1 unavailable, excluded)"),
             "{rendered}"
         );
         assert!(
