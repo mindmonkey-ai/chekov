@@ -17,7 +17,7 @@ pub struct Summary {
 }
 
 /// The verdict when two configurations are compared.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Comparison {
     /// Distinguishable: the first is faster.
     Faster,

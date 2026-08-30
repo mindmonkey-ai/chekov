@@ -4,7 +4,9 @@
 //! run order, listing the launch-flag values each stage tries, and rewriting
 //! a launch argv to carry one candidate value under either flag spelling.
 
+use crate::core::bench::sweep::DepthResult;
 use crate::core::config::TuneSection;
+use crate::core::stats::{Comparison, Summary, compare};
 use crate::error::ChekovError;
 
 /// llama-server's default `--batch-size` when the flag is absent, per
@@ -211,6 +213,190 @@ pub fn stages(requested: Option<&[String]>) -> Result<Vec<Stage>, ChekovError> {
         .collect())
 }
 
+/// One depth's measurement, promoted out of a raw `DepthResult` once it has
+/// enough samples to be judged (spec §5).
+pub struct Measured {
+    pub decode: Summary,
+    pub prefill: Summary,
+    pub prompt_n: u64,
+}
+
+impl Measured {
+    const fn by_metric(&self, metric: Metric) -> &Summary {
+        match metric {
+            Metric::Decode => &self.decode,
+            Metric::Prefill => &self.prefill,
+        }
+    }
+}
+
+/// What a depth's raw result becomes once classified (spec §5).
+pub enum Outcome {
+    Measured(Measured),
+    Degenerate(String),
+    Skipped(String),
+}
+
+/// A trial too thin to trust: too few samples to summarise after the warmup
+/// drop, or a prompt that never reached half the requested depth (spec §5).
+#[must_use]
+pub fn classify(result: &DepthResult, depth: u32) -> Outcome {
+    let (Some(decode), Some(prefill)) = (&result.decode, &result.prefill) else {
+        return Outcome::Degenerate("fewer than 2 samples after the warmup drop".into());
+    };
+    if result.prompt_n * 2 < u64::from(depth) {
+        return Outcome::Degenerate(format!(
+            "prompt_n {} is below half the requested depth {depth}",
+            result.prompt_n
+        ));
+    }
+    Outcome::Measured(Measured {
+        decode: decode.clone(),
+        prefill: prefill.clone(),
+        prompt_n: result.prompt_n,
+    })
+}
+
+/// Whether a candidate replaces the incumbent, and the report phrase either
+/// way (spec §4).
+pub struct Verdict {
+    pub wins: bool,
+    pub phrase: String,
+}
+
+/// The verdict phrase for one stage's primary/other comparison, and whether
+/// it wins. `comparisons` is `(primary, other)` — bundled so the helper stays
+/// at this crate's clippy argument floor (`clippy.toml`, §3.4).
+fn phrase(
+    comparisons: (Comparison, Comparison),
+    stage: Stage,
+    incumbent_median: f64,
+) -> (bool, String) {
+    let (primary, other) = comparisons;
+    let primary_label = stage.metric().label();
+    let other_label = stage.metric().other().label();
+    match primary {
+        Comparison::Faster if other != Comparison::Slower => (
+            true,
+            format!("faster on {primary_label}, {other_label} not slower — new incumbent"),
+        ),
+        Comparison::Faster => (
+            false,
+            format!("faster on {primary_label} but slower on {other_label} — incumbent kept"),
+        ),
+        Comparison::Slower => (false, format!("slower on {primary_label}")),
+        Comparison::NoSignificantDifference => (
+            false,
+            format!("no significant difference vs {incumbent_median:.1} — incumbent kept"),
+        ),
+    }
+}
+
+/// `stage` plus the significance threshold `judge` compares under.
+///
+/// Bundled so `judge` stays at this crate's clippy argument floor
+/// (`clippy.toml`, §3.4) despite the spec's four logically independent
+/// inputs.
+#[derive(Clone, Copy)]
+pub struct JudgeCriteria {
+    pub stage: Stage,
+    pub significance_pct: f64,
+}
+
+/// Judges `candidate` against `incumbent` on `criteria.stage`'s primary
+/// metric, winning only when the other metric does not regress (spec §4).
+#[must_use]
+pub fn judge(candidate: &Measured, incumbent: &Measured, criteria: JudgeCriteria) -> Verdict {
+    let metric = criteria.stage.metric();
+    let other = metric.other();
+    let primary_cmp = compare(
+        candidate.by_metric(metric),
+        incumbent.by_metric(metric),
+        criteria.significance_pct,
+    );
+    let other_cmp = compare(
+        candidate.by_metric(other),
+        incumbent.by_metric(other),
+        criteria.significance_pct,
+    );
+    let incumbent_median = incumbent.by_metric(metric).median;
+    let (wins, text) = phrase((primary_cmp, other_cmp), criteria.stage, incumbent_median);
+    Verdict { wins, phrase: text }
+}
+
+/// The stage's winning candidate: the highest primary median among those
+/// that beat the incumbent, ties kept at the earlier candidate.
+#[must_use]
+pub fn pick_winner<'a>(
+    scored: &'a [(Candidate, Measured, Verdict)],
+) -> Option<&'a (Candidate, Measured, Verdict)> {
+    let mut best: Option<(&'a (Candidate, Measured, Verdict), f64)> = None;
+    for entry @ (candidate, measured, verdict) in scored {
+        if !verdict.wins {
+            continue;
+        }
+        let median = measured.by_metric(candidate.stage.metric()).median;
+        match best {
+            Some((_, best_median)) if median <= best_median => {}
+            _ => best = Some((entry, median)),
+        }
+    }
+    best.map(|(entry, _)| entry)
+}
+
+/// The two metric cells of a stage-tuning report line (spec §9).
+fn measured_cells(measured: &Measured) -> String {
+    format!(
+        "decode {:.1} [{:.1}..{:.1}]  prefill {:.0} [{:.0}..{:.0}]",
+        measured.decode.median,
+        measured.decode.p10,
+        measured.decode.p90,
+        measured.prefill.median,
+        measured.prefill.p10,
+        measured.prefill.p90,
+    )
+}
+
+/// The dirty-clock note appended to a report line, or empty when the clock
+/// was not dirty.
+fn dirty_note(dirty: Option<u32>) -> String {
+    dirty.map_or_else(String::new, |pct| {
+        format!("   clock was dirty (CPU_Speed_Limit {pct}%)")
+    })
+}
+
+/// Which candidate a report line names — bundled with `LineContext` so
+/// `stage_line` stays at this crate's clippy argument floor (`clippy.toml`,
+/// §3.4) despite the spec's five logically independent inputs.
+pub struct CandidateLabel<'a> {
+    pub stage: Stage,
+    pub value: &'a str,
+}
+
+/// The judged context for a measured candidate's report line; both fields
+/// are `None` for a skipped or degenerate outcome.
+pub struct LineContext<'a> {
+    pub verdict: Option<&'a Verdict>,
+    pub dirty: Option<u32>,
+}
+
+/// One candidate's stage-tuning report line (spec §9).
+#[must_use]
+pub fn stage_line(label: &CandidateLabel, outcome: &Outcome, context: &LineContext) -> String {
+    let stage = label.stage.label();
+    let value = label.value;
+    match outcome {
+        Outcome::Measured(measured) => {
+            let cells = measured_cells(measured);
+            let phrase = context.verdict.map_or("", |v| v.phrase.as_str());
+            let note = dirty_note(context.dirty);
+            format!("  {stage:<10} {value:<8} {cells}   {phrase}{note}")
+        }
+        Outcome::Skipped(reason) => format!("  {stage:<10} {value:<8} skipped: {reason}"),
+        Outcome::Degenerate(reason) => format!("  {stage:<10} {value:<8} degenerate: {reason}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Candidate, Flag, Metric, Stage, candidates, rewrite, stages, value_of};
@@ -352,32 +538,39 @@ mod tests {
     #[test]
     fn a_candidate_wins_its_stage_only_on_its_own_metric_without_losing_the_other() {
         let inc = measured(31.2, 402.0);
-        let faster_prefill = super::judge(&measured(31.1, 466.0), &inc, super::Stage::Batch, 5.0);
+        let judge = |candidate: &super::Measured, stage, significance_pct| {
+            super::judge(
+                candidate,
+                &inc,
+                super::JudgeCriteria {
+                    stage,
+                    significance_pct,
+                },
+            )
+        };
+        let faster_prefill = judge(&measured(31.1, 466.0), super::Stage::Batch, 5.0);
         assert!(faster_prefill.wins);
         assert_eq!(
             faster_prefill.phrase,
             "faster on prefill, decode not slower — new incumbent"
         );
-        let costs_decode = super::judge(&measured(24.0, 466.0), &inc, super::Stage::Batch, 5.0);
+        let costs_decode = judge(&measured(24.0, 466.0), super::Stage::Batch, 5.0);
         assert!(!costs_decode.wins);
         assert_eq!(
             costs_decode.phrase,
             "faster on prefill but slower on decode — incumbent kept"
         );
-        let slower = super::judge(&measured(24.9, 397.0), &inc, super::Stage::Fa, 5.0);
+        let slower = judge(&measured(24.9, 397.0), super::Stage::Fa, 5.0);
         assert_eq!(
             (slower.wins, slower.phrase.as_str()),
             (false, "slower on decode")
         );
-        let close = super::judge(&measured(31.3, 402.0), &inc, super::Stage::Fa, 5.0);
+        let close = judge(&measured(31.3, 402.0), super::Stage::Fa, 5.0);
         assert_eq!(
             (close.wins, close.phrase.as_str()),
-            (
-                false,
-                "no significant difference vs 31.2 — incumbent kept"
-            )
+            (false, "no significant difference vs 31.2 — incumbent kept")
         );
-        let batch_on_decode = super::judge(&measured(40.0, 402.0), &inc, super::Stage::Batch, 5.0);
+        let batch_on_decode = judge(&measured(40.0, 402.0), super::Stage::Batch, 5.0);
         assert!(
             !batch_on_decode.wins,
             "a decode gain does not win a prefill stage"
@@ -452,22 +645,30 @@ mod tests {
             phrase: "faster on prefill, decode not slower — new incumbent".into(),
         };
         let line = super::stage_line(
-            super::Stage::Ubatch,
-            "1024",
+            &super::CandidateLabel {
+                stage: super::Stage::Ubatch,
+                value: "1024",
+            },
             &super::Outcome::Measured(m),
-            Some(&v),
-            Some(87),
+            &super::LineContext {
+                verdict: Some(&v),
+                dirty: Some(87),
+            },
         );
         assert_eq!(
             line,
             "  ubatch     1024     decode 31.1 [30.8..31.4]  prefill 466 [463..469]   faster on prefill, decode not slower — new incumbent   clock was dirty (CPU_Speed_Limit 87%)"
         );
         let skipped = super::stage_line(
-            super::Stage::Kv,
-            "f16",
+            &super::CandidateLabel {
+                stage: super::Stage::Kv,
+                value: "f16",
+            },
             &super::Outcome::Skipped("exceeds the GPU budget by 4120 MiB".into()),
-            None,
-            None,
+            &super::LineContext {
+                verdict: None,
+                dirty: None,
+            },
         );
         assert_eq!(
             skipped,
