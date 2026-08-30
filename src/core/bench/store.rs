@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::bench::codebase::ladder::{self, Score, Tier, as_f64};
 use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
-use crate::core::bench::stamp::{JudgeStamp, Stamp, mismatch_error};
+use crate::core::bench::stamp::{Stamp, first_mismatch, mismatch_error};
 use crate::core::bench::sweep::curve_note;
 use crate::core::stats;
 use crate::error::ChekovError;
@@ -418,14 +418,22 @@ impl RunLog {
 
 /// A run recorded before it had a judge takes the judge on resume.
 ///
-/// The head is rewritten with the field added and nothing else changed. A run
-/// that already names a different judge is left alone — `resume` refuses it.
-pub fn adopt_judge(run_dir: &Path, judge: Option<&JudgeStamp>) -> Result<(), ChekovError> {
+/// The head is rewritten with the judge added and nothing else changed — and
+/// only when every other field of `incoming` already matches, so a resume the
+/// next `RunWriter::resume` is about to refuse leaves the stamp exactly as it
+/// found it. A run that already names a judge is left alone: `resume` compares
+/// that judge like any other field.
+pub fn adopt_judge(run_dir: &Path, incoming: &Stamp) -> Result<(), ChekovError> {
     let mut log = RunLog::load(run_dir)?;
-    if log.head.stamp.judge.is_some() || judge.is_none() {
+    if log.head.stamp.judge.is_some() || incoming.judge.is_none() {
         return Ok(());
     }
-    log.head.stamp.judge = judge.cloned();
+    let mut candidate = log.head.stamp.clone();
+    candidate.judge.clone_from(&incoming.judge);
+    if first_mismatch(&candidate, incoming).is_some() {
+        return Ok(());
+    }
+    log.head.stamp = candidate;
     let stamp_path = run_dir.join("stamp.json");
     let json = serde_json::to_string_pretty(&log.head).map_err(|e| invalid(&stamp_path, e))?;
     std::fs::write(&stamp_path, json)
@@ -3074,6 +3082,93 @@ mod tests {
             &["fb-1", "fb-2", "fb-3"],
             all_skipped_verdicts().into_iter(),
         )
+    }
+
+    /// A stored run with no judge, and the stamp a `--resume --judge` would
+    /// bring: identical but for the judge.
+    fn adoptable(scratch_name: &str) -> (PathBuf, Stamp) {
+        let eval = scratch(scratch_name);
+        RunWriter::create(&eval, "r-adopt", &head()).expect("create");
+        let mut incoming = stamp();
+        incoming.judge = Some(judge_stamp());
+        (eval.join("r-adopt"), incoming)
+    }
+
+    #[test]
+    fn a_run_without_a_judge_adopts_one_when_the_rest_of_the_stamp_matches() {
+        let (dir, incoming) = adoptable("adopt-judge-match");
+        super::adopt_judge(&dir, &incoming).expect("adopt");
+        let reloaded = RunLog::load(&dir).expect("load");
+        assert_eq!(reloaded.head.stamp.judge, Some(judge_stamp()));
+    }
+
+    /// The stamp is rewritten only for a resume that will be accepted — a
+    /// refused one must leave the run exactly as it found it, since nothing
+    /// can take an adopted judge back off.
+    #[test]
+    fn a_resume_that_will_be_refused_leaves_the_stored_stamp_alone() {
+        let (dir, mut incoming) = adoptable("adopt-judge-mismatch");
+        incoming.ctx = 65_536;
+        let stamp_path = dir.join("stamp.json");
+        let before = std::fs::read_to_string(&stamp_path).expect("read");
+        super::adopt_judge(&dir, &incoming).expect("a no-op, not an error");
+        let after = std::fs::read_to_string(&stamp_path).expect("read");
+        assert_eq!(before, after, "a refused resume never rewrites the stamp");
+        let eval = dir.parent().expect("eval dir");
+        let refused = RunWriter::resume(
+            eval,
+            "r-adopt",
+            &RunHead {
+                stamp: incoming,
+                ..head()
+            },
+        )
+        .expect_err("the stamp still differs");
+        assert!(
+            matches!(refused, ChekovError::BenchStampMismatch { ref field, .. } if field == "ctx"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_already_names_a_judge_keeps_it_and_resume_refuses_a_different_one() {
+        let eval = scratch("adopt-judge-taken");
+        let stored = RunHead {
+            stamp: Stamp {
+                judge: Some(judge_stamp()),
+                ..stamp()
+            },
+            ..head()
+        };
+        RunWriter::create(&eval, "r-adopt", &stored).expect("create");
+        let dir = eval.join("r-adopt");
+        let incoming = Stamp {
+            judge: Some(JudgeStamp {
+                model: "gemma-3-12b-it".into(),
+                ..judge_stamp()
+            }),
+            ..stamp()
+        };
+        super::adopt_judge(&dir, &incoming).expect("a no-op, not an error");
+        let reloaded = RunLog::load(&dir).expect("load");
+        assert_eq!(
+            reloaded.head.stamp.judge,
+            Some(judge_stamp()),
+            "the judge a run was measured with is never replaced"
+        );
+        let refused = RunWriter::resume(
+            &eval,
+            "r-adopt",
+            &RunHead {
+                stamp: incoming,
+                ..head()
+            },
+        )
+        .expect_err("a different judge is a different environment");
+        assert!(
+            matches!(refused, ChekovError::BenchStampMismatch { ref field, .. } if field == "judge"),
+            "{refused}"
+        );
     }
 
     /// A judge-stamped run whose crossings are all `in_file`: there was never

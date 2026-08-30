@@ -1812,9 +1812,10 @@ fn open_run(
     use crate::core::bench::store::{self, RunWriter};
     let eval = ctx.config.eval_dir();
     if let Some(run_id) = resume {
-        // A run recorded before it had a judge takes this one; a run that
-        // already names a different judge is left for `resume` to refuse.
-        store::adopt_judge(&eval.join(run_id), head.stamp.judge.as_ref())?;
+        // A run recorded before it had a judge takes this one — but only when
+        // the rest of the stamp already matches, so a resume `RunWriter::resume`
+        // is about to refuse never rewrites the run it refused.
+        store::adopt_judge(&eval.join(run_id), &head.stamp)?;
         let (writer, log) = RunWriter::resume(&eval, run_id, head)?;
         let done = log
             .rows
