@@ -1832,7 +1832,7 @@ fn compare(ctx: &Ctx, a: &std::path::Path, b: &std::path::Path) -> Result<ExitCo
 
 #[cfg(test)]
 mod tests {
-    use super::{Machine, render_json, render_scan};
+    use super::{ChekovError, Machine, render_json, render_scan};
     use crate::core::machine::{Probed, Provenance};
 
     fn m3_ultra(budget: Option<Probed<u64>>) -> Machine {
@@ -2246,6 +2246,53 @@ mod tests {
         // A live server bench did not start is never stopped for a sweep.
         assert!(super::server_use_rule(Some("m1"), &two).is_err());
         assert!(super::server_use_rule(Some("other"), &one).is_err());
+    }
+
+    /// The canned registry the judge refusals read: `gpt-oss-20b` is the one
+    /// entry carrying `role = "judge"`, and no shard exists on disk.
+    fn judge_entry(name: &str) -> crate::core::registry::Effective {
+        crate::core::registry::Effective {
+            name: name.to_owned(),
+            ctx_size: 4096,
+            flags: vec![],
+            entry: crate::core::registry::ModelEntry {
+                repo: format!("unsloth/{name}-GGUF"),
+                quant: "Q8_0".into(),
+                revision: "d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4".into(),
+                path: format!("models/{name}@d449b42d93e1"),
+                first_shard: format!("{name}.gguf"),
+                hermes_ok: true,
+                ctx_size: None,
+                extra_flags: vec![],
+                role: (name == "gpt-oss-20b").then_some(crate::core::registry::ModelRole::Judge),
+            },
+        }
+    }
+
+    /// The two pure refusals of `resolve_judge` — the family check needs a
+    /// real `GGUF` header and is covered by `judge::family_conflict`.
+    fn judge_refusal(
+        judge: Option<&str>,
+        candidates: &[(&str, crate::core::bench::lifecycle::StepAction)],
+    ) -> Option<ChekovError> {
+        let name = judge?;
+        let resolved: Vec<_> = candidates
+            .iter()
+            .map(|(n, action)| (judge_entry(n), *action))
+            .collect();
+        super::role_check(&judge_entry(name), name)
+            .and_then(|()| super::server_check(&resolved))
+            .err()
+    }
+
+    #[test]
+    fn judge_without_a_role_and_a_reused_server_are_refused_before_any_launch() {
+        use crate::core::bench::lifecycle::StepAction;
+        let err = judge_refusal(Some("plain"), &[("ornith", StepAction::Launch)]);
+        assert!(matches!(err, Some(ChekovError::JudgeNoRole { .. })));
+        let err = judge_refusal(Some("gpt-oss-20b"), &[("ornith", StepAction::UseRunning)]);
+        assert!(matches!(err, Some(ChekovError::JudgeNeedsTheServer)));
+        assert!(judge_refusal(None, &[("ornith", StepAction::Launch)]).is_none());
     }
 
     #[test]
