@@ -7,6 +7,15 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Changed
+- `capability compare`'s codebase section shows a `cross_file_first` task's
+  two arms apart — `cross_file_first` and `cross_file_first+extra`, paired by
+  full task id as the report does — instead of one line blending both, and
+  gains a `context lift` group: the two runs' per-task lifts (extra −
+  no_extra) on tiers 1-5, compile and test, through the same paired sign
+  test as every tier. A task both runs touched but one of them measured on
+  one arm only is dropped from the lift and counted on its own drop line
+  (`measured on one arm only in one run`); the existing drop line now names
+  its reason (`unavailable in one run`) the same way.
 - `Stamp` gains a 21st field, `judge: Option<JudgeStamp>` — absent on every
   run recorded before slice C, filled at plan time by `--judge` or adopted on
   `--resume --judge <name>` when the rest of the stamp still matches. `compare`
