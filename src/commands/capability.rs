@@ -840,8 +840,11 @@ fn prepare_codebase(
     match args.codebase {
         Some(repo) => Ok(Some(crate::core::bench::codebase::prepare(
             repo,
-            &ctx.config.eval_dir().join(".scratch"),
-            ctx.config.file.bench.codebase_tasks,
+            &crate::core::bench::codebase::PrepareInputs {
+                scratch_root: &ctx.config.eval_dir().join(".scratch"),
+                tasks: ctx.config.file.bench.codebase_tasks,
+                allow_exec: args.allow_exec,
+            },
         )?)),
         None => Ok(None),
     }
@@ -1970,6 +1973,7 @@ mod tests {
                 function_body,
                 cross_file_first: cross,
             },
+            exec: crate::core::bench::codebase::exec::Exec::Off,
         }
     }
 

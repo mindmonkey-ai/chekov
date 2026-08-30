@@ -736,6 +736,175 @@ fn failure_text(outcome: &CargoOutcome) -> String {
         )
 }
 
+use crate::core::bench::store::{ExecRow, ExecScore};
+
+use super::CodebaseTask;
+
+/// Tier 7's reason when the span sits outside every function body.
+pub const NO_ENCLOSING_FN: &str = "no enclosing function";
+/// Tier 7's reason when no `Cargo.toml` above the file names a package.
+pub const NO_CRATE: &str = "no crate";
+/// Tier 7's reason when nothing in the crate tests the symbol.
+pub const NO_COVERING_TEST: &str = "no covering test";
+/// Tier 7's reason when tier 6 did not pass (spec §4).
+pub const DID_NOT_COMPILE: &str = "did not compile";
+
+/// One crossing's tiers 6 and 7: splice, check, tests, revert.
+///
+/// The revert runs whatever the tiers decided, and its failure is the run's
+/// abort. Nothing here returns an `Err` for a cargo outcome — a timeout, an
+/// offline registry, an unbuildable test module are all skips with reasons,
+/// because none of them is the model's answer being wrong.
+pub fn exec_crossing(env: &Env, task: &CodebaseTask, fill: &str) -> Result<ExecRow, ChekovError> {
+    let path = env.worktree.path.join(&task.file);
+    let original = std::fs::read_to_string(&path)
+        .map_err(|e| ChekovError::io(format!("reading {}", path.display()), e))?;
+    apply(
+        &Splice {
+            path: &path,
+            original: &original,
+            span: task.byte_range.clone(),
+        },
+        fill,
+    )?;
+    let row = tiers(env, task, &original);
+    revert(env, &task.file, &original)?;
+    Ok(row)
+}
+
+/// Tier 6, and tier 7 only if tier 6 passed.
+fn tiers(env: &Env, task: &CodebaseTask, original: &str) -> ExecRow {
+    let (compile, compile_error, check_secs) = check_tier(env);
+    let mut row = ExecRow {
+        compile,
+        compile_error,
+        tests: Vec::new(),
+        test: ExecScore::Skipped(DID_NOT_COMPILE.to_owned()),
+        test_failure: None,
+        check_secs,
+        test_secs: 0.0,
+    };
+    if row.compile != ExecScore::Value(1.0) {
+        return row;
+    }
+    let seven = test_tier(env, task, original);
+    row.tests = seven.tests;
+    row.test = seven.score;
+    row.test_failure = seven.failure;
+    row.test_secs = seven.secs;
+    row
+}
+
+/// `cargo check --message-format=json --offline`, judged by its diagnostics.
+///
+/// The exit status is not the verdict: cargo exits non-zero for errors it
+/// also reports, and the stream is the auditable record. A workspace-wide
+/// error counts — a fill that breaks a caller in another file is exactly what
+/// the cross-file tier is for.
+fn check_tier(env: &Env) -> (ExecScore, Option<String>, f64) {
+    let outcome = run_cargo(&CargoRun {
+        program: &env.cargo,
+        args: &["check", "--message-format=json", "--offline"],
+        cwd: &env.worktree.path,
+        target_dir: &env.target_dir,
+        timeout: env.timeouts.check,
+    });
+    let Ok(outcome) = outcome else {
+        return (
+            ExecScore::Skipped("cargo check failed to run".to_owned()),
+            None,
+            0.0,
+        );
+    };
+    let (score, error) = check_score(&outcome, env.timeouts.check);
+    (score, error, outcome.secs)
+}
+
+fn check_score(outcome: &CargoOutcome, timeout: Duration) -> (ExecScore, Option<String>) {
+    if outcome.timed_out {
+        return (
+            ExecScore::Skipped(format!("check timed out after {} s", timeout.as_secs())),
+            None,
+        );
+    }
+    if let Some(line) = needs_network(&outcome.stderr) {
+        return (ExecScore::Skipped(format!("needs network: {line}")), None);
+    }
+    first_error(&outcome.stdout).map_or((ExecScore::Value(1.0), None), |error| {
+        (ExecScore::Value(0.0), Some(error))
+    })
+}
+
+/// What tier 7 produced.
+struct Seven {
+    tests: Vec<String>,
+    score: ExecScore,
+    failure: Option<String>,
+    secs: f64,
+}
+
+impl Seven {
+    fn skipped(reason: &str) -> Self {
+        Self {
+            tests: Vec::new(),
+            score: ExecScore::Skipped(reason.to_owned()),
+            failure: None,
+            secs: 0.0,
+        }
+    }
+}
+
+/// The symbol, the crate, the candidates, the run.
+fn test_tier(env: &Env, task: &CodebaseTask, original: &str) -> Seven {
+    let Some(symbols) = tier_seven_symbols(task, original) else {
+        return Seven::skipped(NO_ENCLOSING_FN);
+    };
+    let Some(krate) = crate_of(&env.worktree.path, &task.file) else {
+        return Seven::skipped(NO_CRATE);
+    };
+    let tests = covering_tests(&krate.root, &symbols);
+    if tests.is_empty() {
+        return Seven::skipped(NO_COVERING_TEST);
+    }
+    let (verdict, secs) = run_tests(&TestRun {
+        env,
+        krate: &krate.name,
+        tests: &tests,
+    });
+    seven_from(verdict, tests, secs)
+}
+
+/// The enclosing function, plus the symbol a cross-file crossing is keyed on.
+fn tier_seven_symbols(task: &CodebaseTask, original: &str) -> Option<Vec<String>> {
+    let enclosing = super::masker::enclosing_fn(original, task.byte_range.start)?;
+    let mut symbols = vec![enclosing];
+    symbols.extend(task.name.clone());
+    Some(symbols)
+}
+
+fn seven_from(verdict: TestVerdict, tests: Vec<String>, secs: f64) -> Seven {
+    match verdict {
+        TestVerdict::Passed => Seven {
+            tests,
+            score: ExecScore::Value(1.0),
+            failure: None,
+            secs,
+        },
+        TestVerdict::Failed(text) => Seven {
+            tests,
+            score: ExecScore::Value(0.0),
+            failure: Some(text),
+            secs,
+        },
+        TestVerdict::Skipped(reason) => Seven {
+            tests,
+            score: ExecScore::Skipped(reason),
+            failure: None,
+            secs,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -1234,6 +1403,168 @@ mod tests {
         assert_eq!(found.len(), super::CAP);
         assert_eq!(found[0], "covers_0", "file order, not hash order");
         assert_eq!(found[4], "covers_4");
+    }
+
+    /// A committed one-crate repo, a real worktree over it, and an `Env`
+    /// whose cargo is a fake answering `script` — plus a `CodebaseTask` whose
+    /// `byte_range` lands on `let a = 1;` in `src/a.rs`.
+    fn crossing_fixture(
+        name: &str,
+        script: &str,
+    ) -> (PathBuf, super::Env, super::super::CodebaseTask, String) {
+        crossing_fixture_with(name, script, Duration::from_secs(30))
+    }
+
+    fn crossing_fixture_with(
+        name: &str,
+        script: &str,
+        check: Duration,
+    ) -> (PathBuf, super::Env, super::super::CodebaseTask, String) {
+        let dir = scratch(name);
+        let repo = committed_widget(&dir, "fn f() {\nlet a = 1;\n}\n");
+        let worktree = Worktree::add(&repo, &dir.join("tree")).expect("worktree");
+        let original =
+            std::fs::read_to_string(worktree.path.join("src/a.rs")).expect("the original");
+        let env = super::Env {
+            worktree,
+            cargo: fake_cargo(&dir, script),
+            target_dir: dir.join("target"),
+            cargo_version: "cargo 1.95.0".to_owned(),
+            timeouts: Timeouts {
+                check,
+                test: Duration::from_secs(30),
+            },
+        };
+        (dir, env, crossing_task(), original)
+    }
+
+    /// A committed `widget` crate whose `src/a.rs` holds `a_rs`, under `dir`.
+    fn committed_widget(dir: &Path, a_rs: &str) -> PathBuf {
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("src")).expect("src");
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"widget\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(repo.join("src/a.rs"), a_rs).expect("a.rs");
+        let who = ["-c", "user.email=t@t", "-c", "user.name=t"];
+        git(&repo, &["init", "-q"]);
+        git(&repo, &[&who[..], &["add", "-A"]].concat());
+        git(&repo, &[&who[..], &["commit", "-qm", "fixture"]].concat());
+        repo
+    }
+
+    /// The task whose `byte_range` lands on `let a = 1;` in that file.
+    fn crossing_task() -> super::super::CodebaseTask {
+        use super::super::{CodebaseTask, Excluded, TaskTier};
+        CodebaseTask {
+            id: "in_file-abc123-L2".into(),
+            tier: TaskTier::InFile,
+            file: "src/a.rs".into(),
+            line: 2,
+            byte_range: 9..19,
+            gold: "let a = 1;".into(),
+            prefix: "fn f() {\n".into(),
+            suffix: "\n}\n".into(),
+            excluded: Excluded {
+                doc_comment: 0,
+                cross_file: "n/a: same-file".into(),
+                cfg_test_lines: 0,
+                cross_file_withheld: 0,
+            },
+            name: None,
+            also_first_uses: Vec::new(),
+            extra: None,
+            extra_text: String::new(),
+        }
+    }
+
+    /// A crossing whose check reports an error: tier 6 is 0, the message is
+    /// stored with its file and line, tier 7 never runs, and the file comes
+    /// back.
+    #[test]
+    fn a_crossing_that_does_not_compile_fails_six_and_skips_seven() {
+        let (_dir, env, task, original) = crossing_fixture(
+            "no-compile",
+            "echo '{\"reason\":\"compiler-message\",\"message\":{\"level\":\"error\",\
+             \"message\":\"mismatched types\",\"spans\":[{\"file_name\":\"src/a.rs\",\
+             \"line_start\":2,\"is_primary\":true}]}}'\nexit 101",
+        );
+        let row = super::exec_crossing(&env, &task, "let a = \"two\";").expect("the crossing runs");
+        assert_eq!(
+            row.compile,
+            crate::core::bench::store::ExecScore::Value(0.0)
+        );
+        assert_eq!(
+            row.compile_error.as_deref(),
+            Some("src/a.rs:2: mismatched types")
+        );
+        assert_eq!(
+            row.test,
+            crate::core::bench::store::ExecScore::Skipped(super::DID_NOT_COMPILE.to_owned())
+        );
+        assert!(row.tests.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(env.worktree.path.join("src/a.rs")).expect("read"),
+            original,
+            "the revert restored the file"
+        );
+        env.finish().expect("cleanup");
+    }
+
+    /// A clean check with no test naming the symbol: tier 6 passes, tier 7 is
+    /// a counted reason and never a zero.
+    #[test]
+    fn a_crossing_with_no_covering_test_passes_six_and_says_why_seven_did_not_run() {
+        let (_dir, env, task, _) = crossing_fixture("no-covering", "exit 0");
+        let row = super::exec_crossing(&env, &task, "let a = 1;").expect("the crossing runs");
+        assert_eq!(
+            row.compile,
+            crate::core::bench::store::ExecScore::Value(1.0)
+        );
+        assert_eq!(
+            row.test,
+            crate::core::bench::store::ExecScore::Skipped(super::NO_COVERING_TEST.to_owned())
+        );
+        assert!(row.check_secs >= 0.0);
+        env.finish().expect("cleanup");
+    }
+
+    /// The offline registry is a skip with cargo's own words, and never a
+    /// compile failure the model is blamed for.
+    #[test]
+    fn a_check_that_wants_the_registry_is_skipped_with_cargos_words() {
+        let (_dir, env, task, _) = crossing_fixture(
+            "offline",
+            "echo 'error: no matching package named `serde` found' >&2\nexit 101",
+        );
+        let row = super::exec_crossing(&env, &task, "let a = 1;").expect("the crossing runs");
+        let crate::core::bench::store::ExecScore::Skipped(reason) = row.compile else {
+            panic!("expected a skip, got {:?}", row.compile);
+        };
+        assert!(reason.starts_with("needs network: "), "{reason}");
+        assert!(reason.contains("no matching package named"), "{reason}");
+        env.finish().expect("cleanup");
+    }
+
+    #[test]
+    fn a_check_past_its_timeout_is_skipped_and_the_file_is_still_restored() {
+        let (_dir, env, task, original) = crossing_fixture_with(
+            "timeout-check",
+            "sleep 30 &\nwait",
+            Duration::from_millis(300),
+        );
+        let row = super::exec_crossing(&env, &task, "let a = 1;").expect("the crossing runs");
+        let crate::core::bench::store::ExecScore::Skipped(reason) = row.compile else {
+            panic!("expected a skip, got {:?}", row.compile);
+        };
+        assert!(reason.starts_with("check timed out after "), "{reason}");
+        assert_eq!(
+            std::fs::read_to_string(env.worktree.path.join("src/a.rs")).expect("read"),
+            original
+        );
+        env.finish().expect("cleanup");
     }
 
     /// An `Env` over a plain directory and a named fake cargo — the runner

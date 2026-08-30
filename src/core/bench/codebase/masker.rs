@@ -177,9 +177,6 @@ fn body_after(text: &str, from: usize) -> Option<Range<usize>> {
 /// answers both. A span outside every body — a `const`, a `use`, an item
 /// attribute — has no enclosing fn, and `None` is the honest answer: tier 7
 /// records `no enclosing function` rather than guessing at the fn above.
-// Task 5's `exec_crossing` is the production caller; until it lands, only the
-// tests here reach this, and this `expect` errors the moment that changes.
-#[cfg_attr(not(test), expect(dead_code))]
 pub(super) fn enclosing_fn(text: &str, at: usize) -> Option<String> {
     let mut innermost: Option<(usize, &str)> = None;
     for sig in fn_signatures(text) {
