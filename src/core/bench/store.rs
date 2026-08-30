@@ -26,7 +26,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub use crate::core::bench::runner::Transport;
 
 /// The suites whose rows are graded per case.
-const AGENTIC: [&str; 3] = ["tool_emit", "grammar_gap", "instruction"];
+pub(crate) const AGENTIC: [&str; 3] = ["tool_emit", "grammar_gap", "instruction"];
 
 /// The suites crossed through both doors, so a case can disagree with itself.
 const PAIRED: [&str; 2] = ["tool_emit", "instruction"];
@@ -456,7 +456,7 @@ fn agentic_fail_line(row: &TaskRow) -> String {
 }
 
 /// The buffered door is the unmarked one — every earlier run went through it.
-const fn door_tag(transport: Transport) -> &'static str {
+pub(crate) const fn door_tag(transport: Transport) -> &'static str {
     match transport {
         Transport::Buffered => "",
         Transport::Streamed => " [streamed]",
@@ -544,8 +544,82 @@ fn passed(rows: &[&TaskRow]) -> usize {
         .count()
 }
 
-fn is_unavailable(row: &TaskRow) -> bool {
+pub(crate) fn is_unavailable(row: &TaskRow) -> bool {
     row.grade.as_ref().is_some_and(|g| g.unavailable)
+}
+
+/// A strict pass, or a failure whose reason records that the loose grader
+/// would have let it through.
+fn loosely_passed(row: &TaskRow) -> bool {
+    row.grade.as_ref().is_some_and(|g| {
+        g.pass
+            || g.reason
+                .as_deref()
+                .is_some_and(|s| s.contains("loose:pass"))
+    })
+}
+
+/// What a graded suite's rows count to, once the unavailable ones are out.
+///
+/// The report and `capability compare` print the same figure, so they count it
+/// the same way — one helper rather than two that can drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Tally {
+    pub passed: usize,
+    pub total: usize,
+    pub excluded: usize,
+}
+
+impl Tally {
+    /// The strict count: a row passes only when its grade says so.
+    pub(crate) fn of(rows: &[&TaskRow]) -> Self {
+        let (kept, excluded) = measured(rows);
+        Self {
+            passed: passed(&kept),
+            total: kept.len(),
+            excluded,
+        }
+    }
+
+    /// The chattiness-tolerant count (`instruction`'s loose arm).
+    pub(crate) fn loose(rows: &[&TaskRow]) -> Self {
+        let (kept, excluded) = measured(rows);
+        Self {
+            passed: kept.iter().filter(|r| loosely_passed(r)).count(),
+            total: kept.len(),
+            excluded,
+        }
+    }
+
+    /// `8/10` — the cell both the report and the comparison print.
+    pub(crate) fn cell(&self) -> String {
+        format!("{}/{}", self.passed, self.total)
+    }
+}
+
+/// The unconstrained arm of the §7.2 gap: the buffered `tool_emit` rows whose
+/// case the forced pass actually ran (`gg-<id>` names case `<id>`).
+///
+/// "The same cases" means the ones actually forced — an unavailable case has
+/// no forced result to compare against, so including its unconstrained result
+/// on one side of the gap invents the difference. The forced pass is buffered,
+/// so it pairs against buffered rows only; adding the streamed crossings to
+/// one side would invent a gap too.
+pub(crate) fn unconstrained_arm<'a>(
+    forced: &[&TaskRow],
+    tool_emit: &[&'a TaskRow],
+) -> Vec<&'a TaskRow> {
+    let (kept, _) = measured(forced);
+    let base_ids: Vec<&str> = kept
+        .iter()
+        .filter_map(|r| r.task_id.strip_prefix("gg-"))
+        .collect();
+    tool_emit
+        .iter()
+        .filter(|r| r.transport == Transport::Buffered)
+        .filter(|r| base_ids.contains(&r.task_id.as_str()))
+        .copied()
+        .collect()
 }
 
 /// The rows that were actually measured, and how many were not.
@@ -916,7 +990,7 @@ fn tier_mean(group: &[&CodebaseRow], tier: Tier) -> Option<f64> {
 /// Tiers 1–4 from the stored text — a stored score can never drift. The
 /// ladder's own function does the scoring, so the run and the re-read cannot
 /// disagree about which tier a task skipped, or say it differently.
-fn recompute(c: &CodebaseRow, tier: Tier) -> Score {
+pub(crate) fn recompute(c: &CodebaseRow, tier: Tier) -> Score {
     ladder::stored_tier(
         tier,
         &ladder::StoredText {
@@ -935,18 +1009,17 @@ fn tool_emit_line(log: &RunLog, transport: Transport) -> Option<String> {
         return None;
     }
     let label = door_label(transport);
-    let (kept, excluded) = measured(&rows);
-    if kept.is_empty() {
+    let tally = Tally::of(&rows);
+    if tally.total == 0 {
         return Some(format!(
             "tool_emit    {label}N/A — nothing was measured ({})\n",
             unavailable_reason(&rows)
         ));
     }
     Some(format!(
-        "tool_emit    {label}{}/{}{}\n",
-        passed(&kept),
-        kept.len(),
-        excluded_note(excluded)
+        "tool_emit    {label}{}{}\n",
+        tally.cell(),
+        excluded_note(tally.excluded)
     ))
 }
 
@@ -961,46 +1034,37 @@ fn grammar_gap_line(log: &RunLog) -> Option<String> {
     if forced.is_empty() {
         return None;
     }
-    let (kept, excluded) = measured(&forced);
-    if kept.is_empty() {
+    let arm = Tally::of(&forced);
+    if arm.total == 0 {
         return Some(format!(
             "grammar_gap  N/A — the forced pass could not run ({}); \
              no gap is reported because none was measured\n",
             unavailable_reason(&forced)
         ));
     }
-    // "The same cases" means the ones actually forced — an unavailable case
-    // has no forced result to compare against, so including its
-    // unconstrained result on one side of the gap invents the difference.
-    let base_ids: Vec<&str> = kept
-        .iter()
-        .filter_map(|r| r.task_id.strip_prefix("gg-"))
-        .collect();
-    // The forced pass is buffered, so it pairs against buffered rows only —
-    // adding the streamed crossings to one side would invent a gap.
-    let unconstrained: Vec<&TaskRow> = rows_via(log, "tool_emit", Transport::Buffered)
-        .filter(|r| base_ids.contains(&r.task_id.as_str()))
-        .collect();
-    let (paired, _) = measured(&unconstrained);
-    if paired.is_empty() {
+    let tool_emit: Vec<&TaskRow> = rows_of(log, "tool_emit").collect();
+    let paired = Tally::of(&unconstrained_arm(&forced, &tool_emit));
+    if paired.total == 0 {
         return Some(format!(
-            "grammar_gap  {}/{} forced — no unconstrained result to compare against{}\n",
-            passed(&kept),
-            kept.len(),
-            excluded_note(excluded)
+            "grammar_gap  {} forced — no unconstrained result to compare against{}\n",
+            arm.cell(),
+            excluded_note(arm.excluded)
         ));
     }
-    let pct = |pass: usize, total: usize| i64::try_from(pass * 100 / total.max(1)).unwrap_or(0);
-    let gap = pct(passed(&kept), kept.len()) - pct(passed(&paired), paired.len());
+    let gap = gap_pct(arm, paired);
     Some(format!(
-        "grammar_gap  {}/{} forced — unconstrained on the same cases {}/{} (gap {gap:+}%){}{}\n",
-        passed(&kept),
-        kept.len(),
-        passed(&paired),
-        paired.len(),
-        excluded_note(excluded),
+        "grammar_gap  {} forced — unconstrained on the same cases {} (gap {gap:+}%){}{}\n",
+        arm.cell(),
+        paired.cell(),
+        excluded_note(arm.excluded),
         forced_mode_note(log),
     ))
+}
+
+/// Forced minus unconstrained, in whole percentage points.
+fn gap_pct(forced: Tally, unconstrained: Tally) -> i64 {
+    let pct = |t: Tally| i64::try_from(t.passed * 100 / t.total.max(1)).unwrap_or(0);
+    pct(forced) - pct(unconstrained)
 }
 
 /// `; forced pass ran with reasoning extracted (<mode>)` when the forced arm
@@ -1021,31 +1085,20 @@ fn instruction_line(log: &RunLog, transport: Transport) -> Option<String> {
         return None;
     }
     let label = door_label(transport);
-    let (kept, excluded) = measured(&rows);
-    if kept.is_empty() {
+    let strict = Tally::of(&rows);
+    if strict.total == 0 {
         return Some(format!(
             "instruction  {label}N/A — nothing was measured ({})\n",
             unavailable_reason(&rows)
         ));
     }
-    let strict = passed(&kept);
-    let loose = kept
-        .iter()
-        .filter(|r| {
-            r.grade.as_ref().is_some_and(|g| {
-                g.pass
-                    || g.reason
-                        .as_deref()
-                        .is_some_and(|s| s.contains("loose:pass"))
-            })
-        })
-        .count();
+    let loose = Tally::loose(&rows);
     Some(format!(
-        "instruction  {label}strict {strict}/{}, loose {loose}/{} (chattiness gap {}){}\n",
-        kept.len(),
-        kept.len(),
-        loose.saturating_sub(strict),
-        excluded_note(excluded)
+        "instruction  {label}strict {}, loose {} (chattiness gap {}){}\n",
+        strict.cell(),
+        loose.cell(),
+        loose.passed.saturating_sub(strict.passed),
+        excluded_note(strict.excluded)
     ))
 }
 
