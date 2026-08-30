@@ -99,8 +99,8 @@ The registry stores the absolute path; everything else works unchanged.
 | `capability graph [--metric fit\|tok-s] [--svg [PATH]] [--ctx N]...` | Grid of registered models against context lengths. Each cell is two characters: the fit verdict, then whether its inputs were measured or predicted. A predicted GPU ceiling is announced in the header and changes the legend, because every verdict below it is then measured against a guess. `--metric tok-s` turns the first character into a band digit 1–9 of the **measured** decode median from the stored runs under `eval/` — fixed band edges printed in the legend, an exact model+quant+ctx+machine match required, and `??` wherever no run exists: predicted and measured are never blended in one column. `--svg` writes the same frontier as a self-contained SVG (bare, into `reports/`); the path is **printed, never opened**. |
 | `capability recommend [--ctx N] [--role agent\|chat] [--refresh] [--limit N]` | Ranks the registered models for this machine. Gates first — anything that exceeds the budget, or cannot be sized, is listed with its reason rather than dropped. Then sorts: under `--role agent` a model whose chat template has no dedicated llama.cpp tool parser is **downranked with a note, not refused**; under `--role chat` the tool parser is ignored. `--refresh` is the **only** networked path — without it chekov ranks registered models only and never reaches out. |
 | `capability explain [name] [--ctx N]` | Read one model's GGUF header and print its fit arithmetic line by line: block count, the MTP/interval layer ladder, padded context, cache type, KV bytes, weights on disk. Local file read; no network. |
-| `capability bench [--models a,b] [--suite throughput\|agentic\|all] [--fixture F] [--resume RUN] [--dry-run] [--yes]` | Measure candidates through chekov's own Anthropic↔OpenAI translator and store every run. `--models` takes a **comma-separated** list and benches them **sequentially**: bench launches and tears down its own server behind `run`'s preflight gates and **never stops a server it did not start** — a running server is reused only when it *is* the single request, and is otherwise a refusal. `--suite` defaults to `throughput`: the depth sweep over `[bench] depths`, `[bench] repetitions` per depth with the first dropped as warmup. `agentic` runs the probe set (`tool_emit`, `grammar_gap`, `instruction`), with each unconstrained case crossing both the buffered and the streamed door so an asymmetry between them is named. `all` runs both. Each run lands in `eval/<timestamp>-<model>/` as `stamp.json` (the configuration stamp plus the exact launch argv) and `results.jsonl` (one flushed append per task), so a crash loses at most one task and `--resume <RUN>` skips what that run already holds — resuming under a changed stamp is refused. `--dry-run` prints the plan and a rough wall-clock estimate as data; `--yes` pre-approves the launch confirmation; `--fixture` supplies graded probes from your own TOML (there is deliberately no compiled-in fixture). |
-| `capability bench --codebase <PATH>` | The repository at PATH (clean tree required) as 24 deterministic infill tasks, sampled from HEAD (`[bench] codebase_tasks`, split 12 `in_file` / 6 `function_body` / 6 `cross_file_first`), run through `/infill`, graded on tiers 1–5 (exact, edit similarity, identifier F1, parse, repo-symbol existence); tiers 6–7 are slice B2. A `cross_file_first` task masks the first use in a file of a symbol defined in **another** file, and is crossed **twice** — without that file and with it in `input_extra` — so the report can print what reading the repository buys. Masks are boundary-scanned, not AST, and the report says so. A model without FIM tokens is N/A, never zero. Given without `--suite`, the codebase corpus is the whole run — the throughput sweep does not come along. |
+| `capability bench [--models a,b] [--suite throughput\|agentic\|all] [--fixture F] [--resume RUN] [--dry-run] [--yes] [--allow-exec]` | Measure candidates through chekov's own Anthropic↔OpenAI translator and store every run. `--models` takes a **comma-separated** list and benches them **sequentially**: bench launches and tears down its own server behind `run`'s preflight gates and **never stops a server it did not start** — a running server is reused only when it *is* the single request, and is otherwise a refusal. `--suite` defaults to `throughput`: the depth sweep over `[bench] depths`, `[bench] repetitions` per depth with the first dropped as warmup. `agentic` runs the probe set (`tool_emit`, `grammar_gap`, `instruction`), with each unconstrained case crossing both the buffered and the streamed door so an asymmetry between them is named. `all` runs both. Each run lands in `eval/<timestamp>-<model>/` as `stamp.json` (the configuration stamp plus the exact launch argv) and `results.jsonl` (one flushed append per task), so a crash loses at most one task and `--resume <RUN>` skips what that run already holds — resuming under a changed stamp is refused. `--dry-run` prints the plan and a rough wall-clock estimate as data; `--yes` pre-approves the launch confirmation; `--fixture` supplies graded probes from your own TOML (there is deliberately no compiled-in fixture). |
+| `capability bench --codebase <PATH>` | The repository at PATH (clean tree required) as 24 deterministic infill tasks, sampled from HEAD (`[bench] codebase_tasks`, split 12 `in_file` / 6 `function_body` / 6 `cross_file_first`), run through `/infill`, graded on tiers 1–5 (exact, edit similarity, identifier F1, parse, repo-symbol existence); tiers 6–7 (compile gate, covering test) run only under `--allow-exec`, which is the single gate on every path that executes repository code. A `cross_file_first` task masks the first use in a file of a symbol defined in **another** file, and is crossed **twice** — without that file and with it in `input_extra` — so the report can print what reading the repository buys. Masks are boundary-scanned, not AST, and the report says so. A model without FIM tokens is N/A, never zero. Given without `--suite`, the codebase corpus is the whole run — the throughput sweep does not come along. |
 | `capability compare <A> <B>` | Compare two stored bench runs, named by run id under `eval/` or by run directory, across all three sections: **throughput** per depth, **agentic** (the report's own pass counts side by side over the cases both runs graded, then the disagreements — the cases exactly one run passed, with the losing side's reason; cases graded in only one run are named, never dropped), and **codebase** (per tier group and ladder tier: both means, a signed delta, per-task win counts, and an exact two-sided binomial sign test at p < 0.05). **Same environment only**: it refuses on the FIRST differing stamp field and names it, because llama.cpp does not promise bit-identical results across configurations. The subject fields (`weights_revision`, `quant`) are exempt — they are what is being compared — and a differing task set always refuses. Verdicts name the model, never "A"/"B"; `no significant difference` is a first-class printed outcome, never resolved into a winner; a section one run never measured says so rather than vanishing. |
 | `pull <spec> [--name N] [--dry-run] [--model-loc DIR] [--license-url URL]` | Resolve revision, download (or adopt) quant-matching files, snapshot license + provenance, register. Shows a per-shard progress line on stderr (bytes, percent, rate, ETA) and resumes a partial shard from its `.part` with an HTTP `Range` request, size-verified before it is renamed into place. Idempotent: same spec+revision is a verified no-op; a NEW revision downloads but never repoints (that is `update`'s gated job). |
 | `list` | Table: active marker, name, quant, size on disk, revision. |
@@ -140,8 +140,7 @@ generous, and a model that answers a one-line span and then keeps writing
 should be graded on the answer, not on the token budget. Tier 5 reads the
 whole prediction. A name declared in two or more files is ambiguous and
 never masked, a name whose defining module the file never mentions is not a
-candidate, and the shortfall line counts both. Only tiers 1–5 are scored; tiers
-6–7 (compile gate, covering test) are deferred to slice B2 behind
+candidate, and the shortfall line counts both. Tiers 6–7 (compile gate, covering test) run only under
 `--allow-exec`. Because the task set now includes the new tier's ids, its
 hash — and so `corpus_id` changed: runs recorded before this are not
 comparable with runs after it, and `compare` refuses them by that field.
@@ -156,6 +155,37 @@ report's `engine window ≤ n_batch` says as much. `--dry-run` still creates and
 removes a detached worktree in the target repository: the task set is sampled
 from `HEAD` before anything is printed. A model without FIM tokens reports as
 N/A, never as a zero — an unsupported capability is not a failing score.
+
+**`--allow-exec`** turns on tiers 6 and 7. Tier 6 splices the fill into the
+worktree's copy of the file, runs `cargo check --message-format=json
+--offline`, and passes when the JSON stream carries no `error` diagnostic
+anywhere in the workspace — a fill that breaks a caller in another file fails,
+which is the point of the cross-file tier. Tier 7 then runs the repository's
+own tests for the masked symbol: the enclosing function's name (plus the
+cross-file symbol, when there is one), the nearest `Cargo.toml` above the file
+for the crate, up to five `#[test]` functions in that crate whose bodies name
+the symbol as a whole word — `tests/*.rs` included — and `cargo test -p <crate>
+--offline -- <t> --exact` for each. Tier 7 passes only when every candidate
+passes. **This runs the repository's code.** `cargo check` and `cargo test`
+execute its `build.rs` scripts, its proc-macros and its tests — the same trust
+as building the repository yourself. chekov bounds it and does not sandbox it:
+the detached worktree is the only place written (your checkout is never
+touched), one `cargo fetch` before the loop is the only networked step and
+every invocation after it carries `--offline`, `CARGO_TARGET_DIR` points at
+`eval/.scratch/target-<head12>` so nothing lands in the repository's own
+`target/`, each check gets 120 seconds and each test run 300 with the whole
+process group killed at the deadline, and every crossing is reverted with `git
+checkout --` and the bytes compared before the next one starts — a worktree
+that will not restore stops the run rather than measuring against a file
+nobody can vouch for. Nothing here is a silent zero: a missing toolchain, an
+offline registry, a timeout, a span outside every function, a crate with no
+covering test are each a counted, printed reason, and the report's `compile`
+mean is taken over crossings with a verdict only. Only Rust is implemented;
+the module is shaped for `tsc --noEmit` and `python -m py_compile` behind the
+same gate. Without the flag the ladder stops at tier 5 and the trailer reads
+`tiers 6-7 skipped: --allow-exec not given`. Because the stamp records
+`allow_exec`, `cargo_version` and `exec_target`, `compare` refuses across a run
+that executed and one that did not — they are different environments.
 
 ### The six doctor checks
 
@@ -386,6 +416,7 @@ days-old `~/.cargo/bin/chekov` is the likelier explanation.
 | `Not possible to fast-forward` on `setup` / `update --engine` | The `llama.cpp/` checkout has diverged from `origin/master` (a hand-applied commit), and the step is a `git pull --ff-only`. The built engine is untouched. Pin `[engine] git_ref`, or rebase and rebuild by hand — see [Updating](#updating). |
 | `quant tag 'X' not found … (none — this repo exposes no .gguf files)` | Either the installed binary predates the folder-per-quant fix (`make install`), or the repo's filenames carry no `Q…`/`IQ…`/`BF16`/`F16`/`F32` token in any spelling (dot- and dash-separated, upper- and lowercase are all read). Check the repo's file list before assuming the tag is wrong. |
 | `WorkingTreeDirty` from `capability bench --codebase` | Codebase mode refuses a dirty tree so the task set is exactly what `HEAD` says. Commit, stash, or bench a clean clone of the repository. |
+| `ExecWorktreeDirty` from `capability bench --codebase --allow-exec` | A `git checkout --` did not restore the file tier 6 spliced. The run stopped rather than measure the next crossing against a file it cannot vouch for. Inspect the worktree the message names, delete it (`git worktree remove --force <path>`, then `git worktree prune`), and resume with `--resume <RUN>`: every row up to that crossing is intact. |
 | `codebase N/A — infill unsupported by this model` | The model's GGUF carries no FIM tokens, so `/infill` has nothing to fill. That is a missing capability, not a failing score — it is never reported as a zero. |
 
 ## Integrations

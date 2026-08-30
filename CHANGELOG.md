@@ -35,6 +35,35 @@ All notable changes to chekov are recorded here. The format follows
   only on a real refusal now, never on a dead socket.
 
 ### Added
+- `capability bench --codebase` gains `--allow-exec` and, behind it, the two
+  tiers that say whether a fill is code rather than plausible text. Tier 6
+  splices the fill (trimmed to the gold's line count — the same text tiers 1-4
+  grade) into the worktree's copy of the file, runs `cargo check
+  --message-format=json --offline`, and passes when the stream carries no
+  `error` anywhere in the workspace; the exit status is not the verdict,
+  because cargo exits non-zero for things it also reports and the diagnostics
+  are the auditable record. Tier 7 runs the repository's own covering tests
+  for the masked symbol — the enclosing function plus the cross-file symbol,
+  the nearest `Cargo.toml` with a `[package] name`, up to five `#[test]`
+  functions naming it as a whole word outside literals (`tests/*.rs`
+  included), each through `cargo test -p <crate> --offline -- <t> --exact` —
+  and passes only when all of them pass. The bounds are stated and enforced:
+  the detached worktree is the only place written, one `cargo fetch` before
+  the loop is the only networked step, `CARGO_TARGET_DIR` is
+  `eval/.scratch/target-<head12>`, 120 s per check and 300 s per test run with
+  a process-group kill, and every crossing is reverted and byte-compared
+  before the next — a worktree that will not restore raises
+  `ExecWorktreeDirty` and stops the run, with the rows written so far intact
+  and resumable. Nothing degrades silently: no toolchain, an offline registry,
+  a timeout, a span outside every function, a crate with no covering test are
+  each a counted reason, printed in the block's trailer by reason, and
+  excluded from the `compile` mean rather than averaged in as zeros. The row
+  gains `exec` (`#[serde(default)]`; pre-B2 rows load as `None`), the stamp
+  gains `allow_exec`, `cargo_version` and `exec_target` — so `compare` refuses
+  across a run that executed the repository and one that did not — and the
+  report gains two cells per tier line, two lift columns and the timing
+  trailer. The task set is unchanged, so `corpus_id` is unchanged. Only Rust;
+  `--judge` is slice C.
 - `capability bench --codebase` adds the `cross_file_first` tier: the mask is
   the first use in a file of a symbol declared in exactly one **other** file,
   found over the elided texts with a declaration index — never an ambiguous

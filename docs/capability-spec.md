@@ -894,11 +894,11 @@ A 3-model × `agentic` sweep is therefore **~1.5–2.5 hours**. `bench` prints t
 
 ## 8. Codebase mode
 
-Status 2026-08-29: slice A shipped (Rust, same-file, tiers 1–5) — see `docs/superpowers/specs/2026-08-29-codebase-mode-slice-a-design.md`; slices B (cross-file + exec tiers) and C (`--judge`) open.
+Status 2026-08-30: slices A (Rust, same-file, tiers 1–5), B1 (`cross_file_first` with `input_extra`, two arms and the context lift) and B2 (tiers 6–7 behind `--allow-exec`) shipped — see `docs/superpowers/specs/2026-08-29-codebase-mode-slice-a-design.md`, `…-slice-b1-design.md` and `2026-08-30-codebase-mode-slice-b2-design.md`; slice C (`--judge`) open.
 
 `chekov capability bench --codebase <PATH>` turns the user's own repository into graded tasks. A private codebase is the only guaranteed-uncontaminated corpus a local user has — which is exactly what LiveCodeBench's rolling-cutoff design provides and what no vendored public benchmark can.
 
-**Safety gate first.** Refuse a dirty working tree (`WorkingTreeDirty { path }`). All work happens in a `git worktree` copy under `$CHEKOV_HOME/eval/<run_id>/tree/`, never the user's checkout. Nothing from the repo executes unless **`--allow-exec`** — the single gate on every code-running path in the whole feature (Angle C's consolidation, cleaner than scattering per-tier opt-ins). Without it the ladder stops at the parse tier and the report names which tier it reached and why. Every execution runs under a wall-clock timeout with a process-group kill.
+**Safety gate first.** Refuse a dirty working tree (`WorkingTreeDirty { path }`). All work happens in a `git worktree` copy under `$CHEKOV_HOME/eval/<run_id>/tree/`, never the user's checkout. Nothing from the repo executes unless **`--allow-exec`** — the single gate on every code-running path in the whole feature (Angle C's consolidation, cleaner than scattering per-tier opt-ins). Without it the ladder stops at the parse tier and the report names which tier it reached and why. Every execution runs under a wall-clock timeout with a process-group kill. Implemented for Rust in slice B2 (`2026-08-30-codebase-mode-slice-b2-design.md`): one `cargo fetch` then `--offline`, a scratch `CARGO_TARGET_DIR`, 120 s/300 s wall clocks with a process-group kill, and a revert verified byte for byte after every crossing — `ExecWorktreeDirty` stops the run.
 
 **Task generation — three tiers** (RepoBench taxonomy):
 
@@ -928,8 +928,8 @@ Sampling is deterministic: a seeded RNG keyed on `git rev-parse HEAD`, so the sa
 3. identifier-set F1 — identifiers via `[A-Za-z_][A-Za-z0-9_]*` minus a per-language keyword list; catches API hallucination with no toolchain
 4. parse gate — brace/indent balance, free
 5. **repo-symbol existence** — the fraction of referenced identifiers that exist in the repo's own symbol set plus its declared dependencies. Best value-per-LOC probe in the design
-6. compile gate — `cargo check --message-format=json` / `tsc --noEmit` / `python -m py_compile`, only when the toolchain exists
-7. test gate — run only the specific test covering the masked symbol, hard timeout, process-group kill, `--allow-exec` only
+6. compile gate — `cargo check --message-format=json` / `tsc --noEmit` / `python -m py_compile`, only when the toolchain exists — Rust shipped in slice B2; the JSON diagnostics are the verdict, not the exit status, and an `error` anywhere in the workspace counts.
+7. test gate — run only the specific test covering the masked symbol, hard timeout, process-group kill, `--allow-exec` only — shipped in slice B2: the enclosing function (plus the cross-file symbol), the nearest `[package]`, up to five `#[test]` functions naming it as a whole word, `tests/*.rs` included.
 
 Tiers 6 and 7 report **`Skipped`** when the toolchain or covering test is absent — never `Pass`. That is `doctor.rs:1-2`'s stated contract ("Skipped checks are reported as skipped, never as passed") applied verbatim. Tiers 1–2 are applied to **line-level tasks only**: on function-body masks they punish semantically-correct alternative implementations and reward formatting mimicry, so body-level tasks lean on tiers 3–7.
 
