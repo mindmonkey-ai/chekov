@@ -5,6 +5,7 @@ pub mod crossfile;
 pub mod filter;
 pub mod ladder;
 pub mod masker;
+pub mod run;
 pub mod sample;
 pub mod tree;
 
