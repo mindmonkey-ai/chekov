@@ -43,10 +43,11 @@ All notable changes to chekov are recorded here. The format follows
 - `capability bench` gains `--judge <NAME>`, a registered `role = "judge"`
   model (set by hand on its `models.toml` entry — `pull` never writes the
   field; any other value is refused at registry load, naming the one accepted
-  value) of a different architecture family from every candidate. Resolution
+  value; `chekov list` marks the entry carrying it in a new `ROLE` column) of
+  a different architecture family from every candidate. Resolution
   happens at plan time, before any launch: an unregistered name, a judge
   missing `role = "judge"`, a same-family judge and candidate, a judge named
-  among `--models`, and a running server bench did not start are each a
+  among `--models`, and a running server that bench did not start are each a
   refusal before the run is spent, and `--resume` of a run stamped with a
   different judge is refused too — a run is never spent to report a judge
   outcome as unavailable at the end. The judge runs as its own phase, launched
@@ -73,10 +74,12 @@ All notable changes to chekov are recorded here. The format follows
   that run, both numbers printed, and the raw rows stay. `capability compare`
   gains an `equiv` row under `function_body` with the same paired sign test as
   every other tier, or `equiv: not compared (judge differs: …)` when the two
-  runs' judge stamps disagree — nothing else in the comparison changes. Two
-  more new `[bench]` knobs: `judge_max_tokens` (default 512) and
-  `judge_reasoning_effort` (`none|low|medium|high`, default `low`, forwarded
-  to the judge's wire only — gpt-oss needs it, Gemma's template ignores it).
+  runs' judge stamps disagree, or `equiv: not compared (no crossing judged in
+  both runs)` when they share a judge but no crossing reached a verdict in
+  both — nothing else in the comparison changes. A third new `[bench]` knob
+  joins the two named above: `judge_reasoning_effort` (`none|low|medium|high`,
+  default `low`, forwarded to the judge's wire only — gpt-oss needs it,
+  Gemma's template ignores it).
   The 2026-08-30 probe recommends `gpt-oss-20b` (Apache-2.0, 96% swap
   consistency); Gemma 3 12B instruct also clears the 100%-parse/70%-
   consistency gate.
