@@ -41,7 +41,7 @@ pub enum Cmd {
     Rm(commands::rm::RmCmd),
     /// Print the resolved server invocation and license provenance
     Show(commands::show::ShowCmd),
-    /// Run the five health checks against the live server
+    /// Run the six health checks: five against the live server, one comparing configuration
     Doctor(commands::doctor::DoctorCmd),
     /// Build llama.cpp (Metal) and verify the environment
     Setup(commands::setup::SetupCmd),

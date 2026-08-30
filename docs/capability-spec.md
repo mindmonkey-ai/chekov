@@ -894,6 +894,8 @@ A 3-model × `agentic` sweep is therefore **~1.5–2.5 hours**. `bench` prints t
 
 ## 8. Codebase mode
 
+Status 2026-08-29: slice A shipped (Rust, same-file, tiers 1–5) — see `docs/superpowers/specs/2026-08-29-codebase-mode-slice-a-design.md`; slices B (cross-file + exec tiers) and C (`--judge`) open.
+
 `chekov capability bench --codebase <PATH>` turns the user's own repository into graded tasks. A private codebase is the only guaranteed-uncontaminated corpus a local user has — which is exactly what LiveCodeBench's rolling-cutoff design provides and what no vendored public benchmark can.
 
 **Safety gate first.** Refuse a dirty working tree (`WorkingTreeDirty { path }`). All work happens in a `git worktree` copy under `$CHEKOV_HOME/eval/<run_id>/tree/`, never the user's checkout. Nothing from the repo executes unless **`--allow-exec`** — the single gate on every code-running path in the whole feature (Angle C's consolidation, cleaner than scattering per-tier opt-ins). Without it the ladder stops at the parse tier and the report names which tier it reached and why. Every execution runs under a wall-clock timeout with a process-group kill.

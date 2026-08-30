@@ -95,30 +95,34 @@ The registry stores the absolute path; everything else works unchanged.
 | `stop [--if-running]` | SIGTERM via pidfile, 20 s grace, SIGKILL escalation with a warning. Detects and cleans stale pidfiles. Stopping a stopped server is an error (exit 1) unless `--if-running`, which prints "nothing to stop" and exits 0 — for idempotent teardown scripts. |
 | `restart [name]` | Stop (if running) then start in the background; swaps models in one motion. |
 | `status` | running/pid, model, revision, port, ctx, uptime, wired-limit actual (with system-default annotation) vs required, log tail path. |
+| `capability [scan] [--json]` | What this Mac is and what it can hold: chip, GPU cores, performance threads, macOS, and the GPU budget **with its provenance**. `scan` is the default action, so the bare command is the scan; `--json` emits it as JSON instead of a table. The budget is read from the engine (`llama-server --list-devices`) when it is built, from `iogpu.wired_limit_mb` when set, and only otherwise from the 75%-of-RAM formula — which measures 31457 MiB low on a 256 GiB M3 Ultra, so the source is always printed. |
+| `capability graph [--metric fit\|tok-s] [--svg [PATH]] [--ctx N]...` | Grid of registered models against context lengths. Each cell is two characters: the fit verdict, then whether its inputs were measured or predicted. A predicted GPU ceiling is announced in the header and changes the legend, because every verdict below it is then measured against a guess. `--metric tok-s` turns the first character into a band digit 1–9 of the **measured** decode median from the stored runs under `eval/` — fixed band edges printed in the legend, an exact model+quant+ctx+machine match required, and `??` wherever no run exists: predicted and measured are never blended in one column. `--svg` writes the same frontier as a self-contained SVG (bare, into `reports/`); the path is **printed, never opened**. |
+| `capability recommend [--ctx N] [--role agent\|chat] [--refresh] [--limit N]` | Ranks the registered models for this machine. Gates first — anything that exceeds the budget, or cannot be sized, is listed with its reason rather than dropped. Then sorts: under `--role agent` a model whose chat template has no dedicated llama.cpp tool parser is **downranked with a note, not refused**; under `--role chat` the tool parser is ignored. `--refresh` is the **only** networked path — without it chekov ranks registered models only and never reaches out. |
+| `capability explain [name] [--ctx N]` | Read one model's GGUF header and print its fit arithmetic line by line: block count, the MTP/interval layer ladder, padded context, cache type, KV bytes, weights on disk. Local file read; no network. |
+| `capability bench [--models a,b] [--suite throughput\|agentic\|all] [--fixture F] [--resume RUN] [--dry-run] [--yes]` | Measure candidates through chekov's own Anthropic↔OpenAI translator and store every run. `--models` takes a **comma-separated** list and benches them **sequentially**: bench launches and tears down its own server behind `run`'s preflight gates and **never stops a server it did not start** — a running server is reused only when it *is* the single request, and is otherwise a refusal. `--suite` defaults to `throughput`: the depth sweep over `[bench] depths`, `[bench] repetitions` per depth with the first dropped as warmup. `agentic` runs the probe set (`tool_emit`, `grammar_gap`, `instruction`), with each unconstrained case crossing both the buffered and the streamed door so an asymmetry between them is named. `all` runs both. Each run lands in `eval/<timestamp>-<model>/` as `stamp.json` (the configuration stamp plus the exact launch argv) and `results.jsonl` (one flushed append per task), so a crash loses at most one task and `--resume <RUN>` skips what that run already holds — resuming under a changed stamp is refused. `--dry-run` prints the plan and a rough wall-clock estimate as data; `--yes` pre-approves the launch confirmation; `--fixture` supplies graded probes from your own TOML (there is deliberately no compiled-in fixture). |
+| `capability bench --codebase <PATH>` | The repository at PATH (clean tree required) as 24 deterministic same-file infill tasks, sampled from HEAD (`[bench] codebase_tasks`), run through `/infill`, graded on tiers 1–5 (exact, edit similarity, identifier F1, parse, repo-symbol existence); tiers 6–7 and cross-file context are slice B. Masks are boundary-scanned, not AST, and the report says so. A model without FIM tokens is N/A, never zero. Given without `--suite`, the codebase corpus is the whole run — the throughput sweep does not come along. |
+| `capability compare <A> <B>` | Compare two stored bench runs, named by run id under `eval/` or by run directory. **Same environment only**: it refuses on the FIRST differing stamp field and names it, because llama.cpp does not promise bit-identical results across configurations. The subject fields (`weights_revision`, `quant`) are exempt — they are what is being compared — and a differing task set always refuses. `no significant difference` is a first-class printed outcome, never resolved into a winner. |
 | `pull <spec> [--name N] [--dry-run] [--model-loc DIR] [--license-url URL]` | Resolve revision, download (or adopt) quant-matching files, snapshot license + provenance, register. Idempotent: same spec+revision is a verified no-op; a NEW revision downloads but never repoints (that is `update`'s gated job). |
 | `list` | Table: active marker, name, quant, size on disk, revision. |
 | `use <name>` | Set the active model. Never auto-restarts — prints the restart hint. |
 | `rm <name> [--yes]` | Remove a model and its files. Confirmation required; refuses the active or currently running model. |
 | `show [name]` | Fully resolved server invocation + license provenance — zero mystery about what will run. |
 | `doctor` | Six checks (below) — five probe the server, one compares configuration. Skipped is reported as SKIP, never PASS. |
-| `capability recommend [--ctx N] [--role agent\|chat] [--refresh] [--limit N]` | Ranks the registered models for this machine. Gates first — anything that exceeds the budget, or cannot be sized, is listed with its reason rather than dropped. Then sorts: under `--role agent` a model whose chat template has no dedicated llama.cpp tool parser is **downranked with a note, not refused**; under `--role chat` the tool parser is ignored. `--refresh` is the **only** networked path — without it chekov ranks registered models only and never reaches out. |
-| `capability explain [name] [--ctx N]` | Read one model's GGUF header and print its fit arithmetic line by line: block count, the MTP/interval layer ladder, padded context, cache type, KV bytes, weights on disk. Local file read; no network. |
-| `capability graph [--ctx N]...` | Grid of registered models against context lengths. Each cell is two characters: the fit verdict, then whether its inputs were measured or predicted. A predicted GPU ceiling is announced in the header and changes the legend, because every verdict below it is then measured against a guess. |
-| `capability bench --codebase <PATH>` | The repository at PATH (clean tree required) as 24 deterministic same-file infill tasks, sampled from HEAD (`[bench] codebase_tasks`), run through `/infill`, graded on tiers 1–5 (exact, edit similarity, identifier F1, parse, repo-symbol existence); tiers 6–7 and cross-file context are slice B. Masks are boundary-scanned, not AST, and the report says so. A model without FIM tokens is N/A, never zero. |
-| `capability [--json]` | What this Mac is and what it can hold: chip, GPU cores, performance threads, macOS, and the GPU budget **with its provenance**. The budget is read from the engine (`llama-server --list-devices`) when it is built, from `iogpu.wired_limit_mb` when set, and only otherwise from the 75%-of-RAM formula — which measures 31457 MiB low on a 256 GiB M3 Ultra, so the source is always printed. |
 | `setup [--dry-run]` | Engine clone/pull + cmake Metal build; creates `models/`/`logs/`; wired-limit verification (see Installation). Idempotent. |
 | `update --engine\|--model\|--all [--dry-run]` | Engine: fetch the pinned `[engine] git_ref` (or git pull), rebuild, verify the built `llama-server` runs, report old→new commit. Model: re-resolve the active repo; new revisions land in a new `@rev` dir, license is diffed and **any change stops for explicit confirmation (STOP-4)** before an atomic registry repoint. Old revisions are never auto-deleted. |
+| `env` | Stdout-only `ANTHROPIC_*` exports; diagnostics to stderr; safe for `eval "$(chekov env)"`. |
 | `integrate hermes [--yes]` | Surgical merge into `~/.hermes/config.yaml` (details below). |
 | `integrate claude` | Generate `bin/cclocal`; global Claude settings untouched. |
-| `env` | Stdout-only `ANTHROPIC_*` exports; diagnostics to stderr; safe for `eval "$(chekov env)"`. |
 | `launch <agent> [--model N] [--print] [--proxy-only [--port N]] [-- args]` | Start the agent wired to the local model: proxy in-thread, generated config dir, agent as a child (auto-starts the server if it isn't running). `--print` emits the command instead of running it. `--proxy-only` runs just the foreground protocol translator (Anthropic `/v1/messages` → the server's OpenAI endpoint) on `--port` (default 8787), with no child and no generated settings — for hand-wiring a different client. |
+| `completions <shell>` | Emit shell completions for `bash`, `elvish`, `fish`, `powershell` or `zsh` on stdout — what `make install` runs to write `shell/_chekov`. |
 
 **Codebase mode** (`capability bench --codebase <PATH>`) turns the user's own
 repository into a graded infill benchmark: 24 deterministic same-file Rust
 tasks are sampled from `HEAD` (`[bench] codebase_tasks` in `config.toml`),
 masked out, and run through `/infill`. It requires a clean tree and runs in a
 detached worktree, so the benchmark never touches uncommitted changes or the
-branch you're on. Only tiers 1–5 (exact, edit similarity, identifier F1,
+branch you're on — with work in progress, bench a clone rather than the copy
+you are editing. Only tiers 1–5 (exact, edit similarity, identifier F1,
 parse, repo-symbol existence) are scored; tiers 6–7 (compile gate, covering
 test) and cross-file context are deferred to slice B. Masks are
 boundary-scanned, not AST-derived, and the report always says so. chekov
@@ -238,12 +242,30 @@ Then activate and verify:
 ```sh
 chekov use qwen3.8-27b
 chekov restart            # or `chekov run` if nothing is running
-chekov doctor             # both API doors, think-tags, NaN canary, ctx floor
+chekov doctor             # both doors, think-tags, NaN canary, ctx floor + loaded
 ```
 
 Pin a specific revision with `org/repo:QUANT@<sha>`; use `--dry-run` to see
 what would be downloaded; `--license-url` points the license snapshot at a
 non-standard location when the repo keeps it elsewhere.
+
+`--dry-run` prints the shard list with each file's byte size and the directory
+they would land in, and registers nothing. There is **no resume of a partial
+shard**: a download interrupted mid-file starts that file again from zero
+(finished shards are kept), which matters when a single shard is 40 GB.
+
+**Which repo layouts `pull` reads.** The quant tag is matched against three
+shapes, and a repo only has to use one of them:
+
+- a folder per quant named by the tag — unsloth's `UD-Q5_K_XL/…`;
+- a folder per quant named after the model, with the tag in the shard's own
+  filename — bartowski's
+  `Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`;
+- flat files in the repo root — `Model-Q8_0.gguf`.
+
+A dot-separated tag (`Model.Q4_K_M.gguf`, the mradermacher style) is **not**
+read yet: such a repo reports "this repo exposes no .gguf files". If a repo you
+expect to work reports that, check the layout before the tag.
 
 ### Swapping models
 
@@ -276,6 +298,43 @@ the license text changed between revisions — vendors have re-licensed
 post-release before; this gate is deliberate. Old revision dirs stay on disk
 until you `chekov rm` them.
 
+**Pinning the engine.** Weights are revision-pinned; without a pin the binary
+that runs them is whatever upstream HEAD was on the day of `setup` /
+`update --engine`. Set `[engine] git_ref` in `config.toml` to a branch, tag or
+commit and both commands `git fetch origin <ref>` + `git checkout --detach
+FETCH_HEAD` instead of fast-forwarding, and `update --engine` reports
+`engine: <old> → <new> (pinned to <ref>)`. Absent, nothing changes. A ref git
+would read as an option (`-…`) or that splits into several arguments is
+refused at config load, naming the key.
+
+Every engine build ends by running the binary it just produced
+(`llama-server --version`), so a llama.cpp change that breaks the build's
+output fails there as `EngineStepFailed` naming the step, rather than later as
+a failed `run`. There is no auto-rollback: `logs/chekov.engine` names the
+commit to go back to.
+
+**A diverged engine checkout.** If you have ever cherry-picked a fix into
+`llama.cpp/` by hand, that checkout carries a local commit and is no longer a
+descendant of `origin/master`, so the unpinned path — whose step is
+`git pull --ff-only` — fails at "update llama.cpp checkout" with git's
+`Not possible to fast-forward, aborting`. Nothing was rebuilt and the engine
+you have keeps working; only the update stopped. Either set `[engine] git_ref`
+to the ref you actually want, or reconcile and rebuild by hand with the same
+lines chekov itself runs:
+
+```sh
+git -C llama.cpp fetch origin && git -C llama.cpp rebase origin/master
+cmake -S llama.cpp -B llama.cpp/build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build llama.cpp/build --config Release --target llama-server -j
+llama.cpp/build/bin/llama-server --version     # the verify step
+```
+
+**Updating chekov itself.** `make` and `make setup` build into `target/`; they
+do **not** refresh the binary on your PATH. `make install` does — it re-runs
+`cargo install --path .` and regenerates the completions. After pulling new
+commits, run `make install` before blaming a missing flag on the tool: a
+days-old `~/.cargo/bin/chekov` is the likelier explanation.
+
 ### Troubleshooting
 
 | Symptom | Meaning / fix |
@@ -287,6 +346,10 @@ until you `chekov rm` them.
 | Doctor: think-tag FAIL | The model's `extra_flags` lost `--reasoning-format none`, or the template ate the tags — check `chekov show`. |
 | First Claude Code call is slow (~5–6 min) | Expected: Claude Code's initial request carries a ~60k-token system+tools prompt; MiniMax prompt-processes at ~180 tok/s. The server's prompt cache makes subsequent calls fast. |
 | Registry corrupt | The error names the file; restore from a backup or delete `models.toml` and re-`pull` (weights are untouched). |
+| `Not possible to fast-forward` on `setup` / `update --engine` | The `llama.cpp/` checkout has diverged from `origin/master` (a hand-applied commit), and the step is a `git pull --ff-only`. The built engine is untouched. Pin `[engine] git_ref`, or rebase and rebuild by hand — see [Updating](#updating). |
+| `quant tag 'X' not found … (none — this repo exposes no .gguf files)` | Either the installed binary predates the folder-per-quant fix (`make install`), or the repo uses a layout chekov does not read yet — a dot-separated tag such as `Model.Q4_K_M.gguf`. Check the repo's file list before assuming the tag is wrong. |
+| `WorkingTreeDirty` from `capability bench --codebase` | Codebase mode refuses a dirty tree so the task set is exactly what `HEAD` says. Commit, stash, or bench a clean clone of the repository. |
+| `codebase N/A — infill unsupported by this model` | The model's GGUF carries no FIM tokens, so `/infill` has nothing to fill. That is a missing capability, not a failing score — it is never reported as a zero. |
 
 ## Integrations
 
@@ -379,9 +442,11 @@ chekov pull https://huggingface.co/org/repo        # normalized to org/repo
 
 Short names derive from the repo tail: `-GGUF` stripped, lowercased
 (`unsloth/MiniMax-M2.7-GGUF` → `minimax-m2.7`). Override with `--name`.
-Quant tags are matched by a single source of truth (subdir-style
-`UD-Q5_K_XL/…` and flat `…-Q8_0.gguf` both work), so `Q5_K_XL` can never
-accidentally select `UD-Q5_K_XL` files.
+Quant tags are matched by a single source of truth — subdir-style
+`UD-Q5_K_XL/…`, a model-named subdir carrying the tag in the shard filename
+(`Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`), and flat `…-Q8_0.gguf` all
+work — so `Q5_K_XL` can never accidentally select `UD-Q5_K_XL` files. A
+dot-separated tag (`Model.Q4_K_M.gguf`) is not read yet.
 
 ## Registry: flags concatenate, never replace
 
@@ -439,7 +504,24 @@ replacement_char_max_pct = 5
 [engine]
 # git_ref = "b7000"       # pin the engine to a branch, tag, or commit;
                           # absent = upstream HEAD on the day of setup/update
+
+[bench]                          # `chekov capability bench`
+depths = [1024, 4096, 16384]     # prompt depths swept, in approximate tokens
+repetitions = 5                  # per depth; the first is dropped as warmup
+max_tokens = 128                 # decode length per probe
+significance_pct = 5             # median delta below this: no difference claimed
+ready_max_polls = 600            # readiness budget: polls × interval
+ready_interval_ms = 500
+seed = 42                        # sampling seed pinned onto every probe
+release_pct = 80                 # teardown waits for this % of the budget to free
+release_max_polls = 60           # release budget: polls × interval
+release_interval_ms = 500
+codebase_tasks = 24              # `--codebase` tasks per run (⅔ in_file, ⅓ function_body)
 ```
+
+`[limits] hermes_ctx_floor` is the hard context floor `doctor` enforces for a
+model marked `hermes_ok`; `[doctor] replacement_char_max_pct` is the U+FFFD
+density above which the NaN canary fails.
 
 Unknown keys are rejected loudly (deny_unknown_fields), never ignored.
 `config.example.toml` is a commented starting point; `config.toml` itself is
@@ -456,7 +538,11 @@ models.toml          # the registry — managed by pull/use/rm/update (gitignore
 models/<name>@<rev12>/     # weights + REVISION + LICENSE.snapshot/.provenance
                            # (or an absolute --model-loc dir)
 logs/                # chekov.pid, chekov.model, llama-server.log
+logs/chekov.engine   # the commit the engine was built from — the rollback pointer
 llama.cpp/           # engine checkout + Metal build (managed by setup)
+eval/<run-id>/       # one stored bench run: stamp.json + results.jsonl
+eval/.scratch/       # transient `--codebase` worktree; hidden from every enumerator
+reports/             # default destination for `capability graph --svg`
 agents/<agent>/      # generated agent settings for `chekov launch` (gitignored)
 bin/cclocal          # generated by `chekov integrate claude`
 shell/chekov.zsh     # PATH + cclocal alias + completions (sourced from ~/.zshrc)
@@ -480,7 +566,11 @@ make lint   # cargo fmt --check && cargo clippy --all-targets -- -D warnings
 - `deny.toml` is authored for CI supply-chain checks (`cargo deny`); CI
   (`.github/workflows/ci.yml`) runs fmt + clippy + tests on macOS and
   `cargo deny` on every push and PR
-- Changes are tracked in [CHANGELOG.md](CHANGELOG.md)
+- The pre-push gate is `pushkin floor` — fmt, clippy pedantic under
+  `-D warnings`, and the test suite in one command; the `make` targets above
+  are its individual halves
+- Changes are tracked in [CHANGELOG.md](CHANGELOG.md); open ideas and their
+  status live in [IDEAS.md](IDEAS.md)
 
 ### Cutting a release
 

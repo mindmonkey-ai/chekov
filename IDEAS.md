@@ -352,3 +352,33 @@ still works. Fallthrough means "no dedicated parser", not "cannot call tools".
 RESOLVED 2026-08-27 by the human: `recommend --role agent` DOWNRANKS a
 fallthrough candidate with a printed note rather than rejecting it. Implemented.
 Proposed 2026-08-27 — status: RESOLVED
+
+## Downloader status bar for `pull` (2026-08-29)
+`pull` is silent for the minutes-to-hours a 40 GB shard takes, so a working
+download and a hung one look identical. Proposal: a per-shard progress line on
+stderr — bytes / total, MiB/s, ETA, shard N of M — plain text when stderr is not
+a TTY, and nothing new on stdout so `pull` stays scriptable. Sibling of the
+still-OPEN partial-shard resume ("Replace hf-hub…", 2026-08-25): both need the
+same per-shard bookkeeping, so whichever lands first should build it for the
+other. Rationale: today's 397B pull is 5 × ~39 GB with no feedback at all.
+Proposed 2026-08-29 — status: OPEN
+
+## Portability sweep: any Apple Silicon Mac, not this Mac Studio (2026-08-29)
+chekov says it is for Apple Silicon, but it has only ever run on one M3 Ultra
+with 256 GB. A first count (2026-08-29) finds no machine constant in production
+code — `M3 Ultra` / `228065` appear only in a doc-comment example and tests, and
+`187000` only in `config.toml`, the `config.example.toml` comments and README
+prose — so the audit surface is: the `iogpu.wired_limit_mb` handling (12 sites in
+5 files: the 75% default, the sysctl read, the "required vs actual" check) on
+macOS versions and chips where the default differs; the sysctl/ioreg keys and
+the `llama-server --list-devices` line shape on M1–M4 and 8–512 GB parts;
+`machine_id` and the stamp's machine fields; tests that assert this machine's
+numbers; and every doc example written about this desk. Proposal: audit each,
+move anything machine-specific behind config or detection, and rewrite the
+examples so they are illustrations rather than this machine's values.
+Acceptance: on a 16 GB M1, `chekov capability`, `doctor`, `recommend` and `graph`
+give honest output — every model reads "exceeds", nothing crashes, no number is
+invented; the docs' examples do not assume this machine; and CI or a test pins
+that no machine constant is hard-coded outside config. Rationale: the tool is
+"for Apple Silicon", not "for this desk".
+Proposed 2026-08-29 — status: OPEN
