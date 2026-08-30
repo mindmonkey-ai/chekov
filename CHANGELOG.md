@@ -7,6 +7,22 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Changed
+- `[limits] wired_limit_mb` no longer has a built-in value. The old default,
+  187000 MB, was one 256 GB desk's number: on any Mac below ~250 GB a fresh
+  install refused every model as "unreachable" before looking at it, `setup`
+  ended incomplete demanding a sysctl the machine could never satisfy, and
+  `status` said "need 187000 MB". Absent — the default — the model is the
+  requirement: `run` sizes the model (weights on disk + KV cache at its
+  effective context, the same arithmetic `recommend` and `graph` use, now in
+  one `core::footprint`) against the live GPU budget and refuses only a model
+  that does not fit, with `ModelExceedsBudget` naming the levers that exist
+  (a smaller quant, a lower `ctx_size`, `capability recommend`) and never a
+  sysctl; a tight fit proceeds and says so; an unreadable header proceeds and
+  says it did not check. `setup` completes on any readable budget and prints
+  it with its provenance; `status` shows the budget and `(no floor
+  configured; run checks the model's footprint)`. A configured floor keeps
+  every previous behaviour exactly. A test now pins that no production path
+  decides anything with this desk's numbers.
 - `capability compare`'s codebase section shows a `cross_file_first` task's
   two arms apart — `cross_file_first` and `cross_file_first+extra`, paired by
   full task id as the report does — instead of one line blending both, and

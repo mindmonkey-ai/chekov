@@ -391,7 +391,16 @@ give honest output — every model reads "exceeds", nothing crashes, no number i
 invented; the docs' examples do not assume this machine; and CI or a test pins
 that no machine constant is hard-coded outside config. Rationale: the tool is
 "for Apple Silicon", not "for this desk".
-Proposed 2026-08-29 — status: OPEN
+Part 1 SHIPPED 2026-08-30 — the one constant that bit: the compiled-in
+`wired_limit_mb = 187000` refused every model on any Mac under ~250 GB. The
+floor is now opt-in (`Option`, default absent) and `run` judges the model's own
+footprint against the live budget through one shared `core::footprint`;
+`setup`/`status` say what is checked; a test pins that no production path in
+config/checks/machine/footprint/run/setup/status/pull decides with this desk's
+numbers (doc comments may still illustrate with them). Still open: the
+`--list-devices` line shape and sysctl keys on M1–M4 parts other than this one
+(only verifiable on those machines), and the spec's worked examples.
+Proposed 2026-08-29 — status: PART 1 SHIPPED; hardware sweep OPEN
 
 ## `compare` shows the cross-file arms and the lift side by side (2026-08-30)
 The codebase section of `capability compare` pairs rows by task id and groups them
