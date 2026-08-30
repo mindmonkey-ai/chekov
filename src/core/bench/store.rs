@@ -626,13 +626,10 @@ fn rows_of<'a>(log: &'a RunLog, suite: &'a str) -> impl Iterator<Item = &'a Task
     log.rows.iter().filter(move |r| r.suite == suite)
 }
 
-/// Every verdict row, in file order.
-///
-/// `pub`, not `pub(crate)`: its one caller lands in a later task (spec C's
-/// judge phase), so nothing in-crate reaches it yet — `pub(crate)` visibility
-/// alone would read as dead code until that task lands.
+/// Every verdict row, in file order — the report's source for the judge
+/// clause and trailer.
 #[must_use]
-pub fn judge_rows(log: &RunLog) -> Vec<&TaskRow> {
+pub(crate) fn judge_rows(log: &RunLog) -> Vec<&TaskRow> {
     rows_of(log, JUDGE_SUITE)
         .filter(|r| r.judge.is_some())
         .collect()
@@ -818,18 +815,22 @@ pub fn render_codebase(log: &RunLog) -> String {
     let mut out = codebase_header(&Header {
         kept: &kept,
         excluded,
-        stamp: &log.head.stamp,
+        log,
     });
     out.push_str(&scores_line(
         "in_file",
         &group(&kept, TaskTier::InFile, None),
+        None,
     ));
+    let judge = judge_cell(&kept, log);
     out.push_str(&scores_line(
         "function_body",
         &group(&kept, TaskTier::FunctionBody, None),
+        judge.as_deref(),
     ));
     out.push_str(&cross_lines(&rows, &kept));
     out.push_str(&exec_trailer(&kept, &log.head.stamp));
+    out.push_str(&judge_trailer(&kept, log));
     out
 }
 
@@ -837,7 +838,7 @@ pub fn render_codebase(log: &RunLog) -> String {
 struct Header<'a> {
     kept: &'a [&'a TaskRow],
     excluded: usize,
-    stamp: &'a crate::core::bench::stamp::Stamp,
+    log: &'a RunLog,
 }
 
 fn codebase_header(header: &Header) -> String {
@@ -850,14 +851,15 @@ fn codebase_header(header: &Header) -> String {
     format!(
         "codebase     {} tasks, {} crossings, from {} files ({}) — {}; context: same-file, \
          plus the defining file for cross_file_first (engine window ≤ n_batch; extra from \
-         ctx); tiers 1-4 score the first gold_lines lines of each fill{}{}{}\n",
+         ctx); tiers 1-4 score the first gold_lines lines of each fill{}{}{}{}\n",
         distinct_tasks(kept),
         kept.len(),
         distinct_files(kept),
         crate::core::bench::codebase::tier_counts_clause(counts),
         crate::core::bench::codebase::MASK_LABEL,
         elided_note(kept),
-        exec_clause(header.stamp),
+        exec_clause(&header.log.head.stamp),
+        judge_clause(header.log),
         excluded_note(header.excluded),
     )
 }
@@ -899,8 +901,8 @@ fn cross_lines(rows: &[&TaskRow], kept: &[&TaskRow]) -> String {
     }
     format!(
         "{}{}{}",
-        scores_line("cross_file_first", &without),
-        scores_line("cross_file_first+extra", &with),
+        scores_line("cross_file_first", &without, None),
+        scores_line("cross_file_first+extra", &with, None),
         lift_line(kept)
     )
 }
@@ -964,7 +966,7 @@ fn codebase_na_line(rows: &[&TaskRow]) -> String {
 
 /// One line of tier means for a group, at the 24-wide label column every
 /// line of the block shares.
-fn scores_line(label: &str, group: &[&CodebaseRow]) -> String {
+fn scores_line(label: &str, group: &[&CodebaseRow], judge: Option<&str>) -> String {
     if group.is_empty() {
         return String::new();
     }
@@ -976,6 +978,9 @@ fn scores_line(label: &str, group: &[&CodebaseRow]) -> String {
     }
     cells.push(symbols_cell(group));
     cells.extend(exec_cells(group));
+    if let Some(j) = judge {
+        cells.push(j.to_owned());
+    }
     format!(
         "             {label:<24}{}   (n={})\n",
         cells.join("   "),
@@ -1225,6 +1230,128 @@ fn exec_trailer(rows: &[&TaskRow], stamp: &crate::core::bench::stamp::Stamp) -> 
         median(&checks[1..]).unwrap_or(checks[0]),
         skip_note(&skips),
     )
+}
+
+/// `equiv 0.60 (n=5 judged of 6; 1 undecided)`, or the void, or `None`
+/// when the run has no judge rows at all.
+fn judge_cell(kept: &[&TaskRow], log: &RunLog) -> Option<String> {
+    let stamp = log.head.stamp.judge.as_ref()?;
+    let rows: Vec<&JudgeRow> = judge_rows(log)
+        .iter()
+        .filter_map(|r| r.judge.as_ref())
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let total = tier_tasks(kept, TaskTier::FunctionBody);
+    if let Some(rate) = crate::core::bench::judge::consistency_pct(&rows)
+        && rate < stamp.min_consistency_pct
+    {
+        return Some(format!(
+            "equiv voided (swap consistency {rate}% < {}%)",
+            stamp.min_consistency_pct
+        ));
+    }
+    let judged: Vec<bool> = rows.iter().filter_map(|r| r.equivalent).collect();
+    let undecided = rows
+        .iter()
+        .filter(|r| r.decided_by == DecidedBy::SwapDisagreement)
+        .count();
+    if judged.is_empty() {
+        return Some(format!(
+            "equiv n/a (0 judged of {total}; {undecided} undecided)"
+        ));
+    }
+    let agreed = judged.iter().filter(|&&e| e).count();
+    let mean = as_f64(agreed) / as_f64(judged.len());
+    Some(format!(
+        "equiv {mean:.2} (n={} judged of {total}; {undecided} undecided)",
+        judged.len()
+    ))
+}
+
+/// `; judge: <model> (<quant>@<rev12>, <arch>, effort <e>) rubric <hash>, swap consistency N% (k of n)`.
+fn judge_clause(log: &RunLog) -> String {
+    let Some(j) = log.head.stamp.judge.as_ref() else {
+        return String::new();
+    };
+    let rows: Vec<&JudgeRow> = judge_rows(log)
+        .iter()
+        .filter_map(|r| r.judge.as_ref())
+        .collect();
+    let answered = rows
+        .iter()
+        .filter(|r| r.gold_first.is_some() && r.prediction_first.is_some())
+        .count();
+    let agreed = rows
+        .iter()
+        .filter(|r| r.gold_first.is_some() && r.gold_first == r.prediction_first)
+        .count();
+    let consistency = crate::core::bench::judge::consistency_pct(&rows).map_or_else(
+        || "n/a".to_owned(),
+        |rate| format!("{rate}% ({agreed} of {answered})"),
+    );
+    format!(
+        "; judge: {} ({}@{}, {}, effort {}) rubric {}, swap consistency {consistency}",
+        j.model, j.quant, j.revision, j.arch, j.reasoning_effort, j.rubric_hash
+    )
+}
+
+/// The judge's own trailer line: called under `--judge`, resuming, or
+/// skipped outright — and a second line naming any off-schema replies.
+fn judge_trailer(kept: &[&TaskRow], log: &RunLog) -> String {
+    let Some(stamp) = log.head.stamp.judge.as_ref() else {
+        return "             judge skipped: --judge not given\n".to_owned();
+    };
+    let rows: Vec<&JudgeRow> = judge_rows(log)
+        .iter()
+        .filter_map(|r| r.judge.as_ref())
+        .collect();
+    let total = tier_tasks(kept, TaskTier::FunctionBody);
+    if rows.is_empty() {
+        return format!(
+            "             judge: 0 of {total} crossings judged — resume with --judge {}\n",
+            stamp.model
+        );
+    }
+    let count = |d: DecidedBy| rows.iter().filter(|r| r.decided_by == d).count();
+    let called = rows.iter().filter(|r| r.gold_first.is_some()).count();
+    let secs: Vec<f64> = rows
+        .iter()
+        .filter(|r| r.gold_first.is_some())
+        .map(|r| r.judge_secs)
+        .collect();
+    let mut out = format!(
+        "             judge: {} identical, {called} called, {} undecided, {} skipped; {:.1} s \
+         median per verdict\n",
+        count(DecidedBy::Identical),
+        count(DecidedBy::SwapDisagreement),
+        count(DecidedBy::Skipped),
+        median(&secs).unwrap_or(0.0)
+    );
+    if let Some(warning) = schema_warning(&rows) {
+        out.push_str(&warning);
+    }
+    out
+}
+
+/// `             warning: N reply was not the schema — …`, or `None` when
+/// every reply the judge returned parsed as the schema.
+fn schema_warning(rows: &[&JudgeRow]) -> Option<String> {
+    let not_schema = rows
+        .iter()
+        .filter(|r| {
+            r.skipped
+                .as_deref()
+                .is_some_and(|s| s.starts_with("reply was not the schema"))
+        })
+        .count();
+    (not_schema > 0).then(|| {
+        format!(
+            "             warning: {not_schema} reply was not the schema — the grammar was \
+             not enforced for this judge and the column is measuring the prompt alone\n"
+        )
+    })
 }
 
 /// Every skip reason with its count, most frequent first and ties by reason —
@@ -2758,6 +2885,7 @@ mod tests {
     }
 
     /// Bundled so `judge_verdict` stays within the 3-argument limit.
+    #[derive(Clone, Copy)]
     struct JudgeFixture<'a> {
         id: &'a str,
         equivalent: Option<bool>,
@@ -2781,34 +2909,10 @@ mod tests {
         )
     }
 
-    /// Six `function_body` crossings plus their verdicts: one identical, three
-    /// swap-agreements (two of them agreeing on `false`), one swap
-    /// disagreement, and one skipped for an off-schema reply.
-    fn judged_run() -> RunLog {
-        let eval = scratch("judged-report");
-        let mut head = head();
-        head.stamp.judge = Some(JudgeStamp {
-            model: "gpt-oss-20b".into(),
-            quant: "F16".into(),
-            revision: "1a2b3c4d5e6f".into(),
-            arch: "gpt-oss".into(),
-            rubric_hash: "9f8e7d6c5b4a".into(),
-            max_tokens: 512,
-            reasoning_effort: "low".into(),
-            min_consistency_pct: 70,
-        });
-        let mut writer = RunWriter::create(&eval, "r-judged-report", &head).expect("create");
-        for id in ["fb-1", "fb-2", "fb-3", "fb-4", "fb-5", "fb-6"] {
-            writer
-                .append(codebase_task(CodebaseFixture {
-                    id,
-                    tier: TaskTier::FunctionBody,
-                    gold: "let x = 1;\n    x",
-                    prediction: "x",
-                }))
-                .expect("append");
-        }
-        for fixture in [
+    /// `fb-1` identical, `fb-2..fb-4` swap agreements (two of them agreeing
+    /// on `false`).
+    fn identical_and_agreements() -> [JudgeFixture<'static>; 4] {
+        [
             JudgeFixture {
                 id: "fb-1",
                 equivalent: Some(true),
@@ -2841,6 +2945,12 @@ mod tests {
                 decided_by: DecidedBy::SwapAgreement,
                 skipped: None,
             },
+        ]
+    }
+
+    /// `fb-5` a swap disagreement, `fb-6` skipped for an off-schema reply.
+    fn disagreement_and_skip() -> [JudgeFixture<'static>; 2] {
+        [
             JudgeFixture {
                 id: "fb-5",
                 equivalent: None,
@@ -2857,7 +2967,47 @@ mod tests {
                 decided_by: DecidedBy::Skipped,
                 skipped: Some("reply was not the schema: yes"),
             },
-        ] {
+        ]
+    }
+
+    fn judge_verdicts() -> impl Iterator<Item = JudgeFixture<'static>> {
+        identical_and_agreements()
+            .into_iter()
+            .chain(disagreement_and_skip())
+    }
+
+    /// Six `function_body` crossings plus the verdicts `judge_verdicts`
+    /// describes.
+    ///
+    /// Every call gets its own scratch directory — three tests call this
+    /// helper, and `cargo test` runs them concurrently.
+    fn judged_run() -> RunLog {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let eval = scratch(&format!("judged-report-{n}"));
+        let mut head = head();
+        head.stamp.judge = Some(JudgeStamp {
+            model: "gpt-oss-20b".into(),
+            quant: "F16".into(),
+            revision: "1a2b3c4d5e6f".into(),
+            arch: "gpt-oss".into(),
+            rubric_hash: "9f8e7d6c5b4a".into(),
+            max_tokens: 512,
+            reasoning_effort: "low".into(),
+            min_consistency_pct: 70,
+        });
+        let mut writer = RunWriter::create(&eval, "r-judged-report", &head).expect("create");
+        for id in ["fb-1", "fb-2", "fb-3", "fb-4", "fb-5", "fb-6"] {
+            writer
+                .append(codebase_task(CodebaseFixture {
+                    id,
+                    tier: TaskTier::FunctionBody,
+                    gold: "let x = 1;\n    x",
+                    prediction: "x",
+                }))
+                .expect("append");
+        }
+        for fixture in judge_verdicts() {
             writer.append(judge_verdict(fixture)).expect("append");
         }
         RunLog::load(writer.dir()).expect("load")
@@ -2877,28 +3027,50 @@ mod tests {
     fn the_function_body_line_carries_the_equiv_cell_and_the_header_names_the_judge() {
         let out = render_codebase(&judged_run());
         assert!(out.contains("; judge: gpt-oss-20b (F16@1a2b3c4d5e6f, gpt-oss, effort low) rubric 9f8e7d6c5b4a, swap consistency 75% (3 of 4)"), "{out}");
-        assert!(out.contains("equiv 0.50 (n=4 judged of 6; 1 undecided)"), "identical counts as true, 2 true of 4: {out}");
+        assert!(
+            out.contains("equiv 0.50 (n=4 judged of 6; 1 undecided)"),
+            "identical counts as true, 2 true of 4: {out}"
+        );
         assert!(out.contains("             judge: 1 identical, 4 called, 1 undecided, 1 skipped; 2.1 s median per verdict\n"), "{out}");
         assert!(out.contains("             warning: 1 reply was not the schema — the grammar was not enforced for this judge and the column is measuring the prompt alone\n"), "{out}");
-        let in_file_line = out.lines().find(|l| l.contains("in_file")).unwrap_or_default();
-        assert!(!in_file_line.contains("equiv"), "other tiers print no equiv cell: {in_file_line}");
+        let in_file_line = out
+            .lines()
+            .find(|l| l.contains("in_file"))
+            .unwrap_or_default();
+        assert!(
+            !in_file_line.contains("equiv"),
+            "other tiers print no equiv cell: {in_file_line}"
+        );
     }
 
     #[test]
     fn below_the_floor_the_column_is_voided_with_both_numbers() {
         let mut log = judged_run();
-        log.head.stamp.judge.as_mut().map(|j| j.min_consistency_pct = 80);
+        if let Some(judge) = log.head.stamp.judge.as_mut() {
+            judge.min_consistency_pct = 80;
+        }
         let out = render_codebase(&log);
-        assert!(out.contains("equiv voided (swap consistency 75% < 80%)"), "{out}");
+        assert!(
+            out.contains("equiv voided (swap consistency 75% < 80%)"),
+            "{out}"
+        );
     }
 
     #[test]
     fn without_a_judge_the_trailer_says_so_and_an_unjudged_run_says_how_to_resume() {
         let out = render_codebase(&codebase_only_run());
-        assert!(out.contains("             judge skipped: --judge not given\n"), "{out}");
+        assert!(
+            out.contains("             judge skipped: --judge not given\n"),
+            "{out}"
+        );
         let mut stamped = judged_run();
         stamped.rows.retain(|r| r.suite != "judge");
         let out = render_codebase(&stamped);
-        assert!(out.contains("             judge: 0 of 6 crossings judged — resume with --judge gpt-oss-20b\n"), "{out}");
+        assert!(
+            out.contains(
+                "             judge: 0 of 6 crossings judged — resume with --judge gpt-oss-20b\n"
+            ),
+            "{out}"
+        );
     }
 }
