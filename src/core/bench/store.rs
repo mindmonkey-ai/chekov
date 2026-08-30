@@ -642,7 +642,7 @@ pub fn render_codebase(log: &RunLog) -> String {
         "function_body",
         &group(&kept, TaskTier::FunctionBody, None),
     ));
-    out.push_str(&cross_lines(&kept));
+    out.push_str(&cross_lines(&rows, &kept));
     out.push_str("             tiers 6-7 skipped: slice B2 (--allow-exec)\n");
     out
 }
@@ -667,23 +667,44 @@ fn codebase_header(kept: &[&TaskRow], excluded: usize) -> String {
     )
 }
 
-/// The cross-file tier's two arm lines and the lift — or, when no cross-file
-/// task was sampled, one line saying that rather than three empty ones.
-fn cross_lines(kept: &[&TaskRow]) -> String {
+/// The cross-file tier's two arm lines and the lift — or one line saying
+/// why there are none, told apart by the run's OWN rows.
+///
+/// "None sampled" is a claim about the repository, and only the rows before
+/// the unavailable ones were dropped can support it: an outage that took
+/// every crossing away leaves the same empty groups behind, and printing
+/// "no unambiguous cross-file first use in this repository" for it blames
+/// the repository for the server.
+fn cross_lines(rows: &[&TaskRow], kept: &[&TaskRow]) -> String {
     use crate::core::bench::codebase::run::{NO_EXTRA, WITH_EXTRA};
-    let without = group(kept, TaskTier::CrossFileFirst, Some(NO_EXTRA));
-    if without.is_empty() {
+    let sampled: Vec<&TaskRow> = rows.iter().filter(|r| is_cross(r)).copied().collect();
+    if sampled.is_empty() {
         return "             cross_file_first        none sampled — no unambiguous \
                 cross-file first use in this repository\n"
             .to_owned();
     }
+    let without = group(kept, TaskTier::CrossFileFirst, Some(NO_EXTRA));
     let with = group(kept, TaskTier::CrossFileFirst, Some(WITH_EXTRA));
+    if without.is_empty() && with.is_empty() {
+        return format!(
+            "             {:<24}all {} crossings unavailable — {}\n",
+            "cross_file_first",
+            sampled.len(),
+            unavailable_reason(&sampled)
+        );
+    }
     format!(
         "{}{}{}",
         scores_line("cross_file_first", &without),
         scores_line("cross_file_first+extra", &with),
         lift_line(kept)
     )
+}
+
+fn is_cross(row: &TaskRow) -> bool {
+    row.codebase
+        .as_ref()
+        .is_some_and(|c| c.tier == TaskTier::CrossFileFirst)
 }
 
 /// A cross-file task's id without its arm suffix — the two arms are one task.
@@ -1700,6 +1721,38 @@ mod tests {
         );
         assert!(!rendered.contains("context lift"), "{rendered}");
         assert!(!rendered.contains("cross_file_first+extra"), "{rendered}");
+    }
+
+    /// An outage that took every crossing away is not a repository without
+    /// cross-file first uses — the run sampled six, and the line says which
+    /// of the two happened.
+    #[test]
+    fn a_cross_lane_lost_to_an_outage_says_so_and_does_not_blame_the_repository() {
+        let eval = scratch("codebase-cross-outage");
+        let mut writer = RunWriter::create(&eval, "r23-model", &head()).expect("create");
+        for task in codebase_fixtures().into_iter().take(2).map(codebase_task) {
+            writer.append(task).expect("append");
+        }
+        for id in [
+            "cross_file_first-abc123-L4",
+            "cross_file_first-abc123-L4+extra",
+        ] {
+            let mut task = unavailable_codebase_task(id, "the server stopped answering", false);
+            if let Some(row) = task.codebase.as_mut() {
+                row.tier = TaskTier::CrossFileFirst;
+            }
+            writer.append(task).expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains(
+                "             cross_file_first        all 2 crossings unavailable — \
+                 the server stopped answering"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("none sampled"), "{rendered}");
+        assert!(!rendered.contains("context lift"), "{rendered}");
     }
 
     #[test]

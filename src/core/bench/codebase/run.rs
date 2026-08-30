@@ -240,6 +240,18 @@ fn scored_for<'a>(
     }
 }
 
+/// This arm's `excluded.cross_file`: the task's own sentence on the arm that
+/// was shown the defining file, and the withheld form on the one that was
+/// not. A same-file tier keeps what the task recorded.
+fn cross_file_line(task: &CodebaseTask, arm: &Arm) -> String {
+    match task.extra.as_ref() {
+        Some(extra) if !arm.with_extra => {
+            super::crossfile::cross_file_withheld_note(extra, task.excluded.cross_file_withheld)
+        }
+        _ => task.excluded.cross_file.clone(),
+    }
+}
+
 /// Assemble and append one codebase row: an answered task's raw prediction
 /// with tier 5 scored against the worktree's symbol set, or an unavailable
 /// one's reason with no tier-5 score at all — a task nobody answered has no
@@ -256,6 +268,10 @@ fn record_codebase_task(
     } = recorded;
     let parts = row_parts(outcome);
     let symbols_score = tier_five(task, &parts, &Scoring { symbols, arm });
+    let excluded = super::Excluded {
+        cross_file: cross_file_line(task, arm),
+        ..task.excluded.clone()
+    };
     sink.writer.append(store::Task {
         suite: "codebase".into(),
         task_id: arm.id.clone(),
@@ -271,7 +287,7 @@ fn record_codebase_task(
             prediction: parts.prediction,
             prefix: task.prefix.clone(),
             suffix: task.suffix.clone(),
-            excluded: task.excluded.clone(),
+            excluded,
             symbols_score,
             unsupported: parts.unsupported,
             arm: arm.label.map(str::to_owned),
@@ -672,6 +688,47 @@ mod tests {
             rows[1].codebase.as_ref().map(|c| c.also_first_uses.clone()),
             Some(vec!["Widget".to_owned()])
         );
+    }
+
+    /// Each arm's row has to be true read on its own: the one that was shown
+    /// the file says "sent", the one that was not says "withheld".
+    #[test]
+    fn each_arm_records_what_that_arm_was_shown_and_never_the_other_arms_context() {
+        let (rows, _, _) = drive(
+            "arm-context",
+            &prepared_cross(),
+            (vec![Ok(infill_200()), Ok(infill_200())], vec![]),
+        );
+        let note = |r: &TaskRow| {
+            r.codebase
+                .as_ref()
+                .map(|c| c.excluded.cross_file.clone())
+                .expect("a codebase row")
+        };
+        assert_eq!(
+            note(&rows[0]),
+            "defining file src/defs.rs (0.0 KiB) withheld from this arm; \
+             withheld 0 (contain the answer)"
+        );
+        assert_eq!(
+            note(&rows[1]),
+            "sent src/defs.rs (0.1 KiB); withheld 0 (contain the answer)"
+        );
+    }
+
+    /// The other half of the arm split: a task whose defining file went
+    /// missing carries no `extra`, so neither arm claims one was sent.
+    #[test]
+    fn a_same_file_tier_keeps_the_note_its_task_recorded() {
+        let (rows, _, _) = drive(
+            "same-file-note",
+            &prepared_pair(),
+            (vec![Ok(infill_200()), Ok(infill_200())], vec![]),
+        );
+        for row in &rows {
+            let codebase = row.codebase.as_ref().expect("a codebase row");
+            assert_eq!(codebase.excluded.cross_file, "n/a: same-file");
+        }
     }
 
     #[test]

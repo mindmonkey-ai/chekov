@@ -572,16 +572,37 @@ fn withheld_count(gold: &str, defining: &str, corpus: &Corpus<'_>) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// `excluded.cross_file` for a cross-file task: what was sent and what was
-/// kept back, in words the report can print unchanged.
+/// `excluded.cross_file` for the arm that was SHOWN the defining file: what
+/// went up, and what was kept back, in words the report can print unchanged.
 #[must_use]
 pub fn cross_file_note(a: &Assembled) -> String {
-    let truncated = if a.extra.truncated { ", truncated" } else { "" };
-    let kib = ladder::as_f64(usize::try_from(a.extra.bytes).unwrap_or(usize::MAX)) / 1024.0;
     format!(
-        "sent {} ({kib:.1} KiB{truncated}); withheld {} (contain the answer)",
-        a.extra.path, a.withheld
+        "sent {} ({}); withheld {} (contain the answer)",
+        a.extra.path,
+        extra_size(&a.extra),
+        a.withheld
     )
+}
+
+/// The same file, named as what this arm did NOT get.
+///
+/// The `no_extra` row carries the task's context record too, and the task's
+/// record says "sent" — true of the crossing, false of that row. A reader
+/// auditing one arm reads one row, so the row has to be true on its own.
+#[must_use]
+pub fn cross_file_withheld_note(extra: &ExtraFile, withheld: u32) -> String {
+    format!(
+        "defining file {} ({}) withheld from this arm; withheld {withheld} (contain the answer)",
+        extra.path,
+        extra_size(extra)
+    )
+}
+
+/// `2.0 KiB` or `32.0 KiB, truncated` — the size clause both arms print.
+fn extra_size(extra: &ExtraFile) -> String {
+    let truncated = if extra.truncated { ", truncated" } else { "" };
+    let kib = ladder::as_f64(usize::try_from(extra.bytes).unwrap_or(usize::MAX)) / 1024.0;
+    format!("{kib:.1} KiB{truncated}")
 }
 
 #[cfg(test)]
