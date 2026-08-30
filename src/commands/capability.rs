@@ -124,6 +124,14 @@ pub struct BenchOpts {
     /// only the codebase set runs.
     #[arg(long, conflicts_with = "fixture")]
     pub codebase: Option<std::path::PathBuf>,
+    /// Run the repository's own build for tiers 6-7 (compile gate, covering
+    /// test). The SINGLE gate on every path that executes repository code:
+    /// `cargo check` and `cargo test` run its `build.rs`, its proc-macros and
+    /// its tests — the same trust as building it yourself. Bounded to a
+    /// detached worktree, offline after one fetch, a scratch target directory
+    /// and wall-clock timeouts; not a sandbox.
+    #[arg(long)]
+    pub allow_exec: bool,
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -783,6 +791,7 @@ struct BenchArgs<'a> {
     yes: bool,
     suite: Option<crate::core::bench::lifecycle::Suite>,
     codebase: Option<&'a std::path::Path>,
+    allow_exec: bool,
 }
 
 impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
@@ -795,6 +804,7 @@ impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
             yes: opts.yes,
             suite: effective_suite(opts.suite, opts.codebase.is_some()),
             codebase: opts.codebase.as_deref(),
+            allow_exec: opts.allow_exec,
         }
     }
 }
@@ -1004,6 +1014,7 @@ fn head_inputs<'a>(
         codebase: inputs
             .prepared
             .map(|p| (p.head.as_str(), p.set_hash.as_str())),
+        allow_exec: inputs.args.allow_exec,
     }
 }
 
@@ -1517,6 +1528,10 @@ struct HeadInputs<'a> {
     /// The codebase run's head and task-set hash, when there is one — drives
     /// `corpus_id` ahead of `suite`/`fixture`.
     codebase: Option<(&'a str, &'a str)>,
+    /// Whether `--allow-exec` was given. `cargo_version` and `exec_target`
+    /// stay off regardless: tiers 6-7 have no run loop yet (Task 5), so no
+    /// build ever happens even when the flag is on.
+    allow_exec: bool,
 }
 
 /// Who measured: the hashed machine identity, its human-readable brand, and
@@ -1558,21 +1573,28 @@ fn head_corpus(
     Ok((prompt_set_hash, corpus))
 }
 
-fn build_head(
-    ctx: &Ctx,
+/// The stamp's remaining pieces once identity, flags and corpus are known —
+/// bundled so `assemble_stamp` stays within the 3-argument limit (§4).
+struct StampParts {
+    machine_id: String,
+    engine: String,
+    prompt_set_hash: String,
+    corpus_id: String,
+    flags: StampedFlags,
+    seed: u32,
+}
+
+/// The stamp itself, given the setup and inputs `build_head` already has plus
+/// everything else bundled in `parts`.
+fn assemble_stamp(
     setup: &BenchSetup,
     inputs: &HeadInputs,
-) -> Result<crate::core::bench::store::RunHead, ChekovError> {
-    use crate::core::bench::{stamp, store};
-    let cfg = &ctx.config;
-    let (machine_id, machine_brand, engine) = stamp_identity(cfg)?;
-    let launch_args = crate::core::server::launch_args(cfg, &setup.eff);
-    let bench_cfg = &cfg.file.bench;
-    let flags = stamped_flags(&launch_args);
-    let (prompt_set_hash, corpus_id) = head_corpus(inputs, bench_cfg)?;
-    let head_stamp = stamp::Stamp {
-        machine_id,
-        engine_build_commit: engine,
+    parts: StampParts,
+) -> crate::core::bench::stamp::Stamp {
+    use crate::core::bench::stamp;
+    stamp::Stamp {
+        machine_id: parts.machine_id,
+        engine_build_commit: parts.engine,
         weights_revision: format!(
             "{}/{}",
             setup.eff.entry.revision, setup.eff.entry.first_shard
@@ -1580,18 +1602,49 @@ fn build_head(
         quant: setup.eff.entry.quant.clone(),
         ctx: inputs.props.n_ctx,
         n_parallel: inputs.props.total_slots,
-        kv_unified: flags.kv_unified,
-        n_batch: flags.n_batch,
-        n_ubatch: flags.n_ubatch,
-        type_k: flags.type_k,
-        type_v: flags.type_v,
-        flash_attn: flags.flash_attn,
-        seed: bench_cfg.seed,
+        kv_unified: parts.flags.kv_unified,
+        n_batch: parts.flags.n_batch,
+        n_ubatch: parts.flags.n_ubatch,
+        type_k: parts.flags.type_k,
+        type_v: parts.flags.type_v,
+        flash_attn: parts.flags.flash_attn,
+        allow_exec: inputs.allow_exec,
+        // Neither tier has a run loop yet (Task 5), so no build ever happens —
+        // "none" is correct even when the flag is on.
+        cargo_version: None,
+        exec_target: stamp::EXEC_TARGET_OFF.to_owned(),
+        seed: parts.seed,
         temperature_milli: 0,
         chekov_version: env!("CARGO_PKG_VERSION").to_owned(),
-        prompt_set_hash,
-        corpus_id,
-    };
+        prompt_set_hash: parts.prompt_set_hash,
+        corpus_id: parts.corpus_id,
+    }
+}
+
+fn build_head(
+    ctx: &Ctx,
+    setup: &BenchSetup,
+    inputs: &HeadInputs,
+) -> Result<crate::core::bench::store::RunHead, ChekovError> {
+    use crate::core::bench::store;
+    let cfg = &ctx.config;
+    let (machine_id, machine_brand, engine) = stamp_identity(cfg)?;
+    let launch_args = crate::core::server::launch_args(cfg, &setup.eff);
+    let bench_cfg = &cfg.file.bench;
+    let flags = stamped_flags(&launch_args);
+    let (prompt_set_hash, corpus_id) = head_corpus(inputs, bench_cfg)?;
+    let head_stamp = assemble_stamp(
+        setup,
+        inputs,
+        StampParts {
+            machine_id,
+            engine,
+            prompt_set_hash,
+            corpus_id,
+            flags,
+            seed: bench_cfg.seed,
+        },
+    );
     // Only a run with a forced pass has a forced reasoning mode to record.
     let forced_reasoning_format = inputs
         .suite
@@ -1852,6 +1905,25 @@ mod tests {
             super::effective_suite(Some(Suite::All), true),
             Some(Suite::All)
         );
+    }
+
+    #[test]
+    fn allow_exec_defaults_off_and_is_a_bare_switch() {
+        use clap::Parser;
+
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            opts: super::BenchOpts,
+        }
+
+        let off = Wrap::parse_from(["bench", "--codebase", "."]);
+        assert!(
+            !off.opts.allow_exec,
+            "nothing executes unless it is asked for"
+        );
+        let on = Wrap::parse_from(["bench", "--codebase", ".", "--allow-exec"]);
+        assert!(on.opts.allow_exec);
     }
 
     use crate::core::bench::codebase::ladder::Symbols;

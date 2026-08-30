@@ -295,6 +295,7 @@ fn record_codebase_task(
             also_first_uses: task.also_first_uses.clone(),
             name: task.name.clone(),
             n_predict: Some(runner::n_predict_for(gold_lines(task))),
+            exec: None,
         }),
     })
 }
@@ -426,6 +427,9 @@ mod tests {
                 type_k: "q8_0".into(),
                 type_v: "q8_0".into(),
                 flash_attn: "on".into(),
+                allow_exec: false,
+                cargo_version: None,
+                exec_target: "none".into(),
                 seed: 42,
                 temperature_milli: 0,
                 chekov_version: "0.1.0".into(),

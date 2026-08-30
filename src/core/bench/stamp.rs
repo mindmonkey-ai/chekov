@@ -1,4 +1,4 @@
-//! The 17-field configuration stamp (spec §7.4).
+//! The 20-field configuration stamp (spec §7.4).
 //!
 //! llama.cpp does not guarantee bit-identical results across configurations:
 //! GPU reduction kernels pick different accumulation orders and float
@@ -32,6 +32,22 @@ pub struct Stamp {
     pub type_k: String,
     pub type_v: String,
     pub flash_attn: String,
+    /// Whether `--allow-exec` was given. Runs that executed the repository and
+    /// runs that only read it are not the same environment: tiers 6-7 exist in
+    /// one and are absent from the other, so `compare` refuses across it.
+    #[serde(default)]
+    pub allow_exec: bool,
+    /// The `cargo --version` line, when exec ran. `None` both when the flag was
+    /// absent and when the machine had no toolchain — the report tells those
+    /// two apart from the rows, not from here.
+    #[serde(default)]
+    pub cargo_version: Option<String>,
+    /// Where the build artefacts went: `"scratch"` for the run's own
+    /// `CARGO_TARGET_DIR`, `"none"` when nothing was built. A later slice that
+    /// reuses the repository's `target/` is a different environment and this
+    /// field is how `compare` will say so.
+    #[serde(default = "exec_target_off")]
+    pub exec_target: String,
     pub seed: u32,
     /// Millitemperature (0 = greedy) — integer so every field compares exactly.
     pub temperature_milli: u32,
@@ -40,10 +56,20 @@ pub struct Stamp {
     pub corpus_id: String,
 }
 
+/// A stamp written before the exec tiers existed ran nothing, and says so.
+fn exec_target_off() -> String {
+    EXEC_TARGET_OFF.to_owned()
+}
+
+/// `exec_target` when the run built into its own scratch directory.
+pub const EXEC_TARGET_SCRATCH: &str = "scratch";
+/// `exec_target` when the run built nothing at all.
+pub const EXEC_TARGET_OFF: &str = "none";
+
 /// The FIRST differing field name, in declaration order — or `None` if equal.
 #[must_use]
 pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
-    let pairs: [(&'static str, bool); 17] = [
+    let pairs: [(&'static str, bool); 20] = [
         ("machine_id", a.machine_id != b.machine_id),
         (
             "engine_build_commit",
@@ -59,6 +85,9 @@ pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
         ("type_k", a.type_k != b.type_k),
         ("type_v", a.type_v != b.type_v),
         ("flash_attn", a.flash_attn != b.flash_attn),
+        ("allow_exec", a.allow_exec != b.allow_exec),
+        ("cargo_version", a.cargo_version != b.cargo_version),
+        ("exec_target", a.exec_target != b.exec_target),
         ("seed", a.seed != b.seed),
         (
             "temperature_milli",
@@ -133,6 +162,9 @@ mod tests {
             type_k: "q8_0".into(),
             type_v: "q8_0".into(),
             flash_attn: "on".into(),
+            allow_exec: false,
+            cargo_version: None,
+            exec_target: "none".into(),
             seed: 42,
             temperature_milli: 0,
             chekov_version: "0.1.0".into(),
@@ -164,5 +196,43 @@ mod tests {
         assert_eq!(flag_value(&args, "--flash-attn"), "on");
         assert_eq!(flag_value(&args, "-kvu"), "on", "a bare switch reports on");
         assert_eq!(flag_value(&args, "--batch-size"), "engine-default");
+    }
+
+    #[test]
+    fn the_exec_fields_refuse_like_any_other_environment_field() {
+        let mut b = stamp();
+        b.allow_exec = true;
+        assert_eq!(first_mismatch(&stamp(), &b), Some("allow_exec"));
+        let mut b = stamp();
+        b.cargo_version = Some("cargo 1.95.0 (0000000 2026-01-01)".into());
+        assert_eq!(first_mismatch(&stamp(), &b), Some("cargo_version"));
+        let mut b = stamp();
+        b.exec_target = "scratch".into();
+        assert_eq!(first_mismatch(&stamp(), &b), Some("exec_target"));
+        // Declaration order: an environment field still loses to the identity
+        // fields above it, and still beats the seed below it.
+        let mut b = stamp();
+        b.allow_exec = true;
+        b.machine_id = "0000".into();
+        assert_eq!(first_mismatch(&stamp(), &b), Some("machine_id"));
+        let mut b = stamp();
+        b.allow_exec = true;
+        b.seed = 43;
+        assert_eq!(first_mismatch(&stamp(), &b), Some("allow_exec"));
+    }
+
+    /// A stamp written before B2 has none of the three. It must still load —
+    /// and load as what it was: a run that never ran anything.
+    #[test]
+    fn a_pre_b2_stamp_loads_with_exec_off() {
+        let json = r#"{"machine_id":"m","engine_build_commit":"e","weights_revision":"w",
+            "quant":"Q8_0","ctx":4096,"n_parallel":1,"kv_unified":"engine-default",
+            "n_batch":"engine-default","n_ubatch":"engine-default","type_k":"q8_0",
+            "type_v":"q8_0","flash_attn":"on","seed":42,"temperature_milli":0,
+            "chekov_version":"0.1.0","prompt_set_hash":"e19a","corpus_id":"throughput-v1"}"#;
+        let parsed: Stamp = serde_json::from_str(json).expect("a pre-B2 stamp loads");
+        assert!(!parsed.allow_exec);
+        assert_eq!(parsed.cargo_version, None);
+        assert_eq!(parsed.exec_target, "none");
     }
 }

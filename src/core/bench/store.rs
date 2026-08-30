@@ -129,6 +129,59 @@ impl GradeRow {
     }
 }
 
+/// Tier 6 or tier 7's outcome for one crossing.
+///
+/// Not `ladder::Score`: that one is `Copy` over a `&'static str`, and these
+/// reasons carry cargo's own words. It is also serialised, and `Score` is not.
+/// Widening `Score` would cost the four text tiers their `Copy` for a reason
+/// none of them has.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ExecScore {
+    Value(f64),
+    Skipped(String),
+}
+
+/// Tiers 6-7 for one crossing, measured at run time and never recomputed.
+///
+/// A compile result cannot be re-derived from stored text the way tiers 1-4
+/// can — the toolchain, the worktree and the rest of the workspace all went
+/// into it — so this is the one part of a codebase row that is a stored score.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecRow {
+    pub compile: ExecScore,
+    /// `<file>:<line>: <message>` from the first `error` diagnostic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile_error: Option<String>,
+    /// The covering tests actually run, in file order, at most five.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<String>,
+    pub test: ExecScore,
+    /// `<test>: <cargo's text>` for the first candidate that failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_failure: Option<String>,
+    pub check_secs: f64,
+    pub test_secs: f64,
+}
+
+impl ExecRow {
+    /// Both tiers skipped for one reason, nothing measured — what a crossing
+    /// records when the machine could not have run either of them.
+    #[must_use]
+    pub fn skipped(reason: &str) -> Self {
+        Self {
+            compile: ExecScore::Skipped(reason.to_owned()),
+            compile_error: None,
+            tests: Vec::new(),
+            test: ExecScore::Skipped(reason.to_owned()),
+            test_failure: None,
+            check_secs: 0.0,
+            test_secs: 0.0,
+        }
+    }
+}
+
 /// A codebase task's record (spec §8, slice A). Raw text in, scores out.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,6 +228,11 @@ pub struct CodebaseRow {
     /// the field, where the number is unrecorded rather than zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_predict: Option<u32>,
+    /// Tiers 6-7, when `--allow-exec` was given. `None` when it was not, and
+    /// on every row written before B2 — which is what those runs were: runs
+    /// that executed nothing, not runs that failed to compile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<ExecRow>,
 }
 
 /// One task to append: its identity plus what was measured.
@@ -1168,6 +1226,9 @@ mod tests {
             type_k: "q8_0".into(),
             type_v: "q8_0".into(),
             flash_attn: "on".into(),
+            allow_exec: false,
+            cargo_version: None,
+            exec_target: "none".into(),
             seed: 42,
             temperature_milli: 0,
             chekov_version: "0.1.0".into(),
@@ -1593,6 +1654,7 @@ mod tests {
                 also_first_uses: Vec::new(),
                 name: None,
                 n_predict: Some(64),
+                exec: None,
             }),
         }
     }
@@ -1674,6 +1736,63 @@ mod tests {
         assert!(codebase.also_first_uses.is_empty());
         assert_eq!(codebase.excluded.cross_file_withheld, 0);
         assert_eq!(codebase.excluded.cfg_test_lines, 0);
+    }
+
+    /// The row a run with `--allow-exec` writes, and the one a run without it
+    /// writes, both round-trip — and a pre-B2 row loads as the second.
+    #[test]
+    fn an_exec_row_round_trips_and_a_pre_b2_row_loads_without_one() {
+        let mut task = codebase_task(CodebaseFixture {
+            id: "in_file-abc123-L7",
+            tier: TaskTier::InFile,
+            gold: "let a = 1;",
+            prediction: "let a = 1;",
+        });
+        if let Some(row) = task.codebase.as_mut() {
+            row.exec = Some(super::ExecRow {
+                compile: super::ExecScore::Value(1.0),
+                compile_error: None,
+                tests: vec!["covers_alpha".into()],
+                test: super::ExecScore::Skipped("did not compile".into()),
+                test_failure: None,
+                check_secs: 6.25,
+                test_secs: 0.0,
+            });
+        }
+        let row = task.codebase.expect("a codebase row");
+        let text = serde_json::to_string(&row).expect("serialise");
+        let back: super::CodebaseRow = serde_json::from_str(&text).expect("deserialise");
+        let exec = back.exec.expect("the exec half survives the round trip");
+        assert_eq!(exec.compile, super::ExecScore::Value(1.0));
+        assert_eq!(
+            exec.test,
+            super::ExecScore::Skipped("did not compile".into())
+        );
+        assert_eq!(exec.tests, vec!["covers_alpha".to_owned()]);
+
+        let pre_b2 = r#"{"tier":"in_file","file":"src/a.rs","line":7,
+            "label":"boundary-scanned (not AST)","gold":"let a = 1;","prediction":"let a = 1;",
+            "prefix":"fn f() {\n","suffix":"\n}\n",
+            "excluded":{"doc_comment":0,"cross_file":"n/a: same-file"}}"#;
+        let old: super::CodebaseRow = serde_json::from_str(pre_b2).expect("a pre-B2 row loads");
+        assert!(
+            old.exec.is_none(),
+            "a run that never executed has no exec half"
+        );
+    }
+
+    /// A skip is a reason, never a zero: `ExecRow::skipped` measures nothing
+    /// and scores nothing.
+    #[test]
+    fn a_wholly_skipped_exec_row_carries_the_reason_on_both_tiers() {
+        let row = super::ExecRow::skipped("no Rust toolchain: cargo not on PATH");
+        assert_eq!(
+            row.compile,
+            super::ExecScore::Skipped("no Rust toolchain: cargo not on PATH".into())
+        );
+        assert_eq!(row.compile, row.test, "one reason covers both tiers");
+        assert!(row.tests.is_empty());
+        assert!(row.compile_error.is_none() && row.test_failure.is_none());
     }
 
     #[test]
