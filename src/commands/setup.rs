@@ -57,3 +57,55 @@ impl Command for SetupCmd {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::setup_verdict;
+    use crate::core::machine::{Probed, Provenance};
+    use crate::error::ChekovError;
+
+    fn budget(mib: u64, provenance: Provenance) -> Option<Probed<u64>> {
+        Some(Probed::new(mib, provenance))
+    }
+
+    #[test]
+    fn without_a_floor_setup_completes_on_any_readable_budget() {
+        let line =
+            setup_verdict(None, budget(24_576, Provenance::EngineReported)).expect("complete");
+        assert_eq!(
+            line,
+            "GPU budget 24576 MiB (engine-reported) — setup complete"
+        );
+    }
+
+    #[test]
+    fn a_configured_floor_is_verified_the_way_it_always_was() {
+        let ok = setup_verdict(Some(150_000), budget(196_608, Provenance::Measured)).expect("met");
+        assert_eq!(
+            ok,
+            "wired limit OK (196608 MiB, measured >= 150000 MB) — setup complete"
+        );
+        let err = setup_verdict(Some(150_000), budget(24_576, Provenance::EngineReported))
+            .expect_err("below the floor");
+        assert!(
+            matches!(&err, ChekovError::SetupIncomplete { remaining } if remaining.contains("sudo sysctl iogpu.wired_limit_mb=150000")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_budget_without_a_floor_is_incomplete_but_names_no_sysctl() {
+        let err = setup_verdict(None, None).expect_err("nothing to verify against");
+        let ChekovError::SetupIncomplete { remaining } = err else {
+            panic!("{err}");
+        };
+        assert!(
+            remaining.contains("could not read the GPU budget"),
+            "{remaining}"
+        );
+        assert!(
+            !remaining.contains("sudo"),
+            "no floor means no number to demand: {remaining}"
+        );
+    }
+}

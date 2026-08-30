@@ -537,6 +537,31 @@ mod tests {
     }
 
     #[test]
+    fn a_model_over_the_budget_names_the_levers_and_never_a_sysctl() {
+        let msg = ChekovError::ModelExceedsBudget {
+            name: "ornith-1.5-35b-a3b".into(),
+            need_mib: 40_960,
+            budget_mib: 24_576,
+            ctx: 262_144,
+        }
+        .to_string();
+        for needle in [
+            "ornith-1.5-35b-a3b",
+            "40960",
+            "24576",
+            "262144",
+            "ctx_size",
+            "capability recommend",
+        ] {
+            assert!(msg.contains(needle), "no {needle} in: {msg}");
+        }
+        assert!(
+            !msg.contains("sysctl"),
+            "the machine cannot be grown by a sysctl: {msg}"
+        );
+    }
+
+    #[test]
     fn wired_limit_prints_exact_sudo_command() {
         let err = ChekovError::WiredLimitLow {
             actual_mb: 100,

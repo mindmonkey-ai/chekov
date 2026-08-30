@@ -118,4 +118,26 @@ mod tests {
         assert_eq!(human_duration(4262), "1h 11m");
         assert_eq!(human_duration(90_000), "1d 1h");
     }
+
+    #[test]
+    fn the_wired_row_says_what_run_will_check_against() {
+        use crate::core::machine::{Probed, Provenance};
+        let budget = Some(Probed::new(24_576, Provenance::EngineReported));
+        assert_eq!(
+            super::wired_cell(budget, None),
+            "24576 MiB (engine-reported) (no floor configured; run checks the model's footprint)"
+        );
+        assert_eq!(
+            super::wired_cell(budget, Some(150_000)),
+            "24576 MiB (engine-reported) (need 150000 MB)"
+        );
+        assert_eq!(
+            super::wired_cell(None, None),
+            "unreadable (no floor configured)"
+        );
+        assert_eq!(
+            super::wired_cell(None, Some(150_000)),
+            "unreadable (need 150000 MB)"
+        );
+    }
 }

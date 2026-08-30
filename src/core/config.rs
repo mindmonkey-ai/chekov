@@ -285,7 +285,6 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{BenchSection, Config, LimitsSection, resolve_root};
-    use crate::core::checks::{WiredVerdict, effective_wired_mb, wired_verdict};
 
     /// The README's config block is the only place a user learns these values.
     /// Nothing previously stopped it drifting from the code — which is exactly
@@ -309,16 +308,47 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_default_is_satisfiable_on_a_stock_mac() {
-        // A 256 GB Mac with `iogpu.wired_limit_mb` unset: macOS's own default
-        // is 75% of RAM. A fresh `cargo install` must not refuse there.
-        let (actual_mb, is_system_default) = effective_wired_mb(0, 274_877_906_944);
-        assert!(is_system_default, "0 means the macOS default, not zero");
-        assert_eq!(
-            wired_verdict(LimitsSection::default().wired_limit_mb, actual_mb, 262_144),
-            WiredVerdict::Satisfied,
-            "the built-in requirement must be met by a stock machine at {actual_mb} MB"
-        );
+    fn the_floor_is_absent_unless_configured() {
+        // A fresh install on a 16 GB M1 must not refuse every model against a
+        // number chosen for one 256 GB desk: with no floor, the model is the
+        // requirement, and a configured floor is an opt-in.
+        assert_eq!(LimitsSection::default().wired_limit_mb, None);
+        let cfg: super::FileConfig = toml::from_str("[limits]\nwired_limit_mb = 187000\n")
+            .expect("an explicit floor parses");
+        assert_eq!(cfg.limits.wired_limit_mb, Some(187_000));
+    }
+
+    /// The tool is "for Apple Silicon", not for the Mac it was written on:
+    /// the numbers that describe that desk may illustrate a comment, never
+    /// decide a branch.
+    #[test]
+    fn no_production_path_carries_this_desks_numbers() {
+        let sources = [
+            ("core/config.rs", include_str!("config.rs")),
+            ("core/checks.rs", include_str!("checks.rs")),
+            ("core/machine.rs", include_str!("machine.rs")),
+            ("core/footprint.rs", include_str!("footprint.rs")),
+            ("commands/run.rs", include_str!("../commands/run.rs")),
+            ("commands/setup.rs", include_str!("../commands/setup.rs")),
+            ("commands/status.rs", include_str!("../commands/status.rs")),
+            ("commands/pull.rs", include_str!("../commands/pull.rs")),
+        ];
+        for (name, text) in sources {
+            let production: String = text
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for literal in ["187000", "187_000", "228065", "228_065", "M3 Ultra"] {
+                assert!(
+                    !production.contains(literal),
+                    "{name} decides something with this desk's {literal} outside its tests"
+                );
+            }
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {
