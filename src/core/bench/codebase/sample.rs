@@ -18,28 +18,53 @@ pub struct Picked {
     pub id: String,
 }
 
+/// One tier's accounting for this run: what was asked for, what the repo
+/// had, what was taken.
+///
+/// The caller builds the cross-file lane's shortfall sentence from this,
+/// which needs a reason `sample` does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lane {
+    pub tier: TaskTier,
+    pub picked: usize,
+    pub want: usize,
+    pub have: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct TaskSet {
     pub picked: Vec<Picked>,
     /// "`function_body`: 5 of 8 requested (repo has 5 candidates)" — printed,
-    /// never filled from the other tier.
+    /// never filled from another tier. The cross-file lane's own sentence is
+    /// added by `codebase::prepare`, which knows why it was short.
     pub shortfall: Vec<String>,
+    pub lanes: Vec<Lane>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quota {
     pub in_file: usize,
     pub function_body: usize,
+    pub cross_file_first: usize,
 }
 
-/// Two-thirds `in_file` rounded up, the remainder `function_body`.
+/// Half `in_file`, the remainder split evenly — 12/6/6 at the default 24.
+///
+/// Rounding: `in_file = ceil(total/2)`, then `function_body = ceil(rest/2)`
+/// and `cross_file_first` takes what is left. Every odd task therefore goes
+/// to the earlier lane, and the lane most likely to come up short never
+/// holds a task the repository cannot supply. The three always sum to
+/// `total`, so `codebase_tasks` still means what it says.
 #[must_use]
 pub fn quota(total: u32) -> Quota {
     let total = usize::try_from(total).unwrap_or(0);
-    let in_file = (total * 2).div_ceil(3);
+    let in_file = total.div_ceil(2);
+    let rest = total - in_file;
+    let function_body = rest.div_ceil(2);
     Quota {
         in_file,
-        function_body: total - in_file,
+        function_body,
+        cross_file_first: rest - function_body,
     }
 }
 
@@ -90,6 +115,7 @@ pub fn sample(mut files: Vec<FileCandidates>, quota: Quota, seed: u64) -> TaskSe
     for (tier, want) in [
         (TaskTier::InFile, quota.in_file),
         (TaskTier::FunctionBody, quota.function_body),
+        (TaskTier::CrossFileFirst, quota.cross_file_first),
     ] {
         let mut lanes = per_file_lanes(&files, tier, &mut rng);
         let picked = round_robin(&mut lanes, want);
@@ -97,13 +123,19 @@ pub fn sample(mut files: Vec<FileCandidates>, quota: Quota, seed: u64) -> TaskSe
             .iter()
             .map(|f| f.candidates.iter().filter(|c| c.tier == tier).count())
             .sum();
-        if picked.len() < want {
+        if picked.len() < want && tier != TaskTier::CrossFileFirst {
             set.shortfall.push(format!(
                 "{}: {} of {want} requested (repo has {have} candidates)",
                 tier.label(),
                 picked.len()
             ));
         }
+        set.lanes.push(Lane {
+            tier,
+            picked: picked.len(),
+            want,
+            have,
+        });
         set.picked.extend(picked);
     }
     set
@@ -202,6 +234,7 @@ mod tests {
                         [
                             cand(TaskTier::InFile, l),
                             cand(TaskTier::FunctionBody, 100 + l),
+                            cand(TaskTier::CrossFileFirst, 200 + l),
                         ]
                     })
                     .collect(),
@@ -210,10 +243,70 @@ mod tests {
     }
 
     #[test]
-    fn quota_is_two_thirds_in_file_rounded_up() {
-        assert_eq!((quota(24).in_file, quota(24).function_body), (16, 8));
-        assert_eq!((quota(12).in_file, quota(12).function_body), (8, 4));
-        assert_eq!((quota(5).in_file, quota(5).function_body), (4, 1));
+    fn quota_is_half_in_file_then_an_even_split_and_never_loses_a_task() {
+        let q = quota(24);
+        assert_eq!((q.in_file, q.function_body, q.cross_file_first), (12, 6, 6));
+        let q = quota(10);
+        assert_eq!((q.in_file, q.function_body, q.cross_file_first), (5, 3, 2));
+        let q = quota(1);
+        assert_eq!((q.in_file, q.function_body, q.cross_file_first), (1, 0, 0));
+        for total in 0_u32..=40 {
+            let q = quota(total);
+            assert_eq!(
+                q.in_file + q.function_body + q.cross_file_first,
+                total as usize,
+                "quota({total}) must spend every task"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cross_file_lane_is_sampled_and_reported_like_the_others() {
+        let set = sample(files(4, 10), quota(24), seed_from_head("abc123"));
+        let cross = set
+            .picked
+            .iter()
+            .filter(|p| p.candidate.tier == TaskTier::CrossFileFirst)
+            .count();
+        assert_eq!(cross, 6, "the third lane takes its 6");
+        let lane = set
+            .lanes
+            .iter()
+            .find(|l| l.tier == TaskTier::CrossFileFirst)
+            .copied()
+            .expect("a lane per tier");
+        assert_eq!((lane.picked, lane.want, lane.have), (6, 6, 40));
+        let mut per_file = std::collections::BTreeMap::new();
+        for p in set
+            .picked
+            .iter()
+            .filter(|p| p.candidate.tier == TaskTier::CrossFileFirst)
+        {
+            *per_file.entry(p.path.clone()).or_insert(0) += 1;
+        }
+        assert_eq!(
+            per_file.len(),
+            4,
+            "stratified across every file: {per_file:?}"
+        );
+        assert!(
+            per_file.values().all(|&n| n <= 3),
+            "at most one per file per pass: {per_file:?}"
+        );
+    }
+
+    #[test]
+    fn a_cross_file_id_changes_the_set_hash() {
+        let a = sample(files(4, 10), quota(24), 5);
+        let mut b = sample(files(4, 10), quota(24), 5);
+        assert_eq!(task_set_hash(&a), task_set_hash(&b));
+        b.picked
+            .retain(|p| p.candidate.tier != TaskTier::CrossFileFirst);
+        assert_ne!(
+            task_set_hash(&a),
+            task_set_hash(&b),
+            "the hash covers the new tier's ids"
+        );
     }
 
     #[test]
@@ -253,13 +346,15 @@ mod tests {
             Quota {
                 in_file: 4,
                 function_body: 8,
+                cross_file_first: 0,
             },
             1,
         );
         assert_eq!(set.picked.len(), 4);
         assert_eq!(
             set.shortfall,
-            vec!["function_body: 0 of 8 requested (repo has 0 candidates)"]
+            vec!["function_body: 0 of 8 requested (repo has 0 candidates)"],
+            "the cross lane wanted nothing, so it is not short"
         );
     }
 
@@ -273,5 +368,9 @@ mod tests {
             id,
             task_id("src/main.rs", &cand(TaskTier::FunctionBody, 42))
         );
+
+        let cross = task_id("src/lib.rs", &cand(TaskTier::CrossFileFirst, 12));
+        assert_eq!(&cross[..17], "cross_file_first-", "{cross}");
+        assert!(cross.ends_with("-L12"), "{cross}");
     }
 }

@@ -35,6 +35,42 @@ All notable changes to chekov are recorded here. The format follows
   only on a real refusal now, never on a dead socket.
 
 ### Added
+- `capability bench --codebase` adds the `cross_file_first` tier: the mask is
+  the first use in a file of a symbol declared in exactly one **other** file,
+  found over the elided texts with a declaration index — never an ambiguous
+  name (declared in two or more files), never a name the file declares itself,
+  never a `use` line, and never a hit inside a string or a comment. The
+  default 24 tasks now split 12 / 6 / 6 rather than 16 / 8. Each cross-file
+  task is crossed **twice**: once with nothing but its own file, once with the
+  defining file sent as llama.cpp's `input_extra` — capped at 32 KiB and
+  otherwise windowed on the declaration line, with `truncated` and the exact
+  bytes on the row. The report prints both arms and the `context lift` between
+  them over the tasks answered in both, with what was sent (files, KiB,
+  truncated) and what the leakage filter's rule (b) withheld — every other
+  file whose text contains the answer verbatim, never the defining file,
+  without which the tier is unanswerable. The two arms take distinct task ids
+  (`<id>` and `<id>+extra`), so `--resume` skips per arm and an arm that
+  failed is one unavailable row. Because the set hash covers the new tier's
+  ids, any repository that yields cross-file tasks gets a new `corpus_id`:
+  runs recorded before this slice are not comparable with runs after it, and
+  `compare` refuses them by that field, as it should.
+
+  Two rules were tightened before the slice shipped, and both change numbers.
+  **Precision:** a candidate's defining file is accepted only when the calling
+  file names that file's module — in a `use` statement, or before a `::`. Name
+  alone matched a bare `x.next()` to whichever file declared `fn next`, which
+  is not a file the caller reads; `mod` also left the index, since a module
+  declares a file rather than a callable symbol, and the declaration scans now
+  run over literal-blanked text so `/// the fn build` is prose. The skipped
+  names are counted in the tier's shortfall. **Scoring:** tiers 1–4 grade the
+  prediction trimmed to the gold's line count. `n_predict` is 36 tokens per
+  gold line floored at 64, so a model that answered a one-line span correctly
+  and then wrote on was being graded on the run-on — the token budget, not the
+  answer. Tier 5 still reads the whole prediction. Stored predictions are
+  untouched, so this changes the rendered `in_file`, `function_body` and
+  cross-file numbers of runs **already on disk**: the report recomputes tiers
+  1–4 from stored text, and its header now says
+  `tiers 1-4 score the first gold_lines lines of each fill`.
 - `capability compare <A> <B>` compares the agentic and codebase sections too,
   not throughput alone. Tonight's pushkin run had to be held up against its
   predecessor by eye, two reports open side by side, which is exactly how a

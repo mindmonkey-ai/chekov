@@ -44,12 +44,12 @@ pub enum Score {
     Skipped(&'static str),
 }
 
-const EXEC_SKIPPED: &str = "slice B (--allow-exec)";
+const EXEC_SKIPPED: &str = "slice B2 (--allow-exec)";
 const BODY_SKIPPED: &str = "function_body: tiers 1-2 punish valid alternatives";
 const SYMBOLS_AT_RUN_TIME: &str = "symbols: needs the worktree, scored at run time";
 
 /// Rust keywords — never identifiers.
-const KEYWORDS: [&str; 52] = [
+pub(super) const KEYWORDS: [&str; 52] = [
     "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
     "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
     "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
@@ -59,7 +59,7 @@ const KEYWORDS: [&str; 52] = [
 
 /// Names any Rust program may use without declaring: the prelude, common
 /// std types and the methods the ladder would otherwise call fabricated.
-const PRELUDE: &[&str] = &[
+pub(super) const PRELUDE: &[&str] = &[
     "Some",
     "None",
     "Ok",
@@ -235,6 +235,10 @@ pub struct Scored<'a> {
     pub task: &'a CodebaseTask,
     pub prediction: &'a str,
     pub symbols: &'a Symbols,
+    /// The extra file's text on the with-extra arm, `""` otherwise. The model
+    /// was shown that file, so its names exist for it (§6); the without arm
+    /// is scored against the page it actually saw.
+    pub extra: &'a str,
 }
 
 /// The text tiers 1–4 are scored from.
@@ -252,24 +256,53 @@ pub struct StoredText<'a> {
 
 /// One tier over stored text. Tier 5 needs the repo's symbol set, which the
 /// worktree took with it, so it is scored at run time and skipped here.
+///
+/// Tiers 1–4 read the fill trimmed to the gold's line count (§6, amended
+/// 2026-08-30). Tier 5 keeps the whole prediction: what it asks is which
+/// identifiers the model emitted, and it emitted all of them.
 #[must_use]
 pub fn stored_tier(tier: Tier, text: &StoredText) -> Score {
-    let line_level = text.tier == TaskTier::InFile;
+    // A cross-file span is a statement, exactly as an `in_file` span is: same
+    // mask shape, one right answer expected, so tiers 1-2 mean the same thing
+    // there. Only `function_body`, where many different bodies are correct,
+    // skips them.
+    let line_level = text.tier != TaskTier::FunctionBody;
+    let fill = trimmed_to_gold(text.gold, text.prediction);
     match tier {
-        Tier::Exact if line_level => Score::Value(exact(text.gold, text.prediction)),
-        Tier::EditSim if line_level => Score::Value(edit_sim(text.gold, text.prediction)),
+        Tier::Exact if line_level => Score::Value(exact(text.gold, &fill)),
+        Tier::EditSim if line_level => Score::Value(edit_sim(text.gold, &fill)),
         Tier::Exact | Tier::EditSim => Score::Skipped(BODY_SKIPPED),
-        Tier::IdentF1 => Score::Value(ident_f1(text.gold, text.prediction)),
-        Tier::Parse => Score::Value(parse(text.prefix, text.prediction, text.suffix)),
+        Tier::IdentF1 => Score::Value(ident_f1(text.gold, &fill)),
+        Tier::Parse => Score::Value(parse(text.prefix, &fill, text.suffix)),
         Tier::Symbols => Score::Skipped(SYMBOLS_AT_RUN_TIME),
         Tier::Compile | Tier::Test => Score::Skipped(EXEC_SKIPPED),
+    }
+}
+
+/// The first `gold.lines().count()` lines of the prediction, ending the way
+/// the gold ends.
+///
+/// `n_predict` is generous — 36 tokens per gold line, floored at 64 — so a
+/// model that answers the span correctly and then keeps writing the rest of
+/// the function was being scored on the run-on, not on the answer. The mask
+/// asked for the gold's lines; the lines past them belong to the suffix the
+/// model was already shown, and grading them measured the token budget.
+fn trimmed_to_gold(gold: &str, prediction: &str) -> String {
+    let kept: String = prediction
+        .split_inclusive('\n')
+        .take(gold.lines().count())
+        .collect();
+    match (gold.ends_with('\n'), kept.ends_with('\n')) {
+        (true, false) if !kept.is_empty() => format!("{kept}\n"),
+        (false, true) => kept.trim_end_matches('\n').to_owned(),
+        _ => kept,
     }
 }
 
 #[must_use]
 pub fn score_all(s: &Scored) -> Vec<(Tier, Score)> {
     let t = s.task;
-    let context = format!("{}{}", t.prefix, t.suffix);
+    let context = format!("{}{}{}", t.prefix, t.suffix, s.extra);
     let file_uses = file_use_symbols(&context);
     let known = Known {
         repo: s.symbols,
@@ -297,7 +330,10 @@ pub fn score_all(s: &Scored) -> Vec<(Tier, Score)> {
         .collect()
 }
 
-fn normalise(s: &str) -> String {
+/// Runs of whitespace collapsed to one space, trimmed. `pub(super)` because
+/// rule (b) asks whether another file contains the gold's text, and "the
+/// same code, differently indented" is the same answer.
+pub(super) fn normalise(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -367,19 +403,33 @@ pub fn identifiers(text: &str) -> Vec<String> {
     out
 }
 
-/// `text` with every string, char, and comment literal blanked out, so the
-/// tokeniser walks code bytes only. Lengths need not survive — nothing here
-/// maps a token back to an offset.
-fn code_only(text: &str) -> String {
+/// `text` with every string, char, and comment literal blanked out, so a
+/// scanner walks code bytes only.
+///
+/// Byte lengths and line breaks survive the blanking: the cross-file index
+/// reads declarations out of this and then reports the OFFSET of one, so an
+/// offset into the result has to be an offset into the original.
+pub(super) fn code_only(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut pos = 0;
     for range in super::masker::literal_ranges(text) {
         out.push_str(&text[pos..range.start]);
-        out.push(' ');
+        blank_into(&text[range.clone()], &mut out);
         pos = range.end;
     }
     out.push_str(&text[pos..]);
     out
+}
+
+/// One space per BYTE of the literal, and a newline for a newline — the
+/// offsets and the line structure of the original both survive.
+fn blank_into(literal: &str, out: &mut String) {
+    for c in literal.chars() {
+        match c {
+            '\n' => out.push('\n'),
+            _ => out.extend(std::iter::repeat_n(' ', c.len_utf8())),
+        }
+    }
 }
 
 #[must_use]
@@ -446,20 +496,60 @@ pub fn repo_symbols(files: &[(String, String)]) -> Symbols {
 }
 
 fn collect_declarations(line: &str, set: &mut BTreeSet<String>) {
+    declaration_names(line, set);
+    collect_members(line.trim(), set);
+}
+
+/// The `fn`/`struct`/`enum`/`trait`/`type`/`const`/`static`/`mod` name on
+/// this line, if any.
+///
+/// Split from `collect_declarations` because the cross-file index wants
+/// declarations only: a struct field and an enum variant are not call sites,
+/// so indexing them would make every `name:` in the repository look like a
+/// definition to cross a file for.
+pub(super) fn declaration_names(line: &str, set: &mut BTreeSet<String>) {
+    names_after(line, &DECLARATION_KEYWORDS, set);
+}
+
+/// The `struct`/`enum` names on this line — the subset of
+/// `declaration_names` that a `{` can open a literal for.
+///
+/// The cross-file index keeps this apart so a `{` after a name in a type
+/// position (`-> Widget {`, `impl Widget {`) is told from a struct literal.
+pub(super) fn type_declaration_names(line: &str, set: &mut BTreeSet<String>) {
+    names_after(line, &["struct", "enum"], set);
+}
+
+const DECLARATION_KEYWORDS: [&str; 8] = [
+    "fn", "struct", "enum", "trait", "type", "const", "static", "mod",
+];
+
+/// The cross-file index's declaration names: the same list without `mod`.
+///
+/// Amended 2026-08-30 (§3.2). `mod agents;` declares a FILE, not a symbol a
+/// span can call: indexing it made every `agents::` path in the repository
+/// look like a cross-file first use of a name nothing defines. Tier 5's
+/// declaration list keeps `mod` — there the question is only whether a name
+/// the model emitted exists.
+pub(super) fn cross_file_declaration_names(line: &str, set: &mut BTreeSet<String>) {
+    names_after(line, &CROSS_FILE_KEYWORDS, set);
+}
+
+const CROSS_FILE_KEYWORDS: [&str; 7] = ["fn", "struct", "enum", "trait", "type", "const", "static"];
+
+/// The word following any of `keywords` on this line.
+fn names_after(line: &str, keywords: &[&str], set: &mut BTreeSet<String>) {
     let words: Vec<&str> = line
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())
         .collect();
     for (i, w) in words.iter().enumerate() {
-        if matches!(
-            *w,
-            "fn" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "mod"
-        ) && let Some(name) = words.get(i + 1)
+        if keywords.contains(w)
+            && let Some(name) = words.get(i + 1)
         {
             set.insert((*name).to_owned());
         }
     }
-    collect_members(line.trim(), set);
 }
 
 /// Words a line-shaped scan mistakes for a declaration: `Self::x` and
@@ -494,7 +584,7 @@ fn collect_members(trimmed: &str, set: &mut BTreeSet<String>) {
 /// keyword, so a field name split off `pub balance: i64,` isn't rejected
 /// for containing a space. Guards against `public_key` false-matching
 /// `pub` by requiring the keyword be followed by whitespace or `(`.
-fn strip_visibility(s: &str) -> &str {
+pub(super) fn strip_visibility(s: &str) -> &str {
     let s = s.trim_start();
     let Some(after_pub) = s.strip_prefix("pub") else {
         return s;
@@ -625,6 +715,102 @@ mod tests {
     }
 
     #[test]
+    fn a_name_only_the_extra_file_carries_exists_on_the_with_arm_and_not_without() {
+        let t = task(TaskTier::CrossFileFirst, "let a = 1;");
+        let scored = |extra| {
+            score_all(&Scored {
+                task: &t,
+                prediction: "let a = build(1);",
+                symbols: &Symbols(BTreeSet::new()),
+                extra,
+            })
+            .into_iter()
+            .find_map(|(tier, s)| match (tier, s) {
+                (Tier::Symbols, Score::Value(v)) => Some(v),
+                _ => None,
+            })
+            .expect("tier 5 has a value")
+        };
+        assert!(
+            scored("pub fn build(n: u32) -> u32 { n }\n") > scored(""),
+            "the extra file makes its names exist"
+        );
+    }
+
+    /// The tier the trim exists for: `n_predict` bought the model 64 tokens
+    /// for a one-line span, and it spent them all. The answer is the first
+    /// line; the rest is the suffix it was already shown.
+    #[test]
+    fn a_fill_that_answers_the_gold_and_then_runs_on_is_scored_on_the_answer() {
+        let t = task(TaskTier::InFile, "let a = 1;");
+        let run_on = "let a = 1;\n    let b = 2;\n    let c = 3;\n}\n";
+        let scores = score_all(&Scored {
+            task: &t,
+            prediction: run_on,
+            symbols: &Symbols(BTreeSet::new()),
+            extra: "",
+        });
+        let value = |want| {
+            scores
+                .iter()
+                .find_map(|(tier, s)| match (*tier == want, s) {
+                    (true, Score::Value(v)) => Some(*v),
+                    _ => None,
+                })
+                .expect("the tier is reported")
+        };
+        assert!(approx(value(Tier::Exact), 1.0), "{:?}", value(Tier::Exact));
+        assert!(approx(value(Tier::EditSim), 1.0));
+        assert!(approx(value(Tier::IdentF1), 1.0));
+        assert!(
+            approx(value(Tier::Parse), 1.0),
+            "the trimmed fill balances where the run-on's extra brace does not"
+        );
+    }
+
+    /// A fill shorter than the gold is every line the model wrote — the trim
+    /// takes nothing away, and the miss stays a miss.
+    #[test]
+    fn a_fill_shorter_than_the_gold_is_scored_as_it_stands() {
+        let t = task(TaskTier::FunctionBody, "let x = 1;\n    x + y\n");
+        let scores = score_all(&Scored {
+            task: &t,
+            prediction: "let x = 2;",
+            symbols: &Symbols(BTreeSet::new()),
+            extra: "",
+        });
+        let f1 = scores
+            .iter()
+            .find_map(|(tier, s)| match (*tier == Tier::IdentF1, s) {
+                (true, Score::Value(v)) => Some(*v),
+                _ => None,
+            })
+            .expect("function_body is scored on tier 3");
+        assert!(f1 < 1.0 && f1 > 0.0, "{f1}");
+    }
+
+    #[test]
+    fn a_cross_file_span_is_scored_on_tiers_one_and_two_like_an_in_file_span() {
+        let t = task(TaskTier::CrossFileFirst, "let a = build(1);");
+        let scores = score_all(&Scored {
+            task: &t,
+            prediction: "let a = build(1);",
+            symbols: &Symbols(BTreeSet::new()),
+            extra: "",
+        });
+        for want in [Tier::Exact, Tier::EditSim] {
+            let score = scores
+                .iter()
+                .find_map(|(tier, s)| (*tier == want).then_some(*s))
+                .expect("the tier is reported");
+            assert!(
+                matches!(score, Score::Value(v) if approx(v, 1.0)),
+                "{want:?} {score:?}"
+            );
+        }
+    }
+
+    #[test]
     fn identifiers_are_code_only_never_prose_in_a_literal_or_a_comment() {
         assert_eq!(
             identifiers("foo(\"Setting up llama\") // cpp"),
@@ -657,41 +843,48 @@ mod tests {
         );
     }
 
-    fn task(tier: TaskTier) -> CodebaseTask {
+    fn task(tier: TaskTier, gold: &str) -> CodebaseTask {
         CodebaseTask {
             id: "t".into(),
             tier,
             file: "src/a.rs".into(),
             line: 1,
-            gold: "let a = 1;".into(),
+            gold: gold.into(),
             prefix: "fn f() {\n".into(),
             suffix: "\n}\n".into(),
             excluded: Excluded {
                 doc_comment: 0,
                 cross_file: "n/a: same-file".into(),
                 cfg_test_lines: 0,
+                cross_file_withheld: 0,
             },
+            name: None,
+            also_first_uses: Vec::new(),
+            extra: None,
+            extra_text: String::new(),
         }
     }
 
     #[test]
     fn all_seven_tiers_are_reported_and_the_exec_tiers_are_skipped() {
         let known = Symbols(BTreeSet::default());
-        let t = task(TaskTier::InFile);
+        let t = task(TaskTier::InFile, "let a = 1;");
         let scores = score_all(&Scored {
             task: &t,
             prediction: "let a = 1;",
             symbols: &known,
+            extra: "",
         });
         assert_eq!(scores.len(), 7);
         assert!(matches!(scores[0], (Tier::Exact, Score::Value(v)) if approx(v, 1.0)));
         assert!(matches!(scores[5], (Tier::Compile, Score::Skipped(_))));
         assert!(matches!(scores[6], (Tier::Test, Score::Skipped(_))));
-        let body = task(TaskTier::FunctionBody);
+        let body = task(TaskTier::FunctionBody, "let a = 1;");
         let scores = score_all(&Scored {
             task: &body,
             prediction: "let a = 1;",
             symbols: &known,
+            extra: "",
         });
         assert!(
             matches!(scores[0], (Tier::Exact, Score::Skipped(_))),

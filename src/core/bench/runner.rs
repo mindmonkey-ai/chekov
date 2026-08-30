@@ -475,12 +475,25 @@ fn timings_from(parsed: &Value) -> Result<Timings, ChekovError> {
     }
 }
 
-/// One infill task on the wire: the file before and after the mask, and the
-/// gold's line count (to bound `n_predict`).
+/// One extra file the model is shown beside the masked one, in llama.cpp's
+/// `input_extra` shape.
+///
+/// The engine keeps the TAIL of the extra tokens when they exceed
+/// `n_ctx − n_batch − 2·n_predict`; one file under 32 KiB at ctx ≥ 32K is
+/// never trimmed.
+pub struct ExtraChunk<'a> {
+    pub filename: &'a str,
+    pub text: &'a str,
+}
+
+/// One infill task on the wire: the file before and after the mask, the
+/// gold's line count (to bound `n_predict`), and the other file when this
+/// arm sends one.
 pub struct InfillTask<'a> {
     pub prefix: &'a str,
     pub suffix: &'a str,
     pub gold_lines: usize,
+    pub extra: Option<ExtraChunk<'a>>,
 }
 
 /// What `/infill` said: a fill, or that this model cannot infill at all —
@@ -527,16 +540,29 @@ pub fn cross_infill(wire: &ProbeWire, task: &InfillTask) -> Result<InfillOutcome
     }))
 }
 
-/// The `/infill` request body: prefix/suffix, no chat prompt, the pins, and
-/// an `n_predict` bounded by the gold's size (three tokens per twelve
-/// characters of line, floored at 64 so a one-liner still gets room).
+/// The token budget a gold of this many lines earns. The run loop records
+/// the same number on the row, from here, so what the row says was sent and
+/// what the wire sent cannot drift.
+#[must_use]
+pub fn n_predict_for(gold_lines: usize) -> u32 {
+    u32::try_from((gold_lines * 36).max(64)).unwrap_or(u32::MAX)
+}
+
+/// The `/infill` request body: prefix/suffix, no chat prompt, the pins, the
+/// extra files (one or none), and an `n_predict` bounded by the gold's size
+/// (three tokens per twelve characters of line, floored at 64 so a one-liner
+/// still gets room).
 fn infill_body(task: &InfillTask, seed: u32) -> Value {
-    let n_predict = (task.gold_lines * 36).max(64);
+    let n_predict = n_predict_for(task.gold_lines);
+    let input_extra = task.extra.as_ref().map_or_else(
+        || serde_json::json!([]),
+        |e| serde_json::json!([{ "filename": e.filename, "text": e.text }]),
+    );
     serde_json::json!({
         "input_prefix": task.prefix,
         "input_suffix": task.suffix,
         "prompt": "",
-        "input_extra": [],
+        "input_extra": input_extra,
         "n_predict": n_predict,
         "temperature": 0,
         "top_k": 1,
@@ -907,6 +933,7 @@ mod tests {
             prefix: "fn add(a: i32, b: i32) -> i32 {\n",
             suffix: "\n}\n",
             gold_lines: 1,
+            extra: None,
         };
         let outcome = super::cross_infill(&wire(&http, &facade, &up), &task).expect("crosses");
         let super::InfillOutcome::Answered(artifact) = outcome else {
@@ -933,6 +960,46 @@ mod tests {
     }
 
     #[test]
+    fn an_extra_chunk_goes_up_as_input_extra_in_llama_cpps_shape() {
+        let http = CannedUpstream::new(
+            serde_json::json!({
+                "content": "    Widget { id: 1 }\n",
+                "tokens_predicted": 6,
+                "timings": final_frame()["timings"]
+            })
+            .to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn f() {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+            extra: Some(super::ExtraChunk {
+                filename: "src/defs.rs",
+                text: "pub struct Widget { pub id: u32 }\n",
+            }),
+        };
+        super::cross_infill(&wire(&http, &facade, &up), &task).expect("crosses");
+        let sent = sent(&http);
+        assert_eq!(
+            sent["input_extra"].as_array().map(Vec::len),
+            Some(1),
+            "{sent}"
+        );
+        assert_eq!(sent["input_extra"][0]["filename"], "src/defs.rs");
+        assert_eq!(
+            sent["input_extra"][0]["text"],
+            "pub struct Widget { pub id: u32 }\n"
+        );
+        assert_eq!(sent["input_prefix"], "fn f() {\n", "nothing else moved");
+        assert_eq!(sent["n_predict"], 64);
+        assert_eq!(sent["temperature"], 0);
+        assert_eq!(sent["top_k"], 1);
+        assert_eq!(sent["seed"], 42);
+    }
+
+    #[test]
     fn a_200_without_content_is_an_error_not_an_empty_fill() {
         let http = CannedUpstream::new(
             serde_json::json!({ "timings": final_frame()["timings"] }).to_string(),
@@ -943,6 +1010,7 @@ mod tests {
             prefix: "fn f() {\n",
             suffix: "\n}\n",
             gold_lines: 1,
+            extra: None,
         };
         let Err(err) = super::cross_infill(&wire(&http, &facade, &up), &task) else {
             panic!("a reply with no fill is not an answer");
@@ -980,6 +1048,7 @@ mod tests {
             prefix: "x",
             suffix: "y",
             gold_lines: 1,
+            extra: None,
         };
         match super::cross_infill(&w, &task).expect("a refusal naming infill is an outcome") {
             super::InfillOutcome::Unsupported(reason) => {

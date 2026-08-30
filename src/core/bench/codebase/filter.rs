@@ -8,11 +8,20 @@
 
 use std::ops::Range;
 
+use super::crossfile::cross_file_note;
 use super::masker::{Candidate, literal_ranges, matching_close};
 use super::sample::Picked;
 use super::{CodebaseTask, Excluded, TaskTier};
 
 pub const NO_CROSS_FILE: &str = "n/a: same-file";
+
+/// What a `cross_file_first` span with no assembly records instead.
+///
+/// `assemble_extra` returns `None` only when G has left the corpus between
+/// detection and assembly, which the index makes impossible — but the
+/// fallback still has to be true if it ever fires. "n/a: same-file" would be
+/// a lie about the tier, and a silent one.
+pub const NO_DEFINITION: &str = "no extra: definition not in corpus";
 
 const CFG_TEST: &str = "#[cfg(test)]";
 
@@ -128,28 +137,54 @@ fn drop_one_blank_line(text: &str, start: usize, end: usize) -> usize {
     end
 }
 
-/// One task from its own file's already-elided text.
-///
-/// `cfg_test_lines` is what `elide_cfg_test` removed from THAT file, carried
-/// onto the row so the report can say what the repository's inline tests
-/// cost.
+/// What `assemble` reads besides the picked span (§4 — three parameters).
+pub struct Context<'a> {
+    /// The file's already-elided text.
+    pub text: &'a str,
+    /// What `elide_cfg_test` removed from THAT file, carried onto the row so
+    /// the report can say what the repository's inline tests cost.
+    pub cfg_test_lines: usize,
+    /// The cross-file assembly, for a `cross_file_first` span only.
+    pub cross: Option<&'a super::crossfile::Assembled>,
+}
+
+/// One task from its own file's already-elided text, plus the other file a
+/// cross-file task was given.
 #[must_use]
-pub fn assemble(text: &str, picked: &Picked, cfg_test_lines: usize) -> CodebaseTask {
+pub fn assemble(picked: &Picked, ctx: &Context) -> CodebaseTask {
     let c = &picked.candidate;
-    let (prefix, doc_comment) = prefix_and_doc_flag(text, c);
+    let (prefix, doc_comment) = prefix_and_doc_flag(ctx.text, c);
     CodebaseTask {
         id: picked.id.clone(),
         tier: c.tier,
         file: picked.path.clone(),
         line: c.line,
-        gold: text[c.byte_range.clone()].to_owned(),
+        gold: ctx.text[c.byte_range.clone()].to_owned(),
         prefix,
-        suffix: text[c.byte_range.end..].to_owned(),
+        suffix: ctx.text[c.byte_range.end..].to_owned(),
         excluded: Excluded {
             doc_comment,
-            cross_file: NO_CROSS_FILE.to_owned(),
-            cfg_test_lines,
+            cross_file: ctx
+                .cross
+                .map_or_else(|| no_cross_note(c.tier).to_owned(), cross_file_note),
+            cfg_test_lines: ctx.cfg_test_lines,
+            cross_file_withheld: ctx.cross.map_or(0, |a| a.withheld),
         },
+        name: ctx.cross.map(|a| a.name.clone()),
+        also_first_uses: ctx
+            .cross
+            .map_or_else(Vec::new, |a| a.also_first_uses.clone()),
+        extra: ctx.cross.map(|a| a.extra.clone()),
+        extra_text: ctx.cross.map_or_else(String::new, |a| a.extra_text.clone()),
+    }
+}
+
+/// What a task with no cross-file assembly says, by tier — never the other
+/// tier's sentence.
+const fn no_cross_note(tier: TaskTier) -> &'static str {
+    match tier {
+        TaskTier::CrossFileFirst => NO_DEFINITION,
+        TaskTier::InFile | TaskTier::FunctionBody => NO_CROSS_FILE,
     }
 }
 
@@ -172,7 +207,7 @@ fn prefix_and_doc_flag(text: &str, c: &Candidate) -> (String, u8) {
 
 #[cfg(test)]
 mod tests {
-    use super::assemble;
+    use super::{Context, assemble};
     use crate::core::bench::codebase::TaskTier;
     use crate::core::bench::codebase::masker::{MaskSource, RustBraceMasker};
     use crate::core::bench::codebase::sample::{Picked, task_id};
@@ -196,9 +231,37 @@ mod tests {
         pick_from(SRC, tier)
     }
 
+    /// A cross-file span with no assembly says what is missing. Reading
+    /// `n/a: same-file` on a `cross_file_first` row would name the wrong
+    /// tier, and the count of cross-file tasks would still be one.
+    #[test]
+    fn a_cross_file_span_without_an_assembly_says_the_definition_is_missing() {
+        let mut picked = pick(TaskTier::InFile);
+        picked.candidate.tier = TaskTier::CrossFileFirst;
+        let task = assemble(
+            &picked,
+            &Context {
+                text: SRC,
+                cfg_test_lines: 0,
+                cross: None,
+            },
+        );
+        assert_eq!(task.tier, TaskTier::CrossFileFirst);
+        assert_eq!(task.excluded.cross_file, super::NO_DEFINITION);
+        assert!(task.extra.is_none());
+        assert!(task.name.is_none());
+    }
+
     #[test]
     fn a_function_body_task_strips_the_doc_comment_and_counts_it() {
-        let task = assemble(SRC, &pick(TaskTier::FunctionBody), 4);
+        let task = assemble(
+            &pick(TaskTier::FunctionBody),
+            &Context {
+                text: SRC,
+                cfg_test_lines: 4,
+                cross: None,
+            },
+        );
         assert_eq!(
             task.excluded.cfg_test_lines, 4,
             "the file's own cut rides along"
@@ -223,9 +286,12 @@ mod tests {
     fn an_attribute_between_the_doc_and_the_signature_does_not_defeat_the_cut() {
         const ATTRIBUTED: &str = "/// Returns a plus one.\n#[must_use]\npub fn f(a: i32) -> i32 {\n    let b = a + 1;\n    let c = b * 2;\n    c\n}\n";
         let task = assemble(
-            ATTRIBUTED,
             &pick_from(ATTRIBUTED, TaskTier::FunctionBody),
-            0,
+            &Context {
+                text: ATTRIBUTED,
+                cfg_test_lines: 0,
+                cross: None,
+            },
         );
         assert!(
             !task.prefix.contains("Returns a plus one"),
@@ -243,7 +309,14 @@ mod tests {
 
     #[test]
     fn an_in_file_task_keeps_the_doc_comment_and_records_zero() {
-        let task = assemble(SRC, &pick(TaskTier::InFile), 0);
+        let task = assemble(
+            &pick(TaskTier::InFile),
+            &Context {
+                text: SRC,
+                cfg_test_lines: 0,
+                cross: None,
+            },
+        );
         assert!(task.prefix.contains("Doc line"));
         assert_eq!(task.excluded.doc_comment, 0);
         assert_eq!(format!("{}{}{}", task.prefix, task.gold, task.suffix), SRC);
