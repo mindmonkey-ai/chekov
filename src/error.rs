@@ -349,6 +349,18 @@ pub enum ChekovError {
     )]
     CodebaseWorktreeFailed { step: String, reason: String },
 
+    #[error(
+        "the codebase worktree at {} could not be restored: {file} still differs from HEAD \
+         after `git checkout` — the run stopped rather than measure the next crossing against \
+         a file it cannot vouch for; inspect the worktree and then delete it (`git worktree \
+         remove --force {}` in the repository, or `rm -rf {}` plus `git worktree prune`); the \
+         rows already written are intact, so `--resume <RUN>` picks the run up at this crossing",
+        path.display(),
+        path.display(),
+        path.display()
+    )]
+    ExecWorktreeDirty { path: PathBuf, file: String },
+
     #[error("{context}: {source} — check the path exists and is writable, then retry")]
     Io {
         context: String,
@@ -395,6 +407,34 @@ mod tests {
         assert!(
             wt.contains("git worktree add") && wt.contains("git worktree prune"),
             "{wt}"
+        );
+    }
+
+    /// A dirty worktree after `git checkout` stops the run rather than measure
+    /// the next crossing against a file it cannot vouch for — the remediation
+    /// names the file, the worktree to delete, and that `--resume` is safe.
+    #[test]
+    fn an_exec_worktree_dirty_error_names_the_file_the_worktree_and_resume() {
+        let dirty = ChekovError::ExecWorktreeDirty {
+            path: "/eval/.scratch/codebase-tree-abc123def456".into(),
+            file: "src/core/bench/store.rs".into(),
+        }
+        .to_string();
+        assert!(
+            dirty.contains("src/core/bench/store.rs"),
+            "the file that would not restore is named: {dirty}"
+        );
+        assert!(
+            dirty.contains("/eval/.scratch/codebase-tree-abc123def456"),
+            "the worktree to inspect is named: {dirty}"
+        );
+        assert!(
+            dirty.contains("rm -rf") || dirty.contains("delete"),
+            "the remediation says to delete it: {dirty}"
+        );
+        assert!(
+            dirty.contains("--resume"),
+            "and that the rows already written are resumable: {dirty}"
         );
     }
 

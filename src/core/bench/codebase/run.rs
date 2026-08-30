@@ -193,6 +193,10 @@ struct Recorded<'a> {
     outcome: Result<ProbeArtifact, Unavailable>,
     symbols: &'a ladder::Symbols,
     arm: &'a Arm,
+    /// Tiers 6-7, when the run was allowed to build. `None` when it was not,
+    /// and on a crossing nobody answered — there was no fill to splice, and a
+    /// skip there would claim a question that was never asked.
+    exec: Option<store::ExecRow>,
 }
 
 /// Tier 5 for one prediction, or `None` when the ladder skips it — never a
@@ -265,6 +269,7 @@ fn record_codebase_task(
         outcome,
         symbols,
         arm,
+        exec,
     } = recorded;
     let parts = row_parts(outcome);
     let symbols_score = tier_five(task, &parts, &Scoring { symbols, arm });
@@ -295,6 +300,7 @@ fn record_codebase_task(
             also_first_uses: task.also_first_uses.clone(),
             name: task.name.clone(),
             n_predict: Some(runner::n_predict_for(gold_lines(task))),
+            exec,
         }),
     })
 }
@@ -324,6 +330,69 @@ fn row_parts(outcome: Result<ProbeArtifact, Unavailable>) -> RowParts {
     }
 }
 
+/// What the exec tiers cost so far, so the run can say what the rest will.
+struct ExecTiming {
+    cold: Option<f64>,
+    later: Vec<f64>,
+    announced: bool,
+}
+
+impl ExecTiming {
+    const fn new() -> Self {
+        Self {
+            cold: None,
+            later: Vec::new(),
+            announced: false,
+        }
+    }
+
+    /// One check's wall clock, and — the second time round — the line the
+    /// spec's live estimate asks for. Printed once: the first check pays for
+    /// the whole target directory, and every check after it is incremental,
+    /// so one number cannot describe both.
+    fn record(&mut self, secs: f64) {
+        let Some(cold) = self.cold else {
+            self.cold = Some(secs);
+            return;
+        };
+        self.later.push(secs);
+        if !self.announced {
+            self.announced = true;
+            eprintln!(
+                "chekov bench: exec cold check {cold:.0} s, ~{secs:.0} s per crossing thereafter"
+            );
+        }
+    }
+}
+
+/// What `exec_row` needs beyond the prepared set and the task (§4).
+struct ExecInput<'a> {
+    /// The raw prediction, or `None` when the crossing was never answered.
+    prediction: Option<&'a str>,
+    timing: &'a std::cell::RefCell<ExecTiming>,
+}
+
+/// Tiers 6-7 for one answered crossing, or `None` when they did not apply.
+fn exec_row(
+    prepared: &super::Prepared,
+    task: &CodebaseTask,
+    parts: &ExecInput,
+) -> Result<Option<store::ExecRow>, ChekovError> {
+    let Some(prediction) = parts.prediction else {
+        return Ok(None);
+    };
+    match &prepared.exec {
+        super::exec::Exec::Off => Ok(None),
+        super::exec::Exec::Unavailable(reason) => Ok(Some(store::ExecRow::skipped(reason))),
+        super::exec::Exec::Ready(env) => {
+            let fill = ladder::trimmed_to_gold(&task.gold, prediction);
+            let row = super::exec::exec_crossing(env, task, &fill)?;
+            parts.timing.borrow_mut().record(row.check_secs);
+            Ok(Some(row))
+        }
+    }
+}
+
 /// Every sampled task through `/infill`, recorded with its raw prediction.
 ///
 /// A cross-file task is crossed twice — without the defining file, then with
@@ -336,6 +405,7 @@ pub fn run_codebase(
     prepared: &super::Prepared,
 ) -> Result<(), ChekovError> {
     let mut unsupported: Option<String> = None;
+    let timing = std::cell::RefCell::new(ExecTiming::new());
     for task in &prepared.tasks {
         for arm in arms(task) {
             if sink.is_done(&TaskKey::buffered("codebase", &arm.id)) {
@@ -346,6 +416,15 @@ pub fn run_codebase(
                 with_extra: arm.with_extra,
             };
             let outcome = infill_or_latch(wire, &crossing, &mut unsupported);
+            let prediction = outcome.as_ref().ok().map(|a| a.anthropic_body.clone());
+            let exec = exec_row(
+                prepared,
+                task,
+                &ExecInput {
+                    prediction: prediction.as_deref(),
+                    timing: &timing,
+                },
+            )?;
             record_codebase_task(
                 sink,
                 task,
@@ -353,6 +432,7 @@ pub fn run_codebase(
                     outcome,
                     symbols: &prepared.symbols,
                     arm: &arm,
+                    exec,
                 },
             )?;
         }
@@ -426,6 +506,9 @@ mod tests {
                 type_k: "q8_0".into(),
                 type_v: "q8_0".into(),
                 flash_attn: "on".into(),
+                allow_exec: false,
+                cargo_version: None,
+                exec_target: "none".into(),
                 seed: 42,
                 temperature_milli: 0,
                 chekov_version: "0.1.0".into(),
@@ -441,6 +524,7 @@ mod tests {
             tier: TaskTier::InFile,
             file: "src/a.rs".into(),
             line,
+            byte_range: 9..19,
             gold: "let a = 1;".into(),
             prefix: "fn f() {\n".into(),
             suffix: "\n}\n".into(),
@@ -474,6 +558,7 @@ mod tests {
                 function_body: 0,
                 cross_file_first: 0,
             },
+            exec: crate::core::bench::codebase::exec::Exec::Off,
         }
     }
 
@@ -495,6 +580,7 @@ mod tests {
             tier: TaskTier::CrossFileFirst,
             file: "src/user.rs".into(),
             line: 2,
+            byte_range: 15..32,
             gold: "let a = build(1);".into(),
             prefix: "pub fn run() {\n".into(),
             suffix: "\n    a\n}\n".into(),
@@ -529,6 +615,7 @@ mod tests {
                 function_body: 0,
                 cross_file_first: 1,
             },
+            exec: crate::core::bench::codebase::exec::Exec::Off,
         }
     }
 
@@ -584,6 +671,115 @@ mod tests {
             status: 400,
             reason: reason.to_owned(),
         })
+    }
+
+    /// The same shell-script cargo the exec tests use.
+    fn fake_cargo(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).expect("dir");
+        let path = dir.join("fake-cargo");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    /// A prepared set whose exec half is a real worktree over a one-crate
+    /// repo, and a fake cargo that answers `script`.
+    fn with_exec(name: &str, script: &str) -> Prepared {
+        use crate::core::bench::codebase::exec;
+        let dir = std::env::temp_dir().join("chekov-test-run-exec").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("src")).expect("src");
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"widget\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(repo.join("src/a.rs"), "fn f() {\nlet a = 1;\n}\n").expect("a.rs");
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+            vec!["add", "-A"],
+            vec!["commit", "-qm", "fixture"],
+        ] {
+            crate::core::bench::codebase::tree::git(&repo, &args, "fixture").expect("git");
+        }
+        let worktree = crate::core::bench::codebase::tree::Worktree::add(&repo, &dir.join("tree"))
+            .expect("worktree");
+        let mut prepared = prepared_pair();
+        prepared.tasks.truncate(1);
+        prepared.tasks[0].file = "src/a.rs".into();
+        prepared.tasks[0].byte_range = 9..19;
+        prepared.counts.in_file = 1;
+        prepared.exec = exec::Exec::Ready(exec::Env {
+            worktree,
+            cargo: fake_cargo(&dir, script),
+            target_dir: dir.join("target"),
+            cargo_version: "cargo 1.95.0 (fake)".to_owned(),
+            timeouts: exec::Timeouts::DEFAULT,
+        });
+        prepared
+    }
+
+    #[test]
+    fn an_answered_crossing_carries_its_exec_verdict_onto_the_row() {
+        let prepared = with_exec("answered", "exit 0");
+        let (rows, _, _) = drive("exec-answered", &prepared, (vec![Ok(infill_200())], vec![]));
+        let exec = rows[0]
+            .codebase
+            .as_ref()
+            .and_then(|c| c.exec.clone())
+            .expect("the crossing recorded its exec half");
+        assert_eq!(
+            exec.compile,
+            crate::core::bench::store::ExecScore::Value(1.0)
+        );
+        prepared.exec.finish().expect("cleanup");
+    }
+
+    /// A crossing nobody answered has no fill to splice, so it has no exec
+    /// half at all — a `Skipped` there would claim a question was asked.
+    #[test]
+    fn an_unanswered_crossing_has_no_exec_half() {
+        let prepared = with_exec("unanswered", "exit 0");
+        let (rows, _, _) = drive(
+            "exec-unanswered",
+            &prepared,
+            (vec![refused("the server is out of context")], vec![]),
+        );
+        assert!(rows[0].codebase.as_ref().is_some_and(|c| c.exec.is_none()));
+        prepared.exec.finish().expect("cleanup");
+    }
+
+    /// No toolchain: every crossing records the one reason, and no cargo is
+    /// ever spawned.
+    #[test]
+    fn an_unavailable_toolchain_skips_every_crossing_with_one_reason() {
+        let mut prepared = prepared_pair();
+        prepared.exec = crate::core::bench::codebase::exec::Exec::Unavailable(
+            "no Rust toolchain: cargo is not runnable".to_owned(),
+        );
+        let (rows, _, _) = drive(
+            "exec-unavailable",
+            &prepared,
+            (vec![Ok(infill_200()), Ok(infill_200())], vec![]),
+        );
+        for row in &rows {
+            let exec = row
+                .codebase
+                .as_ref()
+                .and_then(|c| c.exec.clone())
+                .expect("the reason is recorded per crossing");
+            assert_eq!(
+                exec.compile,
+                crate::core::bench::store::ExecScore::Skipped(
+                    "no Rust toolchain: cargo is not runnable".to_owned()
+                )
+            );
+            assert_eq!(exec.compile, exec.test);
+        }
     }
 
     fn unavailable_reason(row: &TaskRow) -> String {

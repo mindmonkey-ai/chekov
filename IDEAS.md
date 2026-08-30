@@ -131,7 +131,7 @@ Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit si
 It is hidden, so nothing that enumerates the eval dir reads it, and the next run
 removes and re-adds it itself — the manual cleanup, if you want the space back
 now, is `git worktree prune` in the target repo plus deleting that directory.
-Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) v0 SHIPPED 2026-08-28 (--suite agentic: tool_emit/grammar_gap/instruction seed set, growing toward 30/40; deferred: diff_fidelity+tool_loop+long_ctx_trace+hallucination need the §8/§9 corpora, think_leak waits on §13 Q5); slice-5 "`--metric tok-s` upgrades from predicted to measured" SHIPPED 2026-08-28 (fixed bands, deepest-depth median, exact-match + stale footer); fixture-v1 content release-gated; slice 6 OPEN (`--svg` SHIPPED 2026-08-28; --codebase slice A SHIPPED 2026-08-29 (Rust, same-file, tiers 1-5); `#[cfg(test)]` rule amended 2026-08-29 (items elided, file kept); slice B1 SHIPPED 2026-08-29 (cross_file_first, input_extra, two arms and the measured context lift; quota 12/6/6, corpus_id changed); slices B2 (exec tiers behind --allow-exec) and C (--judge) OPEN)**
+Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) v0 SHIPPED 2026-08-28 (--suite agentic: tool_emit/grammar_gap/instruction seed set, growing toward 30/40; deferred: diff_fidelity+tool_loop+long_ctx_trace+hallucination need the §8/§9 corpora, think_leak waits on §13 Q5); slice-5 "`--metric tok-s` upgrades from predicted to measured" SHIPPED 2026-08-28 (fixed bands, deepest-depth median, exact-match + stale footer); fixture-v1 content release-gated; slice 6 OPEN (`--svg` SHIPPED 2026-08-28; --codebase slice A SHIPPED 2026-08-29 (Rust, same-file, tiers 1-5); `#[cfg(test)]` rule amended 2026-08-29 (items elided, file kept); slice B1 SHIPPED 2026-08-29 (cross_file_first, input_extra, two arms and the measured context lift; quota 12/6/6, corpus_id changed); slice B2 (exec tiers behind --allow-exec) SHIPPED 2026-08-30; slice C (--judge) OPEN)**
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
@@ -276,6 +276,12 @@ then `chekov pull unsloth/GLM-5.3-Flash-GGUF:UD-Q3_K_XL --model-loc
 222.7 GiB budget before KV), then `chekov capability bench --models
 glm-5.3-flash`. Qwen3.8-Flash-Next (`qwen4exp`) IS on master and is being
 benched in the same pass.
+Status check 2026-08-30: PR #27754 is still an open DRAFT (unslothai branch,
+updated 2026-08-30, `mergeable_state: blocked`) — still not on master. The PR
+body confirms the model carries an MTP block at layer index 45 (relevant to the
+MTP-awareness idea below). Sizing note: 1-bit dynamic is ~93-100 GB, so even
+when the PR merges this model is Studio-class only — it cannot fit a 48 GB
+M4 Max under any published quant.
 Proposed 2026-08-28 — status: BLOCKED (upstream)
 
 ## A cell's second character ignores the overhead's provenance (2026-08-28)
@@ -386,3 +392,76 @@ invented; the docs' examples do not assume this machine; and CI or a test pins
 that no machine constant is hard-coded outside config. Rationale: the tool is
 "for Apple Silicon", not "for this desk".
 Proposed 2026-08-29 — status: OPEN
+
+## `compare` shows the cross-file arms and the lift side by side (2026-08-30)
+The codebase section of `capability compare` pairs rows by task id and groups them
+by tier label, so a `cross_file_first` task's two arms (`<id>` and `<id>+extra`)
+land in one group of twelve and the per-model `context lift` — the number B1
+exists to produce — is not compared at all. On the first B1 pair (pushkin,
+`20260830T070907Z-ornith-1.5-397b` vs `20260830T072140Z-qwen3.8-flash-next`) the
+lifts were `+0.17/−0.01/−0.02/−0.17/−0.13` vs `+0.33/+0.31/+0.37/−0.17/+0.24`, the
+clearest separation in the run, and the section printed a single blended
+`cross_file_first` line. Proposal: split the group into `cross_file_first` and
+`cross_file_first+extra` (pair by full task id, as the report does) and add a
+`context lift` row comparing the two models' lifts per tier with the same paired
+sign test over tasks present in both arms of both runs. Rationale: the tier that
+separates models should be the tier `compare` reads best.
+Proposed 2026-08-30 — status: OPEN
+
+## Bench a foreign runtime: MTPLX and MLX servers as first-class candidates (2026-08-30)
+MTPLX (mtplx.com, Apache-2.0, MLX-native) decodes Qwen 3.5/3.6/3.8 — and
+community MTP-grafted builds of our own bench subjects, e.g.
+`philipjohnbasile/ornith-ai-Ornith-1.5-35B-A3B-V2-MTPLX` and
+`wang-yang/Ornith-1.0-35B-MTPLX` (measured 1.53x on an M3 Max) — around
+1.4-2.2x faster than autoregressive on the same Apple hardware, by running the
+model's own multi-token-prediction head as a drafter with exact rejection
+sampling (claim: output distribution unchanged). One independent write-up also
+measured the same 27B model at 10.5 tok/s under llama.cpp vs 18.3 under MLX —
+runtime choice alone was +74%. chekov already benches through its own
+translator against a running server (`StepAction::UseRunning`), so most of the
+plumbing exists; the gaps are (a) codebase mode rides llama.cpp's `/infill`,
+so a foreign OpenAI/Anthropic-compatible server needs a chat-completions FIM
+fallback for the codebase corpus, and (b) the stamp assumes a llama.cpp engine
+commit — it needs a runtime name+version field so `compare` refuses across
+runtimes by a named field instead of comparing incomparables. Payoff: chekov
+becomes the referee that can measure MTPLX's speed claim AND test its
+exactness claim empirically — same corpus, same HEAD, tiers 1-7 llama.cpp vs
+MTPLX, with the B2 exec tiers checking that the "identical" fills still
+compile and pass. Nobody else's harness can do that today.
+Proposed 2026-08-30 — status: OPEN
+
+## MTP-head awareness: `explain` reports it, bench measures it (2026-08-30)
+Qwen 3.5+/3.8, Gemma 4 and GLM-5.x ship native MTP heads in their weights
+(GLM-5.3-Flash's llama.cpp PR names its MTP block at layer 45), and llama.cpp
+currently drops them on the floor — the entire MTPLX niche exists because
+runtimes ignore a ~2x decode speedup already sitting in the artifact.
+`capability explain` reads GGUF headers; teach it to detect and report "carries
+a native MTP head (unused by this engine)" so the fit/recommend story names the
+latent speed. When llama.cpp lands an MTP decode path, bench grows a
+speculative row (accept rate by depth, measured speedup vs the AR baseline);
+until then it is an honest "engine has no MTP path" skip in the existing
+skip-with-reason machinery, never a zero.
+Proposed 2026-08-30 — status: OPEN
+
+## `chekov tune`: per-machine launch-flag autotune with an honest verdict (2026-08-30)
+Sweep `n_batch`/`n_ubatch`/KV cache types/`flash_attn` against a fixed probe on
+THIS machine, save the winning argv per model with the measured before/after,
+and print "defaults won" when nothing beats them — the honest-verdict pattern
+`mtplx tune` uses (it keeps the AR baseline and refuses to save a depth that
+did not win). Optionally record thermal pressure at run start/end in the stamp
+so a throttled run explains its own variance — MTPLX pins fans for clean
+timing; chekov can at least say when the clock was dirty. Fits the §12
+portability-sweep idea: tuned-per-machine beats tuned-for-this-desk.
+Proposed 2026-08-30 — status: OPEN
+
+## New benchable models on a 48 GB Mac (survey 2026-08-30)
+Qwen3.8-27B dense (released ~2026-08; qwen3_5-family arch, llama.cpp support
+live, Ollama ships `qwen3.8:27b`): Q4 is ~16-18 GiB — fits the 48 GB M4 Max
+beside `ornith-1.5-35b-a3b`, and is the natural head-to-head since Ornith 1.5
+builds on the Qwen 3.5 base line. A Qwen3.8-9B exists (community quants on HF)
+for the small lane vs `ornith-1.5-9b`. NOT benchable on 48 GB:
+Qwen3.8-Flash-Next (125B-A6B + 51B n-gram; 1-bit GGUF ~73 GB, ~83 GB resident
+even with the n-gram table on SSD — 96 GB+ machines) and GLM-5.3-Flash
+(320B-A18B; 1-bit ~93-100 GB, and still blocked upstream — see the BLOCKED
+entry above). Both remain Studio-class candidates only.
+Proposed 2026-08-30 — status: OPEN

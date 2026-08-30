@@ -124,6 +124,14 @@ pub struct BenchOpts {
     /// only the codebase set runs.
     #[arg(long, conflicts_with = "fixture")]
     pub codebase: Option<std::path::PathBuf>,
+    /// Run the repository's own build for tiers 6-7 (compile gate, covering
+    /// test). The SINGLE gate on every path that executes repository code:
+    /// `cargo check` and `cargo test` run its `build.rs`, its proc-macros and
+    /// its tests — the same trust as building it yourself. Bounded to a
+    /// detached worktree, offline after one fetch, a scratch target directory
+    /// and wall-clock timeouts; not a sandbox.
+    #[arg(long)]
+    pub allow_exec: bool,
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -793,6 +801,7 @@ struct BenchArgs<'a> {
     yes: bool,
     suite: Option<crate::core::bench::lifecycle::Suite>,
     codebase: Option<&'a std::path::Path>,
+    allow_exec: bool,
 }
 
 impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
@@ -805,6 +814,7 @@ impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
             yes: opts.yes,
             suite: effective_suite(opts.suite, opts.codebase.is_some()),
             codebase: opts.codebase.as_deref(),
+            allow_exec: opts.allow_exec,
         }
     }
 }
@@ -840,8 +850,11 @@ fn prepare_codebase(
     match args.codebase {
         Some(repo) => Ok(Some(crate::core::bench::codebase::prepare(
             repo,
-            &ctx.config.eval_dir().join(".scratch"),
-            ctx.config.file.bench.codebase_tasks,
+            &crate::core::bench::codebase::PrepareInputs {
+                scratch_root: &ctx.config.eval_dir().join(".scratch"),
+                tasks: ctx.config.file.bench.codebase_tasks,
+                allow_exec: args.allow_exec,
+            },
         )?)),
         None => Ok(None),
     }
@@ -860,6 +873,7 @@ struct RunInputs<'a> {
 fn codebase_plan_line(
     prepared: &crate::core::bench::codebase::Prepared,
     repo: &std::path::Path,
+    allow_exec: bool,
 ) -> String {
     let head12 = &prepared.head[..12.min(prepared.head.len())];
     let census = crate::core::bench::codebase::tier_counts_clause(prepared.counts);
@@ -873,19 +887,32 @@ fn codebase_plan_line(
     } else {
         format!(" ({})", prepared.shortfall.join(", "))
     };
+    let exec = if allow_exec {
+        " + exec: cold check unmeasured, then ~6 s per crossing"
+    } else {
+        ""
+    };
     format!(
-        "codebase: {} tasks from {} @ {head12} ({census}){elided}{shortfall}\n",
+        "codebase: {} tasks from {} @ {head12} ({census}){elided}{shortfall}{exec}\n",
         prepared.tasks.len(),
         repo.display()
     )
 }
 
 /// Six seconds per CROSSING, not per task: a cross-file task is crossed
-/// twice, so the estimate is `(in_file + function_body + 2 × cross) × 6`.
-fn codebase_estimate_secs(prepared: &crate::core::bench::codebase::Prepared) -> u64 {
+/// twice, so the estimate is `(in_file + function_body + 2 × cross) × 6` —
+/// doubled under `--allow-exec`, where each crossing also pays for a check.
+///
+/// Six seconds for a warm incremental check is a guess, and the run replaces
+/// it with the measured pair as soon as it has two of them.
+fn codebase_estimate_secs(
+    prepared: &crate::core::bench::codebase::Prepared,
+    allow_exec: bool,
+) -> u64 {
     let c = prepared.counts;
     let crossings = c.in_file + c.function_body + 2 * c.cross_file_first;
-    u64::try_from(crossings).unwrap_or(0) * 6
+    let per_crossing = if allow_exec { 12 } else { 6 };
+    u64::try_from(crossings).unwrap_or(0) * per_crossing
 }
 
 /// The plan's steps, one per candidate.
@@ -914,7 +941,9 @@ fn bench_estimate(
     inputs: &RunInputs,
 ) -> Result<u64, ChekovError> {
     use crate::core::bench::lifecycle;
-    let codebase_secs = inputs.prepared.map_or(0, codebase_estimate_secs);
+    let codebase_secs = inputs
+        .prepared
+        .map_or(0, |p| codebase_estimate_secs(p, inputs.args.allow_exec));
     Ok(lifecycle::estimate_secs(steps, plan)
         + agentic_estimate_secs(inputs.args.suite)?
         + codebase_secs)
@@ -930,7 +959,7 @@ fn render_dry_run(
     use crate::core::bench::lifecycle::render_plan;
     let mut out = String::new();
     if let (Some(p), Some(repo)) = (inputs.prepared, inputs.args.codebase) {
-        out.push_str(&codebase_plan_line(p, repo));
+        out.push_str(&codebase_plan_line(p, repo, inputs.args.allow_exec));
     }
     out.push_str(&render_plan(steps, estimate));
     out
@@ -951,7 +980,7 @@ fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
     let estimate = bench_estimate(&steps, &plan, &inputs)?;
     if args.dry_run {
         print!("{}", render_dry_run(&steps, estimate, &inputs));
-        return Ok(ExitCode::SUCCESS);
+        return finish_codebase(prepared).map(|()| ExitCode::SUCCESS);
     }
     if lifecycle::needs_confirm(&steps) {
         super::confirm(
@@ -963,11 +992,39 @@ fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
             args.yes,
         )?;
     }
-    for candidate in &candidates {
-        let dir = run_candidate(ctx, candidate, &inputs)?;
+    let outcome = run_candidates(ctx, &candidates, &inputs);
+    finish_codebase(prepared)?;
+    outcome
+}
+
+/// Every candidate, each one's run directory printed as it lands.
+fn run_candidates(
+    ctx: &Ctx,
+    candidates: &[(
+        crate::core::registry::Effective,
+        crate::core::bench::lifecycle::StepAction,
+    )],
+    inputs: &RunInputs,
+) -> Result<ExitCode, ChekovError> {
+    for candidate in candidates {
+        let dir = run_candidate(ctx, candidate, inputs)?;
         println!("run: {}", dir.display());
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The worktree and the scratch target directory, removed with the run.
+///
+/// Explicit rather than left to `Worktree::drop`, so a cleanup that fails is
+/// reported. Without `--allow-exec` there is nothing here to remove: `prepare`
+/// took the worktree away before it returned.
+fn finish_codebase(
+    prepared: Option<crate::core::bench::codebase::Prepared>,
+) -> Result<(), ChekovError> {
+    match prepared {
+        Some(p) => p.exec.finish(),
+        None => Ok(()),
+    }
 }
 
 /// One candidate end to end: server up (ours or reused), measure, record —
@@ -1011,9 +1068,12 @@ fn head_inputs<'a>(
         plan,
         fixture: inputs.args.fixture,
         suite: inputs.args.suite,
-        codebase: inputs
-            .prepared
-            .map(|p| (p.head.as_str(), p.set_hash.as_str())),
+        codebase: inputs.prepared.map(|p| CodebaseHead {
+            head: p.head.as_str(),
+            set_hash: p.set_hash.as_str(),
+            allow_exec: p.exec.allowed(),
+            cargo_version: p.exec.cargo_version(),
+        }),
     }
 }
 
@@ -1518,15 +1578,37 @@ fn grade_row(graded: crate::core::bench::grade::Grade) -> crate::core::bench::st
     }
 }
 
+/// The codebase run's identity and the environment its exec tiers ran in.
+struct CodebaseHead<'a> {
+    head: &'a str,
+    set_hash: &'a str,
+    allow_exec: bool,
+    cargo_version: Option<&'a str>,
+}
+
 /// Everything the stamp is built from beyond `Ctx` and the setup (§4).
 struct HeadInputs<'a> {
     props: crate::core::bench::runner::PropsInfo,
     plan: &'a crate::core::bench::sweep::SweepPlan,
     fixture: Option<&'a std::path::Path>,
     suite: Option<crate::core::bench::lifecycle::Suite>,
-    /// The codebase run's head and task-set hash, when there is one — drives
-    /// `corpus_id` ahead of `suite`/`fixture`.
-    codebase: Option<(&'a str, &'a str)>,
+    /// The codebase run, when there is one — drives `corpus_id` ahead of
+    /// `suite`/`fixture`, and the three exec fields.
+    codebase: Option<CodebaseHead<'a>>,
+}
+
+impl HeadInputs<'_> {
+    /// Whether this run was allowed to execute the repository. A run that
+    /// executed it and one that only read it are not the same environment.
+    fn allow_exec(&self) -> bool {
+        self.codebase.as_ref().is_some_and(|c| c.allow_exec)
+    }
+
+    /// The `cargo --version` line, when exec actually ran — `None` both
+    /// without the flag and on a machine with no toolchain.
+    fn cargo_version(&self) -> Option<&str> {
+        self.codebase.as_ref().and_then(|c| c.cargo_version)
+    }
 }
 
 /// Who measured: the hashed machine identity, its human-readable brand, and
@@ -1561,28 +1643,35 @@ fn head_corpus(
         || "codebase-only".to_owned(),
         |suite| probes::suite_prompt_hash(suite, inputs.plan, bench_cfg.seed),
     );
-    let corpus = match inputs.codebase {
-        Some((head, set_hash)) => codebase_corpus_id(head, set_hash),
+    let corpus = match inputs.codebase.as_ref() {
+        Some(c) => codebase_corpus_id(c.head, c.set_hash),
         None => corpus_id(inputs.suite, inputs.fixture)?,
     };
     Ok((prompt_set_hash, corpus))
 }
 
-fn build_head(
-    ctx: &Ctx,
+/// The stamp's remaining pieces once identity, flags and corpus are known —
+/// bundled so `assemble_stamp` stays within the 3-argument limit (§4).
+struct StampParts {
+    machine_id: String,
+    engine: String,
+    prompt_set_hash: String,
+    corpus_id: String,
+    flags: StampedFlags,
+    seed: u32,
+}
+
+/// The stamp itself, given the setup and inputs `build_head` already has plus
+/// everything else bundled in `parts`.
+fn assemble_stamp(
     setup: &BenchSetup,
     inputs: &HeadInputs,
-) -> Result<crate::core::bench::store::RunHead, ChekovError> {
-    use crate::core::bench::{stamp, store};
-    let cfg = &ctx.config;
-    let (machine_id, machine_brand, engine) = stamp_identity(cfg)?;
-    let launch_args = crate::core::server::launch_args(cfg, &setup.eff);
-    let bench_cfg = &cfg.file.bench;
-    let flags = stamped_flags(&launch_args);
-    let (prompt_set_hash, corpus_id) = head_corpus(inputs, bench_cfg)?;
-    let head_stamp = stamp::Stamp {
-        machine_id,
-        engine_build_commit: engine,
+    parts: StampParts,
+) -> crate::core::bench::stamp::Stamp {
+    use crate::core::bench::stamp;
+    stamp::Stamp {
+        machine_id: parts.machine_id,
+        engine_build_commit: parts.engine,
         weights_revision: format!(
             "{}/{}",
             setup.eff.entry.revision, setup.eff.entry.first_shard
@@ -1590,18 +1679,53 @@ fn build_head(
         quant: setup.eff.entry.quant.clone(),
         ctx: inputs.props.n_ctx,
         n_parallel: inputs.props.total_slots,
-        kv_unified: flags.kv_unified,
-        n_batch: flags.n_batch,
-        n_ubatch: flags.n_ubatch,
-        type_k: flags.type_k,
-        type_v: flags.type_v,
-        flash_attn: flags.flash_attn,
-        seed: bench_cfg.seed,
+        kv_unified: parts.flags.kv_unified,
+        n_batch: parts.flags.n_batch,
+        n_ubatch: parts.flags.n_ubatch,
+        type_k: parts.flags.type_k,
+        type_v: parts.flags.type_v,
+        flash_attn: parts.flags.flash_attn,
+        allow_exec: inputs.allow_exec(),
+        cargo_version: inputs.cargo_version().map(str::to_owned),
+        // The scratch target exists exactly when a toolchain answered the
+        // probe — the same condition that put a version on the stamp.
+        exec_target: if inputs.cargo_version().is_some() {
+            stamp::EXEC_TARGET_SCRATCH.to_owned()
+        } else {
+            stamp::EXEC_TARGET_OFF.to_owned()
+        },
+        seed: parts.seed,
         temperature_milli: 0,
         chekov_version: env!("CARGO_PKG_VERSION").to_owned(),
-        prompt_set_hash,
-        corpus_id,
-    };
+        prompt_set_hash: parts.prompt_set_hash,
+        corpus_id: parts.corpus_id,
+    }
+}
+
+fn build_head(
+    ctx: &Ctx,
+    setup: &BenchSetup,
+    inputs: &HeadInputs,
+) -> Result<crate::core::bench::store::RunHead, ChekovError> {
+    use crate::core::bench::store;
+    let cfg = &ctx.config;
+    let (machine_id, machine_brand, engine) = stamp_identity(cfg)?;
+    let launch_args = crate::core::server::launch_args(cfg, &setup.eff);
+    let bench_cfg = &cfg.file.bench;
+    let flags = stamped_flags(&launch_args);
+    let (prompt_set_hash, corpus_id) = head_corpus(inputs, bench_cfg)?;
+    let head_stamp = assemble_stamp(
+        setup,
+        inputs,
+        StampParts {
+            machine_id,
+            engine,
+            prompt_set_hash,
+            corpus_id,
+            flags,
+            seed: bench_cfg.seed,
+        },
+    );
     // Only a run with a forced pass has a forced reasoning mode to record.
     let forced_reasoning_format = inputs
         .suite
@@ -1906,6 +2030,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn allow_exec_defaults_off_and_is_a_bare_switch() {
+        use clap::Parser;
+
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            opts: super::BenchOpts,
+        }
+
+        let off = Wrap::parse_from(["bench", "--codebase", "."]);
+        assert!(
+            !off.opts.allow_exec,
+            "nothing executes unless it is asked for"
+        );
+        let on = Wrap::parse_from(["bench", "--codebase", ".", "--allow-exec"]);
+        assert!(on.opts.allow_exec);
+    }
+
     use crate::core::bench::codebase::ladder::Symbols;
     use crate::core::bench::codebase::{CodebaseTask, Counts, Excluded, Prepared, TaskTier};
 
@@ -1917,6 +2060,7 @@ mod tests {
             tier: TaskTier::InFile,
             file: "src/a.rs".into(),
             line,
+            byte_range: 9..19,
             gold: "let a = 1;".into(),
             prefix: "fn f() {\n".into(),
             suffix: "\n}\n".into(),
@@ -1949,21 +2093,93 @@ mod tests {
                 function_body,
                 cross_file_first: cross,
             },
+            exec: crate::core::bench::codebase::exec::Exec::Off,
         }
+    }
+
+    fn props_fixture() -> crate::core::bench::runner::PropsInfo {
+        crate::core::bench::runner::PropsInfo {
+            n_ctx: 4096,
+            total_slots: 1,
+        }
+    }
+
+    fn plan_fixture() -> crate::core::bench::sweep::SweepPlan {
+        crate::core::bench::sweep::SweepPlan {
+            depths: vec![],
+            repetitions: 1,
+            max_tokens: 64,
+        }
+    }
+
+    /// The stamp says what the run was allowed to do, and — when it did it —
+    /// which toolchain did it.
+    #[test]
+    fn the_head_records_the_exec_environment_only_when_exec_ran() {
+        let plan = plan_fixture();
+        let off = super::HeadInputs {
+            props: props_fixture(),
+            plan: &plan,
+            fixture: None,
+            suite: None,
+            codebase: Some(super::CodebaseHead {
+                head: "4818813deeaa",
+                set_hash: "abcdef123456",
+                allow_exec: false,
+                cargo_version: None,
+            }),
+        };
+        assert!(!off.allow_exec());
+        assert_eq!(off.cargo_version(), None);
+
+        let on = super::HeadInputs {
+            codebase: Some(super::CodebaseHead {
+                head: "4818813deeaa",
+                set_hash: "abcdef123456",
+                allow_exec: true,
+                cargo_version: Some("cargo 1.95.0"),
+            }),
+            ..off
+        };
+        assert!(on.allow_exec());
+        assert_eq!(on.cargo_version(), Some("cargo 1.95.0"));
+    }
+
+    #[test]
+    fn the_plan_line_and_the_estimate_both_name_the_exec_cost() {
+        let prepared = prepared_counts(12, 6, 6);
+        // Without the flag: 12 + 6 + 2*6 = 30 crossings at 6 s.
+        assert_eq!(super::codebase_estimate_secs(&prepared, false), 180);
+        // With it: another 6 s of cargo per crossing.
+        assert_eq!(super::codebase_estimate_secs(&prepared, true), 360);
+
+        let off = super::codebase_plan_line(&prepared, std::path::Path::new("/r"), false);
+        assert!(!off.contains("exec"), "{off}");
+        let on = super::codebase_plan_line(&prepared, std::path::Path::new("/r"), true);
+        assert!(
+            on.contains("+ exec: cold check unmeasured, then ~6 s per crossing"),
+            "{on}"
+        );
     }
 
     #[test]
     fn the_plan_line_names_every_tier_and_the_second_arm() {
-        let line =
-            super::codebase_plan_line(&prepared_counts(12, 6, 6), std::path::Path::new("/r"));
+        let line = super::codebase_plan_line(
+            &prepared_counts(12, 6, 6),
+            std::path::Path::new("/r"),
+            false,
+        );
         assert_eq!(
             line,
             "codebase: 24 tasks from /r @ 4818813deeaa (12 in_file, 6 function_body, \
              6 cross_file_first × 2 arms)\n",
             "{line}"
         );
-        let none =
-            super::codebase_plan_line(&prepared_counts(12, 12, 0), std::path::Path::new("/r"));
+        let none = super::codebase_plan_line(
+            &prepared_counts(12, 12, 0),
+            std::path::Path::new("/r"),
+            false,
+        );
         assert!(
             none.contains("(12 in_file, 12 function_body, 0 cross_file_first)"),
             "no second arm to announce: {none}"
@@ -1973,11 +2189,11 @@ mod tests {
     #[test]
     fn the_estimate_counts_a_cross_file_task_twice() {
         assert_eq!(
-            super::codebase_estimate_secs(&prepared_counts(12, 6, 6)),
+            super::codebase_estimate_secs(&prepared_counts(12, 6, 6), false),
             180
         );
         assert_eq!(
-            super::codebase_estimate_secs(&prepared_counts(12, 12, 0)),
+            super::codebase_estimate_secs(&prepared_counts(12, 12, 0), false),
             144
         );
     }

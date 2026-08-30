@@ -13,7 +13,12 @@ use crate::error::ChekovError;
 
 const MAX_FILE_BYTES: u64 = 200 * 1024;
 
-fn git(repo: &Path, args: &[&str], step: &str) -> Result<String, ChekovError> {
+/// `git -C repo <args>`, with the step named in the failure.
+///
+/// `pub(super)` for `exec::revert`: undoing a splice is `git checkout --` in
+/// the same worktree, and a second spawn helper beside this one would be a
+/// second place for the error contract to drift.
+pub(super) fn git(repo: &Path, args: &[&str], step: &str) -> Result<String, ChekovError> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -105,6 +110,27 @@ impl Worktree {
         )?;
         git(&self.repo, &["worktree", "prune"], "git worktree prune")?;
         Ok(())
+    }
+
+    /// Commit a fixture repository from an integration test.
+    ///
+    /// `git` itself stays `pub(super)` — the module's error contract is not
+    /// something a caller outside it should be able to spell — and this is the
+    /// one shape a test needs.
+    #[doc(hidden)]
+    pub fn run_git_for_test(repo: &Path, args: &[&str]) -> Result<(), ChekovError> {
+        git(repo, args, "test fixture").map(|_| ())
+    }
+
+    /// A `Worktree` over a plain directory, for tests that need the PATH and
+    /// nothing git does. `removed` is pre-set so `Drop` runs no git command.
+    #[cfg(test)]
+    pub(super) const fn detached_for_test(path: PathBuf) -> Self {
+        Self {
+            path,
+            repo: PathBuf::new(),
+            removed: true,
+        }
     }
 }
 

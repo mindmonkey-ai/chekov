@@ -169,6 +169,30 @@ fn body_after(text: &str, from: usize) -> Option<Range<usize>> {
     Some(open..close + 1)
 }
 
+/// The name of the function whose body contains `at`, innermost first.
+///
+/// Tier 7 needs a symbol to look for in the repository's tests, and for
+/// `function_body` that is the masked fn itself while for `in_file` and
+/// `cross_file_first` it is whatever fn the statement sits in. One scan
+/// answers both. A span outside every body — a `const`, a `use`, an item
+/// attribute — has no enclosing fn, and `None` is the honest answer: tier 7
+/// records `no enclosing function` rather than guessing at the fn above.
+pub(super) fn enclosing_fn(text: &str, at: usize) -> Option<String> {
+    let mut innermost: Option<(usize, &str)> = None;
+    for sig in fn_signatures(text) {
+        let Some(body) = body_after(text, sig.end) else {
+            continue;
+        };
+        if !body.contains(&at) {
+            continue;
+        }
+        if innermost.is_none_or(|(start, _)| body.start > start) {
+            innermost = Some((body.start, &text[sig.start + 3..sig.end]));
+        }
+    }
+    innermost.map(|(_, name)| name.trim().to_owned())
+}
+
 /// Index of the `}` matching the `{` at `open`, skipping strings, chars and
 /// comments. Shared with the `#[cfg(test)]` cutter, which needs the same
 /// literal-aware match to find where a test module ends.
@@ -609,5 +633,31 @@ fn real() {
         assert_eq!(balance("r#\"}\"# {"), Some(1));
         assert_eq!(balance("}"), None, "a closer with no opener");
         assert_eq!(balance("fn f() { let x = [1, (2)]; }"), Some(0));
+    }
+    #[test]
+    fn the_enclosing_function_of_a_span_is_the_innermost_one() {
+        let text = "fn outer() {\n    let a = 1;\n}\n\nfn inner() {\n    let b = 2;\n}\n";
+        let at = text.find("let b = 2;").expect("the span");
+        assert_eq!(super::enclosing_fn(text, at).as_deref(), Some("inner"));
+        let at = text.find("let a = 1;").expect("the span");
+        assert_eq!(super::enclosing_fn(text, at).as_deref(), Some("outer"));
+    }
+
+    /// A nested `fn` wins over the one containing it: the span belongs to the
+    /// body it actually sits in.
+    #[test]
+    fn a_nested_function_wins_over_the_one_around_it() {
+        let text = "fn outer() {\n    fn helper() {\n        let x = 1;\n    }\n    helper();\n}\n";
+        let at = text.find("let x = 1;").expect("the span");
+        assert_eq!(super::enclosing_fn(text, at).as_deref(), Some("helper"));
+    }
+
+    /// A `const` or a `use` at file scope has no enclosing function, and the
+    /// answer is `None` rather than the nearest one above it.
+    #[test]
+    fn a_span_outside_every_body_has_no_enclosing_function() {
+        let text = "fn f() {\n    let a = 1;\n}\n\nconst K: u8 = 3;\n";
+        let at = text.find("const K").expect("the span");
+        assert_eq!(super::enclosing_fn(text, at), None);
     }
 }

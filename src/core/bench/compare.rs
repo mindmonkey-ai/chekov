@@ -824,6 +824,9 @@ mod tests {
             type_k: "q8_0".into(),
             type_v: "q8_0".into(),
             flash_attn: "on".into(),
+            allow_exec: false,
+            cargo_version: None,
+            exec_target: "none".into(),
             seed: 42,
             temperature_milli: 0,
             chekov_version: "0.1.0".into(),
@@ -1072,6 +1075,7 @@ mod tests {
                 also_first_uses: Vec::new(),
                 name: None,
                 n_predict: None,
+                exec: None,
             }),
         }
     }

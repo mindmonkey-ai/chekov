@@ -287,7 +287,12 @@ pub fn stored_tier(tier: Tier, text: &StoredText) -> Score {
 /// the function was being scored on the run-on, not on the answer. The mask
 /// asked for the gold's lines; the lines past them belong to the suffix the
 /// model was already shown, and grading them measured the token budget.
-fn trimmed_to_gold(gold: &str, prediction: &str) -> String {
+///
+/// `pub(super)` for tier 6: the text that gets spliced into the file and
+/// compiled is the same text tiers 1-4 grade. A compile verdict on a
+/// different string from the one the report scores would be two answers to
+/// one question.
+pub(super) fn trimmed_to_gold(gold: &str, prediction: &str) -> String {
     let kept: String = prediction
         .split_inclusive('\n')
         .take(gold.lines().count())
@@ -849,6 +854,7 @@ mod tests {
             tier,
             file: "src/a.rs".into(),
             line: 1,
+            byte_range: 9..9 + gold.len(),
             gold: gold.into(),
             prefix: "fn f() {\n".into(),
             suffix: "\n}\n".into(),

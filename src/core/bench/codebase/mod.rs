@@ -2,6 +2,7 @@
 //! graded same-file infill tasks (spec §8, slice A).
 
 pub mod crossfile;
+pub mod exec;
 pub mod filter;
 pub mod ladder;
 pub mod masker;
@@ -80,6 +81,13 @@ pub struct CodebaseTask {
     pub tier: TaskTier,
     pub file: String,
     pub line: usize,
+    /// The span in the file as it sits in the worktree — test modules intact.
+    ///
+    /// `masker::Candidate.byte_range` indexes the ELIDED text; tier 6 splices
+    /// into the original, because tier 7 runs the very test modules elision
+    /// cut. `filter::original_range` is the map between them, and the
+    /// invariant is `&original[byte_range] == gold`.
+    pub byte_range: std::ops::Range<usize>,
     pub gold: String,
     pub prefix: String,
     pub suffix: String,
@@ -140,22 +148,42 @@ pub struct Prepared {
     pub cfg_test_lines: usize,
     pub cfg_test_files: usize,
     pub counts: Counts,
+    /// Whether tiers 6-7 run, and — when they do — the worktree, the scratch
+    /// target directory and the toolchain they run in. `Exec::Off` is the
+    /// slice-A/B1 shape: the worktree was removed before this value existed.
+    pub exec: exec::Exec,
+}
+
+/// What one file's `#[cfg(test)]` cut cost, and where it fell.
+struct FileElision {
+    lines: usize,
+    cuts: Vec<std::ops::Range<usize>>,
 }
 
 /// Every walked file with its `#[cfg(test)]` items already cut, keyed back to
-/// what each cut cost so a task's row can carry its own file's number.
+/// what each cut cost so a task's row can carry its own file's number — and
+/// to WHERE each cut fell, so a span can be mapped onto the original.
 struct Elisions {
     files: Vec<(String, String)>,
-    per_file: std::collections::HashMap<String, usize>,
+    per_file: std::collections::HashMap<String, FileElision>,
 }
 
 impl Elisions {
     fn lines(&self) -> usize {
-        self.per_file.values().sum()
+        self.per_file.values().map(|e| e.lines).sum()
     }
 
     fn files_cut(&self) -> usize {
-        self.per_file.values().filter(|n| **n > 0).count()
+        self.per_file.values().filter(|e| e.lines > 0).count()
+    }
+
+    /// One file's cut list, or an empty one for a file that gave nothing up.
+    fn cuts(&self, path: &str) -> &[std::ops::Range<usize>] {
+        self.per_file.get(path).map_or(&[], |e| e.cuts.as_slice())
+    }
+
+    fn lines_of(&self, path: &str) -> usize {
+        self.per_file.get(path).map_or(0, |e| e.lines)
     }
 }
 
@@ -170,7 +198,13 @@ fn elide_tests(files: Vec<(String, String)>) -> Elisions {
         .into_iter()
         .map(|(path, text)| {
             let cut = filter::elide_cfg_test(&text);
-            per_file.insert(path.clone(), cut.lines_removed);
+            per_file.insert(
+                path.clone(),
+                FileElision {
+                    lines: cut.lines_removed,
+                    cuts: cut.cuts,
+                },
+            );
             (path, cut.text)
         })
         .collect();
@@ -259,19 +293,35 @@ struct Sampled {
     candidates: Candidates,
     symbols: ladder::Symbols,
     oversized: usize,
+    exec: exec::Exec,
+}
+
+/// What `prepare` needs beyond the repository (§4 — three parameters, and
+/// the flag would have been a fourth).
+pub struct PrepareInputs<'a> {
+    pub scratch_root: &'a Path,
+    pub tasks: u32,
+    /// `--allow-exec`. The single thing that decides whether the worktree
+    /// outlives this call.
+    pub allow_exec: bool,
 }
 
 /// Gate, worktree, walk, mask, index, sample, assemble, symbol set — then
-/// the worktree is removed. Everything the run needs is in memory, and the
-/// user's checkout was never read directly.
+/// the worktree is removed, unless `--allow-exec` keeps it for the exec
+/// tiers.
+///
+/// Everything the run needs is in memory, and the user's checkout was never
+/// read directly.
 ///
 /// The scratch tree is `<scratch_root>/codebase-tree-<head12>`: keyed by the
 /// HEAD it checks out, so two runs of different commits never share one, and
 /// derived here rather than by the caller, which does not know the HEAD yet.
-pub fn prepare(repo: &Path, scratch_root: &Path, tasks: u32) -> Result<Prepared, ChekovError> {
+pub fn prepare(repo: &Path, inputs: &PrepareInputs) -> Result<Prepared, ChekovError> {
     tree::assert_clean(repo)?;
     let head = tree::head_sha(repo)?;
-    let scratch_tree = scratch_root.join(format!("codebase-tree-{}", head12(&head)));
+    let scratch_tree = inputs
+        .scratch_root
+        .join(format!("codebase-tree-{}", head12(&head)));
     let worktree = tree::Worktree::add(repo, &scratch_tree)?;
     let sources = tree::rust_sources(&worktree.path);
     let elided = elide_tests(sources.files);
@@ -279,12 +329,12 @@ pub fn prepare(repo: &Path, scratch_root: &Path, tasks: u32) -> Result<Prepared,
     let mut candidates = all_candidates(&index, &elided);
     let set = sample::sample(
         std::mem::take(&mut candidates.per_file),
-        sample::quota(tasks),
+        sample::quota(inputs.tasks),
         sample::seed_from_head(&head),
     );
     let symbols = ladder::repo_symbols(&elided.files);
-    worktree.remove()?;
     if set.picked.is_empty() {
+        worktree.remove()?;
         return Err(ChekovError::CodebaseNoTasks {
             path: repo.to_path_buf(),
             reason: format!(
@@ -294,6 +344,7 @@ pub fn prepare(repo: &Path, scratch_root: &Path, tasks: u32) -> Result<Prepared,
             ),
         });
     }
+    let exec = exec_state(worktree, inputs, head12(&head))?;
     Ok(into_prepared(Sampled {
         head,
         set,
@@ -301,7 +352,23 @@ pub fn prepare(repo: &Path, scratch_root: &Path, tasks: u32) -> Result<Prepared,
         candidates,
         symbols,
         oversized: sources.oversized,
+        exec,
     }))
+}
+
+/// The worktree's fate. Without the flag it is removed here, exactly as in
+/// slice A; with it, `exec::prepare_env` keeps it or removes it depending on
+/// whether the machine can honour the flag.
+fn exec_state(
+    worktree: tree::Worktree,
+    inputs: &PrepareInputs,
+    head12: &str,
+) -> Result<exec::Exec, ChekovError> {
+    if !inputs.allow_exec {
+        worktree.remove()?;
+        return Ok(exec::Exec::Off);
+    }
+    exec::prepare_env(worktree, inputs.scratch_root, head12)
 }
 
 fn into_prepared(s: Sampled) -> Prepared {
@@ -324,6 +391,7 @@ fn into_prepared(s: Sampled) -> Prepared {
         symbols: s.symbols,
         cfg_test_lines: s.elided.lines(),
         cfg_test_files: s.elided.files_cut(),
+        exec: s.exec,
     }
 }
 
@@ -391,7 +459,8 @@ fn assembled_tasks(picked: &[sample::Picked], a: &Assembly) -> Vec<CodebaseTask>
                 p,
                 &filter::Context {
                     text,
-                    cfg_test_lines: a.elided.per_file.get(&p.path).copied().unwrap_or(0),
+                    cfg_test_lines: a.elided.lines_of(&p.path),
+                    cuts: a.elided.cuts(&p.path),
                     cross: cross_for(p, a, text).as_ref(),
                 },
             ))
@@ -456,6 +525,116 @@ mod tests {
         assert!(ok, "git {args:?}");
     }
 
+    /// The B1 shape: prepare with the exec tiers off, as every test here
+    /// except the lifetime one wants.
+    fn prepare_off(repo: &std::path::Path, scratch: &std::path::Path, tasks: u32) -> Prepared {
+        prepare(
+            repo,
+            &super::PrepareInputs {
+                scratch_root: scratch,
+                tasks,
+                allow_exec: false,
+            },
+        )
+        .expect("prepare")
+    }
+
+    /// A committed two-file repo under its own root — `prepared_fixture`'s
+    /// first half, split out so the exec-lifetime test can prepare the same
+    /// repo with the flag on. The `Cargo.toml` is for the probe, which
+    /// demands one at the checkout root; the walk never reads it.
+    fn repo_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join("chekov-test-codebase").join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("src")).expect("src dir");
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(repo.join("src/alpha.rs"), source("alpha")).expect("alpha");
+        std::fs::write(repo.join("src/beta.rs"), source("beta")).expect("beta");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "fixture"]);
+        (repo, root)
+    }
+
+    /// A committed two-file repo and the `Prepared` sampled from it. The repo
+    /// path comes back because the worktree is gone by then, and a clean
+    /// checkout of the same HEAD has byte-identical files.
+    fn prepared_fixture(name: &str) -> (PathBuf, Prepared) {
+        let (repo, root) = repo_fixture(name);
+        let prepared = prepare(
+            &repo,
+            &super::PrepareInputs {
+                scratch_root: &root.join("scratch"),
+                tasks: 8,
+                allow_exec: false,
+            },
+        )
+        .expect("prepare");
+        (repo, prepared)
+    }
+
+    /// Without the flag the worktree is gone by the time `prepare` returns —
+    /// unchanged from slice A. With it, the worktree and the scratch target
+    /// directory are both alive, and `finish` takes both away.
+    #[test]
+    fn the_worktree_survives_prepare_only_when_exec_is_allowed() {
+        let (_, off) = prepared_fixture("lifetime-off");
+        assert!(
+            matches!(off.exec, crate::core::bench::codebase::exec::Exec::Off),
+            "no flag, no exec"
+        );
+
+        let (repo, root) = repo_fixture("lifetime-on");
+        let prepared = prepare(
+            &repo,
+            &super::PrepareInputs {
+                scratch_root: &root.join("scratch"),
+                tasks: 8,
+                allow_exec: true,
+            },
+        )
+        .expect("prepare");
+        let Some(env) = prepared.exec.env() else {
+            // No toolchain here — the Unavailable path is covered by
+            // `exec::tests`. A silent pass for the wrong reason would be
+            // worse than a skip out loud.
+            eprintln!("skipping the ready half: no cargo on PATH");
+            return;
+        };
+        let (tree, target) = (env.worktree.path.clone(), env.target_dir.clone());
+        assert!(tree.is_dir(), "the worktree is kept for the run");
+        assert!(target.is_dir(), "the scratch target directory exists");
+        prepared.exec.finish().expect("finish");
+        assert!(!tree.exists(), "finish removes the worktree");
+        assert!(!target.exists(), "and the target directory with it");
+    }
+
+    /// Every assembled task's `byte_range` indexes the file as it sits in the
+    /// worktree — test modules intact — and lands exactly on the gold.
+    #[test]
+    fn every_tasks_byte_range_indexes_the_worktrees_own_file() {
+        let (repo, prepared) = prepared_fixture("byte-range");
+        assert!(!prepared.tasks.is_empty(), "the fixture yields tasks");
+        for task in &prepared.tasks {
+            let original =
+                std::fs::read_to_string(repo.join(&task.file)).expect("the file on disk");
+            assert_eq!(
+                &original[task.byte_range.clone()],
+                task.gold,
+                "task {} in {}",
+                task.id,
+                task.file
+            );
+        }
+    }
+
     /// `name` keys the directory: two tests that both want this shape must not
     /// build it in the same place, or one deletes the other's checkout while
     /// `git init` is still running.
@@ -486,7 +665,7 @@ mod tests {
         let scratch = std::env::temp_dir()
             .join("chekov-test-codebase-prepare")
             .join("scratch");
-        let prepared = prepare(&dir, &scratch, 6).expect("prepare");
+        let prepared = prepare_off(&dir, &scratch, 6);
         let files: std::collections::BTreeSet<&str> =
             prepared.tasks.iter().map(|t| t.file.as_str()).collect();
         assert_eq!(files.len(), 3, "{files:?}");
@@ -549,12 +728,11 @@ mod tests {
 
     #[test]
     fn a_cross_file_task_carries_the_defining_file_and_the_others_carry_none() {
-        let prepared = prepare(
+        let prepared = prepare_off(
             &repo_with_a_cross_file_call("cross"),
             &scratch_for("scratch-cross"),
             24,
-        )
-        .expect("prepare");
+        );
         let cross: Vec<_> = prepared
             .tasks
             .iter()
@@ -588,12 +766,11 @@ mod tests {
 
     #[test]
     fn a_short_cross_lane_says_how_many_names_were_ambiguous_and_how_many_files_had_no_use() {
-        let prepared = prepare(
+        let prepared = prepare_off(
             &repo_with_inline_tests("inline-short"),
             &scratch_for("scratch-noshort"),
             24,
-        )
-        .expect("prepare");
+        );
         let line = prepared
             .shortfall
             .iter()
@@ -666,8 +843,8 @@ mod tests {
     #[test]
     fn preparing_the_same_commit_twice_yields_the_same_set_and_the_same_extra_files() {
         let repo = repo_with_a_cross_file_call("cross-twice");
-        let first = prepare(&repo, &scratch_for("scratch-det-a"), 24).expect("prepare");
-        let second = prepare(&repo, &scratch_for("scratch-det-b"), 24).expect("prepare");
+        let first = prepare_off(&repo, &scratch_for("scratch-det-a"), 24);
+        let second = prepare_off(&repo, &scratch_for("scratch-det-b"), 24);
         assert_eq!(first.set_hash, second.set_hash);
         let extras = |p: &Prepared| {
             p.tasks
@@ -694,8 +871,7 @@ mod tests {
     /// crossing: without an import, the defining file is not the file to read.
     #[test]
     fn a_call_whose_defining_module_the_file_never_names_is_counted_not_crossed() {
-        let prepared =
-            prepare(&repo_without_imports(), &scratch_for("scratch-noimp"), 24).expect("prepare");
+        let prepared = prepare_off(&repo_without_imports(), &scratch_for("scratch-noimp"), 24);
         assert_eq!(prepared.counts.cross_file_first, 0);
         let line = prepared
             .shortfall
