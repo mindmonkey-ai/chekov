@@ -804,9 +804,10 @@ mod tests {
         sign_test,
     };
     use crate::core::bench::codebase::{Excluded, TaskTier};
-    use crate::core::bench::stamp::Stamp;
+    use crate::core::bench::stamp::{JudgeStamp, Stamp};
     use crate::core::bench::store::{
-        CodebaseRow, GradeRow, Measure, RunHead, RunLog, TaskRow, Transport,
+        CodebaseRow, DecidedBy, GradeRow, JUDGE_SUITE, JudgeRow, Measure, RunHead, RunLog,
+        TaskRow, Transport,
     };
     use crate::core::stats::Comparison;
     use crate::error::ChekovError;
@@ -1393,6 +1394,139 @@ mod tests {
         assert!(
             rendered.contains("1 task(s) dropped from in_file"),
             "{rendered}"
+        );
+    }
+
+    // -------------------------------------------------------------- judge
+
+    fn judge_stamp() -> JudgeStamp {
+        JudgeStamp {
+            model: "gpt-oss-20b".into(),
+            quant: "F16".into(),
+            revision: "1a2b3c4d5e6f".into(),
+            arch: "gpt-oss".into(),
+            rubric_hash: "9f8e7d6c5b4a".into(),
+            max_tokens: 512,
+            reasoning_effort: "low".into(),
+            min_consistency_pct: 70,
+        }
+    }
+
+    fn verdict(equivalent: Option<bool>) -> JudgeRow {
+        JudgeRow {
+            equivalent,
+            gold_first: None,
+            prediction_first: None,
+            decided_by: if equivalent.is_some() {
+                DecidedBy::SwapAgreement
+            } else {
+                DecidedBy::SwapDisagreement
+            },
+            skipped: None,
+            judge_secs: 1.0,
+        }
+    }
+
+    fn judge_row(seq: usize, task_id: &str, row: JudgeRow) -> TaskRow {
+        TaskRow {
+            schema: 1,
+            run_id: "r".into(),
+            seq: u32::try_from(seq).unwrap_or(0),
+            suite: JUDGE_SUITE.into(),
+            task_id: task_id.into(),
+            transport: Transport::Buffered,
+            measure: empty_measure(),
+            grade: None,
+            codebase: None,
+            judge: Some(row),
+        }
+    }
+
+    fn function_body_rows(ids: [&str; 3]) -> Vec<TaskRow> {
+        ids.into_iter()
+            .enumerate()
+            .map(|(seq, id)| {
+                codebase_row(
+                    seq,
+                    CodeCase {
+                        task_id: id.into(),
+                        tier: TaskTier::FunctionBody,
+                        prediction: GOLD,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Three `function_body` tasks, both answered and both judged by the same
+    /// instrument: a's judge calls fb-1 equivalent, fb-2 not, fb-3
+    /// equivalent; b's calls fb-1 not, fb-2 not, and abstains on fb-3.
+    fn judged_pair() -> (RunLog, RunLog) {
+        let ids = ["fb-1", "fb-2", "fb-3"];
+        let mut a_stamp = stamp("dda1b0d67", "r1/s1");
+        a_stamp.judge = Some(judge_stamp());
+        let mut b_stamp = stamp("dda1b0d67", "r2/s2");
+        b_stamp.judge = Some(judge_stamp());
+        let mut a_rows = function_body_rows(ids);
+        a_rows.extend([
+            judge_row(3, "fb-1", verdict(Some(true))),
+            judge_row(4, "fb-2", verdict(Some(false))),
+            judge_row(5, "fb-3", verdict(Some(true))),
+        ]);
+        let mut b_rows = function_body_rows(ids);
+        b_rows.extend([
+            judge_row(3, "fb-1", verdict(Some(false))),
+            judge_row(4, "fb-2", verdict(Some(false))),
+            judge_row(5, "fb-3", verdict(None)),
+        ]);
+        (
+            RunLog {
+                head: head_of("m1", a_stamp),
+                rows: a_rows,
+            },
+            RunLog {
+                head: head_of("m2", b_stamp),
+                rows: b_rows,
+            },
+        )
+    }
+
+    #[test]
+    fn a_shared_judge_yields_an_equiv_row_with_the_paired_sign_test() {
+        // a: fb-1 true, fb-2 false, fb-3 true ; b: fb-1 false, fb-2 false, fb-3 undecided
+        let (a, b) = judged_pair();
+        let cmp = super::compare_runs(&a, &b, 5.0).expect("compare");
+        let equiv = cmp
+            .codebase
+            .tiers
+            .iter()
+            .find(|t| t.tier == "equiv")
+            .expect("equiv row");
+        assert_eq!(equiv.group, "function_body");
+        assert_eq!(
+            (equiv.a_better, equiv.b_better, equiv.ties),
+            (1, 0, 1),
+            "fb-3 is not paired: b abstained"
+        );
+        assert!(cmp.codebase.judge_note.is_none());
+        let out = super::render_comparison(&RunPair { a: &a, b: &b }, &cmp);
+        assert!(out.contains("function_body equiv"), "{out}");
+    }
+
+    #[test]
+    fn a_differing_or_absent_judge_prints_a_note_and_leaves_the_tiers_alone() {
+        let (a, mut b) = judged_pair();
+        b.head.stamp.judge = None;
+        let cmp = super::compare_runs(&a, &b, 5.0).expect("compare");
+        assert!(cmp.codebase.tiers.iter().all(|t| t.tier != "equiv"));
+        assert_eq!(
+            cmp.codebase.judge_note.as_deref(),
+            Some("equiv: not compared (judge differs: a=gpt-oss-20b@1a2b3c4d5e6f/9f8e7d6c5b4a b=none)")
+        );
+        let out = super::render_comparison(&RunPair { a: &a, b: &b }, &cmp);
+        assert!(
+            out.contains("  equiv: not compared (judge differs: a=gpt-oss-20b@1a2b3c4d5e6f/9f8e7d6c5b4a b=none)\n"),
+            "{out}"
         );
     }
 
