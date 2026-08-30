@@ -256,6 +256,10 @@ pub struct StoredText<'a> {
 
 /// One tier over stored text. Tier 5 needs the repo's symbol set, which the
 /// worktree took with it, so it is scored at run time and skipped here.
+///
+/// Tiers 1–4 read the fill trimmed to the gold's line count (§6, amended
+/// 2026-08-30). Tier 5 keeps the whole prediction: what it asks is which
+/// identifiers the model emitted, and it emitted all of them.
 #[must_use]
 pub fn stored_tier(tier: Tier, text: &StoredText) -> Score {
     // A cross-file span is a statement, exactly as an `in_file` span is: same
@@ -263,14 +267,35 @@ pub fn stored_tier(tier: Tier, text: &StoredText) -> Score {
     // there. Only `function_body`, where many different bodies are correct,
     // skips them.
     let line_level = text.tier != TaskTier::FunctionBody;
+    let fill = trimmed_to_gold(text.gold, text.prediction);
     match tier {
-        Tier::Exact if line_level => Score::Value(exact(text.gold, text.prediction)),
-        Tier::EditSim if line_level => Score::Value(edit_sim(text.gold, text.prediction)),
+        Tier::Exact if line_level => Score::Value(exact(text.gold, &fill)),
+        Tier::EditSim if line_level => Score::Value(edit_sim(text.gold, &fill)),
         Tier::Exact | Tier::EditSim => Score::Skipped(BODY_SKIPPED),
-        Tier::IdentF1 => Score::Value(ident_f1(text.gold, text.prediction)),
-        Tier::Parse => Score::Value(parse(text.prefix, text.prediction, text.suffix)),
+        Tier::IdentF1 => Score::Value(ident_f1(text.gold, &fill)),
+        Tier::Parse => Score::Value(parse(text.prefix, &fill, text.suffix)),
         Tier::Symbols => Score::Skipped(SYMBOLS_AT_RUN_TIME),
         Tier::Compile | Tier::Test => Score::Skipped(EXEC_SKIPPED),
+    }
+}
+
+/// The first `gold.lines().count()` lines of the prediction, ending the way
+/// the gold ends.
+///
+/// `n_predict` is generous — 36 tokens per gold line, floored at 64 — so a
+/// model that answers the span correctly and then keeps writing the rest of
+/// the function was being scored on the run-on, not on the answer. The mask
+/// asked for the gold's lines; the lines past them belong to the suffix the
+/// model was already shown, and grading them measured the token budget.
+fn trimmed_to_gold(gold: &str, prediction: &str) -> String {
+    let kept: String = prediction
+        .split_inclusive('\n')
+        .take(gold.lines().count())
+        .collect();
+    match (gold.ends_with('\n'), kept.ends_with('\n')) {
+        (true, false) if !kept.is_empty() => format!("{kept}\n"),
+        (false, true) => kept.trim_end_matches('\n').to_owned(),
+        _ => kept,
     }
 }
 
@@ -710,6 +735,58 @@ mod tests {
             scored("pub fn build(n: u32) -> u32 { n }\n") > scored(""),
             "the extra file makes its names exist"
         );
+    }
+
+    /// The tier the trim exists for: `n_predict` bought the model 64 tokens
+    /// for a one-line span, and it spent them all. The answer is the first
+    /// line; the rest is the suffix it was already shown.
+    #[test]
+    fn a_fill_that_answers_the_gold_and_then_runs_on_is_scored_on_the_answer() {
+        let t = task(TaskTier::InFile, "let a = 1;");
+        let run_on = "let a = 1;\n    let b = 2;\n    let c = 3;\n}\n";
+        let scores = score_all(&Scored {
+            task: &t,
+            prediction: run_on,
+            symbols: &Symbols(BTreeSet::new()),
+            extra: "",
+        });
+        let value = |want| {
+            scores
+                .iter()
+                .find_map(|(tier, s)| match (*tier == want, s) {
+                    (true, Score::Value(v)) => Some(*v),
+                    _ => None,
+                })
+                .expect("the tier is reported")
+        };
+        assert!(approx(value(Tier::Exact), 1.0), "{:?}", value(Tier::Exact));
+        assert!(approx(value(Tier::EditSim), 1.0));
+        assert!(approx(value(Tier::IdentF1), 1.0));
+        assert!(
+            approx(value(Tier::Parse), 1.0),
+            "the trimmed fill balances where the run-on's extra brace does not"
+        );
+    }
+
+    /// A fill shorter than the gold is every line the model wrote — the trim
+    /// takes nothing away, and the miss stays a miss.
+    #[test]
+    fn a_fill_shorter_than_the_gold_is_scored_as_it_stands() {
+        let t = task(TaskTier::FunctionBody, "let x = 1;\n    x + y\n");
+        let scores = score_all(&Scored {
+            task: &t,
+            prediction: "let x = 2;",
+            symbols: &Symbols(BTreeSet::new()),
+            extra: "",
+        });
+        let f1 = scores
+            .iter()
+            .find_map(|(tier, s)| match (*tier == Tier::IdentF1, s) {
+                (true, Score::Value(v)) => Some(*v),
+                _ => None,
+            })
+            .expect("function_body is scored on tier 3");
+        assert!(f1 < 1.0 && f1 > 0.0, "{f1}");
     }
 
     #[test]

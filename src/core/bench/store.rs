@@ -656,7 +656,7 @@ fn codebase_header(kept: &[&TaskRow], excluded: usize) -> String {
     format!(
         "codebase     {} tasks, {} crossings, from {} files ({}) — {}; context: same-file, \
          plus the defining file for cross_file_first (engine window ≤ n_batch; extra from \
-         ctx){}{}\n",
+         ctx); tiers 1-4 score the first gold_lines lines of each fill{}{}\n",
         distinct_tasks(kept),
         kept.len(),
         distinct_files(kept),
@@ -1751,7 +1751,8 @@ mod tests {
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
             rendered.contains(
-                "(engine window ≤ n_batch; extra from ctx); tests elided: 21 lines in 2 files"
+                "(engine window ≤ n_batch; extra from ctx); tiers 1-4 score the first \
+                 gold_lines lines of each fill; tests elided: 21 lines in 2 files"
             ),
             "{rendered}"
         );
@@ -1780,8 +1781,10 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered
-                .contains("(engine window ≤ n_batch; extra from ctx) (1 unavailable, excluded)"),
+            rendered.contains(
+                "(engine window ≤ n_batch; extra from ctx); tiers 1-4 score the first \
+                 gold_lines lines of each fill (1 unavailable, excluded)"
+            ),
             "{rendered}"
         );
         assert!(
