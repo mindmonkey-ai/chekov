@@ -356,6 +356,26 @@ mod tests {
     }
 
     #[test]
+    fn the_judge_knobs_default_and_parse() {
+        let cfg: super::FileConfig = toml::from_str("").expect("defaults");
+        assert_eq!(cfg.bench.judge_max_tokens, 512);
+        assert_eq!(cfg.bench.judge_min_consistency_pct, 70);
+        assert_eq!(cfg.bench.judge_reasoning_effort, super::ReasoningEffort::Low);
+        assert_eq!(cfg.bench.judge_reasoning_effort.as_str(), "low");
+        let cfg: super::FileConfig = toml::from_str(
+            "[bench]\njudge_max_tokens = 64\njudge_min_consistency_pct = 80\njudge_reasoning_effort = \"none\"\n",
+        )
+        .expect("overrides parse");
+        assert_eq!(cfg.bench.judge_max_tokens, 64);
+        assert_eq!(cfg.bench.judge_min_consistency_pct, 80);
+        assert_eq!(cfg.bench.judge_reasoning_effort, super::ReasoningEffort::None);
+        assert!(
+            toml::from_str::<super::FileConfig>("[bench]\njudge_reasoning_effort = \"max\"\n").is_err(),
+            "an effort llama.cpp does not spell is refused at load"
+        );
+    }
+
+    #[test]
     fn engine_section_parses_git_ref_and_defaults_to_unpinned() {
         assert_eq!(
             super::FileConfig::default().engine.git_ref,
