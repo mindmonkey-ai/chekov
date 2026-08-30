@@ -894,7 +894,7 @@ A 3-model × `agentic` sweep is therefore **~1.5–2.5 hours**. `bench` prints t
 
 ## 8. Codebase mode
 
-Status 2026-08-30: slices A (Rust, same-file, tiers 1–5), B1 (`cross_file_first` with `input_extra`, two arms and the context lift) and B2 (tiers 6–7 behind `--allow-exec`) shipped — see `docs/superpowers/specs/2026-08-29-codebase-mode-slice-a-design.md`, `…-slice-b1-design.md` and `2026-08-30-codebase-mode-slice-b2-design.md`; slice C (`--judge`) open.
+Status 2026-08-30: slices A (Rust, same-file, tiers 1–5), B1 (`cross_file_first` with `input_extra`, two arms and the context lift), B2 (tiers 6–7 behind `--allow-exec`) and C (`--judge`, position-swapped binary judge as its own phase) shipped — see `docs/superpowers/specs/2026-08-29-codebase-mode-slice-a-design.md`, `…-slice-b1-design.md`, `2026-08-30-codebase-mode-slice-b2-design.md` and `2026-08-30-codebase-mode-slice-c-design.md`.
 
 `chekov capability bench --codebase <PATH>` turns the user's own repository into graded tasks. A private codebase is the only guaranteed-uncontaminated corpus a local user has — which is exactly what LiveCodeBench's rolling-cutoff design provides and what no vendored public benchmark can.
 
@@ -1009,6 +1009,8 @@ fixture-v1/
 - **Scheduling cost is stated up front.** On a 256 GB box running a ~181 GiB model there is no room for a co-resident judge, so the judge pass runs as a separate phase after the candidate server stops. `--dry-run` shows the extra reload cost rather than discovering it as an OOM.
 
 **The deterministic fallback, which is the default path.** With no `--judge`, or when the named judge is not registered, or on a family conflict, or when swap self-consistency falls below the floor, the axis is reported `N/A (judge unavailable: <specific reason>)`, the composite is recomputed over the remaining axes, **and the renormalization is printed**. The tie **stands as a tie** — never silently broken by a coin flip, never resolved by falling back to an arbitrary sort, never quietly zeroed. Any output touched by a judge names the judge model, its quant and revision, the rubric hash, the swap-consistency rate, and the exact weight it contributed.
+
+`--judge` shipped as slice C, `docs/superpowers/specs/2026-08-30-codebase-mode-slice-c-design.md` — its §9 states four departures from this section's wording (a plan-time refusal instead of `N/A`, no composite so no 5% cap, `function_body` crossings only, and a `same_behavior` verdict rather than `winner`).
 
 ---
 

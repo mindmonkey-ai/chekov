@@ -40,3 +40,6 @@ release_pct = 80               # teardown waits for this % of budget free
 release_max_polls = 60         # release budget: polls x interval
 release_interval_ms = 500
 codebase_tasks = 24            # `--codebase` tasks per run (2/3 in_file, 1/3 function_body)
+# judge_max_tokens = 512          # --judge reply budget; 2x the largest reply measured in the 2026-08-30 probe
+# judge_min_consistency_pct = 70  # swap-agreement floor below which the equiv column is voided
+# judge_reasoning_effort = "low"  # none|low|medium|high, forwarded to the judge's wire only
