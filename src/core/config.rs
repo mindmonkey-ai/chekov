@@ -335,6 +335,11 @@ mod tests {
             ("commands/setup.rs", include_str!("../commands/setup.rs")),
             ("commands/status.rs", include_str!("../commands/status.rs")),
             ("commands/pull.rs", include_str!("../commands/pull.rs")),
+            (
+                "commands/capability.rs",
+                include_str!("../commands/capability.rs"),
+            ),
+            ("error.rs", include_str!("../error.rs")),
         ];
         for (name, text) in sources {
             let production: String = text

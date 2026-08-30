@@ -139,7 +139,8 @@ mod tests {
         );
         assert_eq!(
             super::wired_cell(None, None),
-            "unreadable (no floor configured)"
+            "unreadable (no floor configured; run checks the model's footprint)",
+            "the user whose budget cannot be read is the one who most needs to know what run does"
         );
         assert_eq!(
             super::wired_cell(None, Some(150_000)),

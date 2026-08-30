@@ -90,14 +90,37 @@ fn subdir_gguf_bytes(dir: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Decision, decide, weights_on_disk};
+    use super::{Decision, OVERHEAD_BYTES, decide, sized, wants_q8, weights_on_disk};
     use crate::core::registry::ModelEntry;
 
     const MIB: u64 = 1024 * 1024;
 
     #[test]
+    fn the_total_is_weights_plus_kv_plus_the_compute_overhead_graph_reserves() {
+        assert_eq!(sized(10, 5), 15 + OVERHEAD_BYTES);
+        assert_eq!(
+            OVERHEAD_BYTES,
+            3 * 1024 * MIB,
+            "the 3 GiB every frontier cell reserves"
+        );
+    }
+
+    #[test]
+    fn q8_is_read_from_the_effective_flags_wherever_it_appears() {
+        let flags = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(wants_q8(&flags(&["--cache-type-k", "q8_0"])));
+        assert!(!wants_q8(&flags(&["--flash-attn", "on"])));
+        assert!(!wants_q8(&flags(&[])));
+    }
+
+    #[test]
     fn a_footprint_is_judged_against_the_budget_and_an_unknown_one_is_unverified() {
         assert_eq!(decide(None, 1_000), Decision::Unverified);
+        assert_eq!(
+            decide(Some(MIB), 0),
+            Decision::Unverified,
+            "a zero budget is an unreadable one, not one everything exceeds"
+        );
         assert_eq!(decide(Some(500 * MIB), 1_000), Decision::Proceed);
         assert_eq!(decide(Some(900 * MIB), 1_000), Decision::Tight { pct: 90 });
         assert_eq!(
@@ -124,6 +147,8 @@ mod tests {
     #[test]
     fn weights_on_disk_sum_the_gguf_files_one_level_down_and_nothing_else() {
         let root = std::env::temp_dir().join(format!("chekov-footprint-{}", std::process::id()));
+        // A failed run leaves the tree behind; start clean so `empty` is empty.
+        let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("models/m@abc123def456");
         std::fs::create_dir_all(dir.join("sub")).expect("mkdir");
         std::fs::write(dir.join("a.gguf"), [0u8; 10]).expect("write");
