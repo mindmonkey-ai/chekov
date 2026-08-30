@@ -1063,9 +1063,15 @@ mod tests {
                     doc_comment: 0,
                     cross_file: "slice A".into(),
                     cfg_test_lines: 0,
+                    cross_file_withheld: 0,
                 },
                 symbols_score: None,
                 unsupported: false,
+                arm: None,
+                extra: None,
+                also_first_uses: Vec::new(),
+                name: None,
+                n_predict: None,
             }),
         }
     }
