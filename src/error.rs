@@ -637,4 +637,32 @@ mod tests {
             "{server}"
         );
     }
+
+    #[test]
+    fn the_tune_refusals_name_the_remedy() {
+        let base = ChekovError::TuneBaselineDegenerate {
+            name: "m".into(),
+            reason: "fewer than 2 samples after the warmup drop".into(),
+        }
+        .to_string();
+        assert!(
+            base.contains("chekov run m")
+                && base.contains("chekov doctor")
+                && base.contains("fewer than 2 samples"),
+            "{base}"
+        );
+        let apply = ChekovError::TuneNothingToApply { name: "m".into() }.to_string();
+        assert!(
+            apply.contains("defaults won") && apply.contains("nothing to apply"),
+            "{apply}"
+        );
+        let stage = ChekovError::TuneUnknownStage {
+            stage: "threads".into(),
+        }
+        .to_string();
+        assert!(
+            stage.contains("threads") && stage.contains("fa, kv, batch, ubatch"),
+            "{stage}"
+        );
+    }
 }
