@@ -92,6 +92,19 @@ pub enum ChekovError {
     WiredLimitLow { actual_mb: u64, required_mb: u64 },
 
     #[error(
+        "model '{name}' needs about {need_mib} MiB at ctx {ctx} (weights + KV cache) \
+         but this Mac's GPU budget is {budget_mib} MiB — pull a smaller quant, lower \
+         its ctx_size in models.toml, or run `chekov capability recommend` to see \
+         what fits"
+    )]
+    ModelExceedsBudget {
+        name: String,
+        need_mib: u64,
+        budget_mib: u64,
+        ctx: u32,
+    },
+
+    #[error(
         "a llama-server is already running with '{running}' but this launch would \
          advertise '{requested}' to the agent — every token would come from \
          '{running}' at its context, not '{requested}'; \
@@ -534,6 +547,31 @@ mod tests {
         .to_string();
         assert!(msg.contains("claude"), "no binary in: {msg}");
         assert!(msg.contains("--print"), "no remediation in: {msg}");
+    }
+
+    #[test]
+    fn a_model_over_the_budget_names_the_levers_and_never_a_sysctl() {
+        let msg = ChekovError::ModelExceedsBudget {
+            name: "ornith-1.5-35b-a3b".into(),
+            need_mib: 40_960,
+            budget_mib: 24_576,
+            ctx: 262_144,
+        }
+        .to_string();
+        for needle in [
+            "ornith-1.5-35b-a3b",
+            "40960",
+            "24576",
+            "262144",
+            "ctx_size",
+            "capability recommend",
+        ] {
+            assert!(msg.contains(needle), "no {needle} in: {msg}");
+        }
+        assert!(
+            !msg.contains("sysctl"),
+            "the machine cannot be grown by a sysctl: {msg}"
+        );
     }
 
     #[test]

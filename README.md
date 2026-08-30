@@ -58,13 +58,17 @@ When installed from source, the clone directory is the chekov root:
 logs, weights (unless `--model-loc`), and the llama.cpp checkout all live
 under the clone. If you move the checkout, re-run `make install`.
 
-`setup` ends by verifying `iogpu.wired_limit_mb`. A sysctl value of `0`
-means "macOS system default" and is resolved as **75% of RAM** (e.g. 192 GiB
-on a 256 GB machine) — it is not treated as zero. If the effective limit is below
-`[limits] wired_limit_mb` in `config.toml`, setup prints the exact
-`sudo sysctl iogpu.wired_limit_mb=<N>` command and marks itself incomplete;
-run it yourself and re-run `make setup` to verify. **chekov never executes
-sudo.**
+`setup` ends by reading the GPU budget — what `llama-server --list-devices`
+reports, falling back to `iogpu.wired_limit_mb` (a sysctl value of `0` means
+"macOS system default", resolved as **75% of RAM**, never treated as zero).
+There is no built-in floor: on any Apple Silicon Mac, `run` judges each
+model's own footprint (weights + KV cache at its context) against that budget
+and refuses only a model that does not fit, naming the levers that exist
+(a smaller quant, a lower `ctx_size`, `chekov capability recommend`). If you
+set `[limits] wired_limit_mb` in `config.toml`, setup and `run` verify the
+budget against that floor instead and print the exact
+`sudo sysctl iogpu.wired_limit_mb=<N>` command when it is short. **chekov never
+executes sudo.**
 
 ## Quickstart
 
@@ -233,7 +237,8 @@ chekov runs any GGUF repo on Hugging Face. A workable way to choose:
    `UD-Q5_K_XL`, `Q8_0`, …) with a file size. The tag is what goes after the
    colon in the pull spec.
 3. **Size it against your memory.** Rule of thumb: `weights + KV cache + ~3 GiB`
-   must fit under `[limits] wired_limit_mb` (default: 187000 MB). KV cache at
+   must fit under the GPU budget `chekov capability` prints (`run` checks
+   exactly this, and `[limits] wired_limit_mb` can pin a floor). KV cache at
    q8_0 is roughly `ctx × cached_layers × kv_heads × head_dim × 2 × 1.0625
    bytes` — q8_0 is 34 bytes per 32 elements, not one byte, and
    `cached_layers` is **not** the model's layer count on modern architectures:
@@ -407,7 +412,8 @@ days-old `~/.cargo/bin/chekov` is the likelier explanation.
 | Symptom | Meaning / fix |
 |---|---|
 | `port 8080 is already in use` | `chekov status`; if it's a chekov server, `chekov stop`/`restart`; otherwise free the port or change `[server] port` in `config.toml`. |
-| `wired limit is X MB but Y MB is required` | Run the printed `sudo sysctl iogpu.wired_limit_mb=Y`, then retry. Reboots reset it. |
+| `model 'X' needs about N MiB at ctx C … but this Mac's GPU budget is B MiB` | The model does not fit this machine at that context: pull a smaller quant, lower its `ctx_size` in `models.toml`, or `chekov capability recommend` to see what fits. No sysctl changes this. |
+| `wired limit is X MB but Y MB is required` | You configured `[limits] wired_limit_mb`: run the printed `sudo sysctl iogpu.wired_limit_mb=Y`, then retry. Reboots reset it. |
 | `stale pidfile … cleaned` on `stop` | The server died earlier (check the log tail). Just `chekov run` again. |
 | Doctor: NaN canary FAIL | Matches the known GGUF corruption class — re-pull the shards (`chekov pull <spec>`, size-verified) and re-run doctor. |
 | Doctor: think-tag FAIL | The model's `extra_flags` lost `--reasoning-format none`, or the template ate the tags — check `chekov show`. |
@@ -570,7 +576,8 @@ port = 8080               # default
 api_key = "chekov-local"  # default; passed to llama-server --api-key
 
 [limits]
-wired_limit_mb = 187000   # required GPU wired memory before `run` proceeds
+# wired_limit_mb = 187000 # optional floor: `run` refuses below it. Absent (the
+                          # default), the model's own footprint is the requirement
 hermes_ctx_floor = 65536  # hard floor when a model is hermes_ok
 
 [doctor]

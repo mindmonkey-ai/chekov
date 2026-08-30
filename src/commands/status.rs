@@ -1,5 +1,5 @@
 //! `chekov status` — running?, pid, model, revision, port, ctx, uptime,
-//! wired-limit actual vs required, log tail path.
+//! the GPU budget and what `run` checks against it, log tail path.
 
 use std::process::ExitCode;
 
@@ -41,18 +41,17 @@ fn model_facts(reg: &crate::core::registry::Registry, model: &str) -> (String, S
     (revision, ctx_size)
 }
 
-/// The GPU budget, resolved through the same function `chekov capability`
-/// prints so the gate and the report can never disagree.
-fn wired_row(ctx: &Ctx, required: u64) -> String {
-    crate::core::machine::live_gpu_budget(&ctx.config.engine_dir()).map_or_else(
-        || format!("unreadable (need {required} MB)"),
-        |b| {
-            format!(
-                "{} MiB ({}) (need {required} MB)",
-                b.value,
-                b.provenance.label()
-            )
-        },
+/// The GPU budget (resolved through the same function `chekov capability`
+/// prints, so the gate and the report can never disagree) and what `run` will
+/// judge against it: a configured floor, or the model's own footprint.
+fn wired_cell(budget: Option<crate::core::machine::Probed<u64>>, floor: Option<u64>) -> String {
+    let need = floor.map_or_else(
+        || "no floor configured; run checks the model's footprint".to_owned(),
+        |required| format!("need {required} MB"),
+    );
+    budget.map_or_else(
+        || format!("unreadable ({need})"),
+        |b| format!("{} MiB ({}) ({need})", b.value, b.provenance.label()),
     )
 }
 
@@ -71,8 +70,10 @@ fn status_rows(ctx: &Ctx) -> Result<Vec<Vec<String>>, ChekovError> {
         .or_else(|| reg.active.clone())
         .unwrap_or_else(|| "none".to_owned());
     let (revision, ctx_size) = model_facts(&reg, &model);
-    let required = ctx.config.file.limits.wired_limit_mb;
-    let wired = wired_row(ctx, required);
+    let wired = wired_cell(
+        crate::core::machine::live_gpu_budget(&ctx.config.engine_dir()),
+        ctx.config.file.limits.wired_limit_mb,
+    );
     Ok(vec![
         vec![
             "running".into(),
@@ -117,5 +118,28 @@ mod tests {
         assert_eq!(human_duration(300), "5m 00s");
         assert_eq!(human_duration(4262), "1h 11m");
         assert_eq!(human_duration(90_000), "1d 1h");
+    }
+
+    #[test]
+    fn the_wired_row_says_what_run_will_check_against() {
+        use crate::core::machine::{Probed, Provenance};
+        let budget = Some(Probed::new(24_576, Provenance::EngineReported));
+        assert_eq!(
+            super::wired_cell(budget, None),
+            "24576 MiB (engine-reported) (no floor configured; run checks the model's footprint)"
+        );
+        assert_eq!(
+            super::wired_cell(budget, Some(150_000)),
+            "24576 MiB (engine-reported) (need 150000 MB)"
+        );
+        assert_eq!(
+            super::wired_cell(None, None),
+            "unreadable (no floor configured; run checks the model's footprint)",
+            "the user whose budget cannot be read is the one who most needs to know what run does"
+        );
+        assert_eq!(
+            super::wired_cell(None, Some(150_000)),
+            "unreadable (need 150000 MB)"
+        );
     }
 }

@@ -302,14 +302,17 @@ fn build_frontier(
     for (name, entry) in &reg.models {
         let weights = weights_on_disk(ctx, entry);
         let geometry = geometry_for(ctx, &reg, name);
-        let q8 = entry.extra_flags.iter().any(|f| f == "q8_0")
-            || reg.defaults.flags.iter().any(|f| f == "q8_0");
+        let q8 = crate::core::footprint::wants_q8(&entry.extra_flags)
+            || crate::core::footprint::wants_q8(&reg.defaults.flags);
         let cells = ladder
             .iter()
             .map(|&c| frontier::Cell {
                 weights_bytes: weights,
                 kv_bytes: kv_for(geometry.as_ref(), c, q8),
-                overhead_bytes: Probed::new(Some(3 * 1024 * 1024 * 1024), Provenance::Predicted),
+                overhead_bytes: Probed::new(
+                    Some(crate::core::footprint::OVERHEAD_BYTES),
+                    Provenance::Predicted,
+                ),
                 speed: None,
             })
             .collect();
@@ -360,37 +363,10 @@ fn kv_for(
     )
 }
 
-/// Bytes actually on disk for a model directory, or `None` when it is absent.
-///
-/// Walks one level of subdirectories: a repo like `unsloth/MiniMax-M2.7-GGUF`
-/// keeps its shards under a quant folder (`UD-Q5_K_XL/…`), so a top-level-only
-/// scan reports a fully downloaded 158 GiB model as absent.
+/// Bytes actually on disk for a model directory — `footprint`'s sum, so the
+/// gate, `recommend` and `graph` size a model the same way.
 fn weights_on_disk(ctx: &Ctx, entry: &crate::core::registry::ModelEntry) -> Option<u64> {
-    let dir = ctx.config.root.join(&entry.path);
-    let total = gguf_bytes_in(&dir) + subdir_gguf_bytes(&dir);
-    (total > 0).then_some(total)
-}
-
-fn gguf_bytes_in(dir: &std::path::Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|e| e.path().extension().is_some_and(|x| x == "gguf"))
-        .filter_map(|e| e.metadata().ok().map(|m| m.len()))
-        .sum()
-}
-
-fn subdir_gguf_bytes(dir: &std::path::Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|e| e.path().is_dir())
-        .map(|e| gguf_bytes_in(&e.path()))
-        .sum()
+    crate::core::footprint::weights_on_disk(&ctx.config.root, entry)
 }
 
 /// A deliberately coarse KV reserve, labelled Predicted at the call site.
@@ -580,13 +556,17 @@ fn candidate_for(
 ) -> crate::core::recommend::Candidate {
     let (ctx, reg, ctx_len) = (input.ctx, input.reg, input.ctx_len);
     let weights = weights_on_disk(ctx, entry);
-    let geometry = reg
-        .effective(name)
-        .ok()
-        .map(|eff| crate::core::server::shard_path(&ctx.config, &eff))
+    let eff = reg.effective(name).ok();
+    let geometry = eff
+        .as_ref()
+        .map(|eff| crate::core::server::shard_path(&ctx.config, eff))
         .filter(|p| p.exists())
         .and_then(|p| crate::core::gguf::read_geometry(&p).ok());
-    let q8 = reg.defaults.flags.iter().any(|f| f == "q8_0");
+    // The flags the model is actually launched with — `run` reads the same
+    // ones, so the two cannot disagree about the KV cache's type.
+    let q8 = eff
+        .as_ref()
+        .is_some_and(|eff| crate::core::footprint::wants_q8(&eff.flags));
     let kv = geometry
         .as_ref()
         .and_then(|g| crate::core::gguf::kv_bytes(g, ctx_len, q8));
@@ -601,7 +581,9 @@ fn candidate_for(
     crate::core::recommend::Candidate {
         name: name.to_owned(),
         quant: entry.quant.clone(),
-        total_bytes: weights.zip(kv).map(|(w, k)| w + k),
+        total_bytes: weights
+            .zip(kv)
+            .map(|(w, k)| crate::core::footprint::sized(w, k)),
         parser,
     }
 }

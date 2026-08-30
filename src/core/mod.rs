@@ -4,6 +4,7 @@ pub mod checks;
 pub mod clock;
 pub mod config;
 pub mod engine;
+pub mod footprint;
 pub mod frontier;
 pub mod gguf;
 pub mod hash;
