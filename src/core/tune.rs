@@ -331,4 +331,147 @@ mod tests {
         };
         assert_eq!((c.stage.label(), c.value.as_str()), ("batch", "4096"));
     }
+
+    fn summary(median: f64, spread: f64) -> crate::core::stats::Summary {
+        crate::core::stats::Summary {
+            median,
+            p10: median - spread,
+            p90: median + spread,
+            n: 4,
+            warmup_dropped: 1,
+        }
+    }
+    fn measured(decode: f64, prefill: f64) -> super::Measured {
+        super::Measured {
+            decode: summary(decode, 0.3),
+            prefill: summary(prefill, 3.0),
+            prompt_n: 4101,
+        }
+    }
+
+    #[test]
+    fn a_candidate_wins_its_stage_only_on_its_own_metric_without_losing_the_other() {
+        let inc = measured(31.2, 402.0);
+        let faster_prefill = super::judge(&measured(31.1, 466.0), &inc, super::Stage::Batch, 5.0);
+        assert!(faster_prefill.wins);
+        assert_eq!(
+            faster_prefill.phrase,
+            "faster on prefill, decode not slower — new incumbent"
+        );
+        let costs_decode = super::judge(&measured(24.0, 466.0), &inc, super::Stage::Batch, 5.0);
+        assert!(!costs_decode.wins);
+        assert_eq!(
+            costs_decode.phrase,
+            "faster on prefill but slower on decode — incumbent kept"
+        );
+        let slower = super::judge(&measured(24.9, 397.0), &inc, super::Stage::Fa, 5.0);
+        assert_eq!(
+            (slower.wins, slower.phrase.as_str()),
+            (false, "slower on decode")
+        );
+        let close = super::judge(&measured(31.3, 402.0), &inc, super::Stage::Fa, 5.0);
+        assert_eq!(
+            (close.wins, close.phrase.as_str()),
+            (
+                false,
+                "no significant difference vs 31.2 — incumbent kept"
+            )
+        );
+        let batch_on_decode = super::judge(&measured(40.0, 402.0), &inc, super::Stage::Batch, 5.0);
+        assert!(
+            !batch_on_decode.wins,
+            "a decode gain does not win a prefill stage"
+        );
+    }
+
+    #[test]
+    fn the_stage_winner_is_the_best_primary_median_among_winners_and_ties_keep_the_earlier() {
+        let cand = |v: &str| super::Candidate {
+            stage: super::Stage::Batch,
+            value: v.into(),
+            argv: vec![],
+        };
+        let win = |phrase: &str| super::Verdict {
+            wins: true,
+            phrase: phrase.into(),
+        };
+        let lose = super::Verdict {
+            wins: false,
+            phrase: "slower on prefill".into(),
+        };
+        let scored = vec![
+            (cand("512"), measured(31.0, 288.0), lose),
+            (cand("1024"), measured(31.0, 466.0), win("w")),
+            (cand("4096"), measured(31.0, 466.0), win("w")),
+            (cand("2048"), measured(31.0, 431.0), win("w")),
+        ];
+        let winner = super::pick_winner(&scored).expect("two winners");
+        assert_eq!(winner.0.value, "1024");
+        assert!(super::pick_winner(&scored[..1]).is_none());
+    }
+
+    #[test]
+    fn a_trial_that_did_not_reach_the_depth_or_kept_too_few_samples_is_degenerate() {
+        use crate::core::bench::sweep::DepthResult;
+        let good = DepthResult {
+            depth: 4096,
+            prompt_n: 4101,
+            cache_n: 0,
+            decode_samples: vec![30.0, 31.0, 31.2],
+            prefill_samples: vec![400.0, 402.0, 401.0],
+            decode: crate::core::stats::summarize(&[30.0, 31.0, 31.2]),
+            prefill: crate::core::stats::summarize(&[400.0, 402.0, 401.0]),
+        };
+        assert!(matches!(
+            super::classify(&good, 4096),
+            super::Outcome::Measured(_)
+        ));
+        let shallow = DepthResult {
+            prompt_n: 1900,
+            ..good.clone()
+        };
+        assert!(matches!(
+            super::classify(&shallow, 4096),
+            super::Outcome::Degenerate(r) if r.contains("1900") && r.contains("4096")
+        ));
+        let thin = DepthResult {
+            decode: None,
+            ..good
+        };
+        assert!(matches!(
+            super::classify(&thin, 4096),
+            super::Outcome::Degenerate(r) if r.contains("fewer than 2 samples")
+        ));
+    }
+
+    #[test]
+    fn a_stage_line_carries_the_cells_the_phrase_and_the_dirty_clock() {
+        let m = measured(31.1, 466.0);
+        let v = super::Verdict {
+            wins: true,
+            phrase: "faster on prefill, decode not slower — new incumbent".into(),
+        };
+        let line = super::stage_line(
+            super::Stage::Ubatch,
+            "1024",
+            &super::Outcome::Measured(m),
+            Some(&v),
+            Some(87),
+        );
+        assert_eq!(
+            line,
+            "  ubatch     1024     decode 31.1 [30.8..31.4]  prefill 466 [463..469]   faster on prefill, decode not slower — new incumbent   clock was dirty (CPU_Speed_Limit 87%)"
+        );
+        let skipped = super::stage_line(
+            super::Stage::Kv,
+            "f16",
+            &super::Outcome::Skipped("exceeds the GPU budget by 4120 MiB".into()),
+            None,
+            None,
+        );
+        assert_eq!(
+            skipped,
+            "  kv         f16      skipped: exceeds the GPU budget by 4120 MiB"
+        );
+    }
 }
