@@ -7,6 +7,7 @@
 use std::process::ExitCode;
 
 use super::{Command, Ctx};
+use crate::core::bench::candidate::{self, Candidate};
 use crate::core::frontier;
 use crate::core::machine::{self, Machine, Probed, Provenance};
 use crate::error::ChekovError;
@@ -699,12 +700,6 @@ fn discovered(
     Ok(out)
 }
 
-/// The context a bench needs beyond `Ctx`, resolved and guarded up front.
-struct BenchSetup {
-    eff: crate::core::registry::Effective,
-    pid: i32,
-}
-
 /// Which action each requested candidate takes (spec §7.3): reuse the one
 /// running server when it IS the single request; otherwise a live server is
 /// a refusal — bench never stops a server it did not start.
@@ -833,25 +828,6 @@ fn resolve_judge(
         min_consistency_pct: bench_cfg.judge_min_consistency_pct,
         reasoning_effort: bench_cfg.judge_reasoning_effort,
     }))
-}
-
-/// Wait for `/health` (watching the pid) then assert the loaded `/props`
-/// context; returns what the server actually loaded.
-fn ensure_ready(
-    ctx: &Ctx,
-    upstream: &crate::core::proxy::serve::Upstream,
-    setup: &BenchSetup,
-) -> Result<crate::core::bench::runner::PropsInfo, ChekovError> {
-    use crate::core::bench::runner;
-    let ready = runner::ReadyTarget {
-        base_url: upstream.base_url.clone(),
-        pid: setup.pid,
-    };
-    runner::wait_ready(ctx.http.as_ref(), &ready, (&ctx.config.file.bench).into())?;
-    runner::assert_props_ctx(
-        &|| crate::core::proxy::serve::get_bearer(upstream, "/props"),
-        setup.eff.ctx_size,
-    )
 }
 
 /// The bench invocation's own inputs, bundled (§4).
@@ -1214,15 +1190,15 @@ fn run_candidate(
         StepAction::UseRunning => {
             crate::core::server::live_pid(&ctx.config).ok_or(ChekovError::ServerNotRunning)?
         }
-        StepAction::Launch | StepAction::Judge => launch_candidate(ctx, eff)?,
+        StepAction::Launch | StepAction::Judge => candidate::launch(ctx, eff)?,
     };
-    let setup = BenchSetup {
+    let setup = Candidate {
         eff: eff.clone(),
         pid,
     };
     let dir = measure_candidate(ctx, &setup, inputs)?;
     if matches!(action, StepAction::Launch | StepAction::Judge) {
-        teardown_candidate(ctx, pid)?;
+        candidate::teardown(ctx, pid)?;
     }
     Ok(dir)
 }
@@ -1254,7 +1230,7 @@ fn head_inputs<'a>(
 /// Readiness through rendering for one already-up server.
 fn measure_candidate(
     ctx: &Ctx,
-    setup: &BenchSetup,
+    setup: &Candidate,
     inputs: &RunInputs,
 ) -> Result<std::path::PathBuf, ChekovError> {
     use crate::core::bench::{store, sweep};
@@ -1265,7 +1241,7 @@ fn measure_candidate(
         base_url: cfg.base_url(),
         api_key: cfg.file.server.api_key.clone(),
     };
-    let props = ensure_ready(ctx, &upstream, setup)?;
+    let props = candidate::ensure_ready(ctx, &upstream, setup)?;
     let plan: sweep::SweepPlan = (&cfg.file.bench).into();
     let head = build_head(ctx, setup, &head_inputs(props, &plan, inputs))?;
     let (mut writer, done) = open_run(ctx, &head, args.resume)?;
@@ -1288,55 +1264,6 @@ fn measure_candidate(
     Ok(writer.dir().to_path_buf())
 }
 
-/// Preflight, flag hygiene, then a Metal-aware spawn — the same refusal
-/// gates as `chekov run`, never a back door around them.
-fn launch_candidate(ctx: &Ctx, eff: &crate::core::registry::Effective) -> Result<i32, ChekovError> {
-    use crate::core::bench::lifecycle;
-    use crate::core::server;
-    super::run::preflight(ctx, eff)?;
-    let argv = server::launch_args(&ctx.config, eff);
-    match lifecycle::server_help(&ctx.config.engine_dir()) {
-        Some(help) => {
-            if let Some(flag) = lifecycle::unknown_flags(&argv, &help).into_iter().next() {
-                return Err(ChekovError::BenchFlagUnknown { flag });
-            }
-        }
-        None => eprintln!(
-            "chekov bench: could not capture llama-server --help — flag hygiene unchecked"
-        ),
-    }
-    let pid = server::spawn_daemon_with_env(&ctx.config, eff, &[lifecycle::METAL_RESIDENCY])?;
-    server::write_run_state(&ctx.config, &eff.name)?;
-    eprintln!("chekov bench: started '{}' (pid {pid})", eff.name);
-    Ok(pid)
-}
-
-/// Stop what we started, then verify the budget actually came back before
-/// the next candidate loads (spec §7.3.8).
-fn teardown_candidate(ctx: &Ctx, pid: i32) -> Result<(), ChekovError> {
-    use crate::core::bench::lifecycle;
-    use crate::core::server::{self, PidFile};
-    let cfg = &ctx.config;
-    server::stop_pid(pid, std::time::Duration::from_secs(20))?;
-    PidFile::new(cfg.pidfile()).remove()?;
-    server::clear_run_state(cfg)?;
-    let Some(budget) = machine::live_gpu_budget(&cfg.engine_dir()) else {
-        eprintln!("chekov bench: budget release UNVERIFIED — the engine probe is unavailable");
-        return Ok(());
-    };
-    let bench_cfg = &cfg.file.bench;
-    let policy = lifecycle::ReleasePolicy {
-        total_mib: budget.value,
-        release_pct: bench_cfg.release_pct,
-        max_polls: bench_cfg.release_max_polls,
-        interval: std::time::Duration::from_millis(bench_cfg.release_interval_ms),
-    };
-    let free =
-        lifecycle::wait_budget_released(policy, &mut || machine::live_gpu_free(&cfg.engine_dir()))?;
-    eprintln!("chekov bench: budget released ({free} MiB free)");
-    Ok(())
-}
-
 /// Launch the judge once, judge every run directory, tear it down (spec C §3).
 fn run_judge_phase(
     ctx: &Ctx,
@@ -1344,12 +1271,12 @@ fn run_judge_phase(
     plan: &crate::core::bench::judge::JudgePlan,
 ) -> Result<(), ChekovError> {
     use crate::core::bench::store::{RunLog, render_codebase};
-    let pid = launch_candidate(ctx, &plan.judge)?;
+    let pid = candidate::launch(ctx, &plan.judge)?;
     let (upstream, facade) = judge_wire_parts(ctx, plan);
-    let ready = ensure_ready(
+    let ready = candidate::ensure_ready(
         ctx,
         &upstream,
-        &BenchSetup {
+        &Candidate {
             eff: plan.judge.clone(),
             pid,
         },
@@ -1367,7 +1294,7 @@ fn run_judge_phase(
             Ok::<(), ChekovError>(())
         })
     });
-    teardown_candidate(ctx, pid)?;
+    candidate::teardown(ctx, pid)?;
     outcome
 }
 
@@ -2062,7 +1989,7 @@ struct StampParts {
 /// The stamp itself, given the setup and inputs `build_head` already has plus
 /// everything else bundled in `parts`.
 fn assemble_stamp(
-    setup: &BenchSetup,
+    setup: &Candidate,
     inputs: &HeadInputs,
     parts: StampParts,
 ) -> crate::core::bench::stamp::Stamp {
@@ -2103,7 +2030,7 @@ fn assemble_stamp(
 
 fn build_head(
     ctx: &Ctx,
-    setup: &BenchSetup,
+    setup: &Candidate,
     inputs: &HeadInputs,
 ) -> Result<crate::core::bench::store::RunHead, ChekovError> {
     use crate::core::bench::store;
