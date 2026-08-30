@@ -451,10 +451,20 @@ fn render_geometry(g: &crate::core::gguf::Geometry) -> String {
         "  block_count             {}",
         g.block_count.map_or_else(unknown, |v| v.to_string())
     );
+    // The nextn layers are a native multi-token-prediction draft head baked
+    // into the weights. llama.cpp loads past them — `kv_layers` subtracts
+    // them for exactly that reason — so the note says what the number IS and
+    // that the engine leaves it idle, rather than printing a bare count only
+    // the KV arithmetic understands.
+    let nextn = g.nextn_predict_layers.unwrap_or(0);
     let _ = writeln!(
         out,
-        "  nextn_predict_layers    {}",
-        g.nextn_predict_layers.unwrap_or(0)
+        "  nextn_predict_layers    {nextn}{}",
+        if nextn > 0 {
+            "   (a native MTP draft head; this engine decodes without it)"
+        } else {
+            ""
+        }
     );
     let _ = writeln!(
         out,
@@ -1707,6 +1717,48 @@ mod tests {
             budget,
             macos: Some("27.0".into()),
         }
+    }
+
+    /// The nextn row stops being a bare number: a weights file that carries a
+    /// native MTP draft head says so, and says the engine decodes without it —
+    /// the latent speedup is a fact about the model worth naming. A file
+    /// without one keeps the plain row.
+    #[test]
+    fn explain_names_the_mtp_head_when_the_weights_carry_one() {
+        let with = crate::core::gguf::Geometry {
+            arch: "qwen35moe".into(),
+            block_count: Some(41),
+            nextn_predict_layers: Some(1),
+            ..Default::default()
+        };
+        let out = super::render_explain(&super::Explained {
+            name: "m",
+            geometry: &with,
+            ctx_len: 4096,
+            weights: None,
+            q8_cache: false,
+        });
+        assert!(
+            out.contains(
+                "nextn_predict_layers    1   (a native MTP draft head; this engine \
+                 decodes without it)"
+            ),
+            "{out}"
+        );
+
+        let without = crate::core::gguf::Geometry {
+            nextn_predict_layers: None,
+            ..with
+        };
+        let out = super::render_explain(&super::Explained {
+            name: "m",
+            geometry: &without,
+            ctx_len: 4096,
+            weights: None,
+            q8_cache: false,
+        });
+        assert!(out.contains("nextn_predict_layers    0\n"), "{out}");
+        assert!(!out.contains("MTP"), "{out}");
     }
 
     #[test]
