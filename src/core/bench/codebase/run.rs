@@ -80,7 +80,7 @@ fn arms(task: &CodebaseTask) -> Vec<Arm> {
             with_extra: false,
         },
         Arm {
-            id: format!("{}+extra", task.id),
+            id: format!("{}{}", task.id, super::ARM_EXTRA_SUFFIX),
             label: Some(WITH_EXTRA),
             with_extra: true,
         },
@@ -729,6 +729,63 @@ mod tests {
             let codebase = row.codebase.as_ref().expect("a codebase row");
             assert_eq!(codebase.excluded.cross_file, "n/a: same-file");
         }
+    }
+
+    /// The same task twice over, so one of them can lose an arm.
+    fn prepared_two_cross() -> Prepared {
+        let mut second = cross_task();
+        second.id = "cross_file_first-abc123-L9".into();
+        second.line = 9;
+        let mut prepared = prepared_cross();
+        prepared.tasks.push(second);
+        prepared.counts.cross_file_first = 2;
+        prepared
+    }
+
+    /// An outage is that crossing's alone — it does not latch, the other arm
+    /// of the same task still goes up, and the lift says how many tasks it
+    /// actually ran over.
+    #[test]
+    fn an_outage_on_the_without_arm_leaves_the_with_arm_crossing_and_narrows_the_lift() {
+        let (rows, posts, bodies) = drive(
+            "arm-outage",
+            &prepared_two_cross(),
+            (
+                vec![
+                    refused("internal error"),
+                    Ok(infill_200()),
+                    Ok(infill_200()),
+                    Ok(infill_200()),
+                ],
+                vec![],
+            ),
+        );
+        assert_eq!(
+            posts, 4,
+            "an outage is not a capability, so nothing latches"
+        );
+        assert!(
+            unavailable_reason(&rows[0]).contains("internal error"),
+            "{:?}",
+            rows[0].grade
+        );
+        assert!(
+            rows[0]
+                .codebase
+                .as_ref()
+                .is_some_and(|c| !c.unsupported && c.arm.as_deref() == Some(super::NO_EXTRA)),
+            "{:?}",
+            rows[0].codebase
+        );
+        assert_eq!(bodies[1]["input_extra"][0]["filename"], "src/defs.rs");
+        let block = crate::core::bench::store::render_codebase(&RunLog {
+            head: run_head(),
+            rows,
+        });
+        assert!(
+            block.contains("(n=1 of 2; 1 files sent, 0.0 KiB, 0 truncated; 0 withheld)"),
+            "{block}"
+        );
     }
 
     #[test]

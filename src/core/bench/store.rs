@@ -709,7 +709,9 @@ fn is_cross(row: &TaskRow) -> bool {
 
 /// A cross-file task's id without its arm suffix — the two arms are one task.
 fn base_id(task_id: &str) -> &str {
-    task_id.strip_suffix("+extra").unwrap_or(task_id)
+    task_id
+        .strip_suffix(crate::core::bench::codebase::ARM_EXTRA_SUFFIX)
+        .unwrap_or(task_id)
 }
 
 /// Distinct tasks behind these rows: the header counts tasks, the crossings
@@ -854,6 +856,11 @@ fn symbols_delta(pairs: &[(&CodebaseRow, &CodebaseRow)]) -> Option<f64> {
 /// `6 files sent, 41.2 KiB, 1 truncated; 2 withheld`, prefixed `n=k of N; `
 /// when a task was measured on one arm only — the lift never runs quietly
 /// over fewer tasks than the tier has.
+///
+/// `files sent` counts ROWS, not distinct paths: six tasks that all cross
+/// for a symbol declared in the same G are six files sent, and `KiB` is the
+/// six-way sum. It is what the run put on the wire, which is the number the
+/// lift was bought with; a distinct-path count would understate the cost.
 fn lift_note(kept: &[&TaskRow], pairs: &[(&CodebaseRow, &CodebaseRow)]) -> String {
     let total = tier_tasks(kept, TaskTier::CrossFileFirst);
     let sent: Vec<&crate::core::bench::codebase::ExtraFile> =

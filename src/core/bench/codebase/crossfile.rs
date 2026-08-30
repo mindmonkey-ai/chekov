@@ -492,6 +492,10 @@ fn window(text: &str, name: &str) -> String {
     if text.len() <= EXTRA_CAP {
         return text.to_owned();
     }
+    // A declaration the line scan cannot see (a macro-generated item, a
+    // multi-line signature) centres the window on the middle of the file
+    // rather than dropping the task: half a definition beats none, and the
+    // row's `truncated` flag already says the model saw a window.
     let at = declaration_offset(text, name).unwrap_or(text.len() / 2);
     let start = line_start_containing(text, at.saturating_sub(EXTRA_CAP / 2));
     text[start..last_line_end_within_cap(text, start)].to_owned()

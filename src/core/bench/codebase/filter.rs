@@ -8,11 +8,20 @@
 
 use std::ops::Range;
 
+use super::crossfile::cross_file_note;
 use super::masker::{Candidate, literal_ranges, matching_close};
 use super::sample::Picked;
 use super::{CodebaseTask, Excluded, TaskTier};
 
 pub const NO_CROSS_FILE: &str = "n/a: same-file";
+
+/// What a `cross_file_first` span with no assembly records instead.
+///
+/// `assemble_extra` returns `None` only when G has left the corpus between
+/// detection and assembly, which the index makes impossible — but the
+/// fallback still has to be true if it ever fires. "n/a: same-file" would be
+/// a lie about the tier, and a silent one.
+pub const NO_DEFINITION: &str = "no extra: definition not in corpus";
 
 const CFG_TEST: &str = "#[cfg(test)]";
 
@@ -155,10 +164,9 @@ pub fn assemble(picked: &Picked, ctx: &Context) -> CodebaseTask {
         suffix: ctx.text[c.byte_range.end..].to_owned(),
         excluded: Excluded {
             doc_comment,
-            cross_file: ctx.cross.map_or_else(
-                || NO_CROSS_FILE.to_owned(),
-                super::crossfile::cross_file_note,
-            ),
+            cross_file: ctx
+                .cross
+                .map_or_else(|| no_cross_note(c.tier).to_owned(), cross_file_note),
             cfg_test_lines: ctx.cfg_test_lines,
             cross_file_withheld: ctx.cross.map_or(0, |a| a.withheld),
         },
@@ -168,6 +176,15 @@ pub fn assemble(picked: &Picked, ctx: &Context) -> CodebaseTask {
             .map_or_else(Vec::new, |a| a.also_first_uses.clone()),
         extra: ctx.cross.map(|a| a.extra.clone()),
         extra_text: ctx.cross.map_or_else(String::new, |a| a.extra_text.clone()),
+    }
+}
+
+/// What a task with no cross-file assembly says, by tier — never the other
+/// tier's sentence.
+const fn no_cross_note(tier: TaskTier) -> &'static str {
+    match tier {
+        TaskTier::CrossFileFirst => NO_DEFINITION,
+        TaskTier::InFile | TaskTier::FunctionBody => NO_CROSS_FILE,
     }
 }
 
@@ -212,6 +229,27 @@ mod tests {
 
     fn pick(tier: TaskTier) -> Picked {
         pick_from(SRC, tier)
+    }
+
+    /// A cross-file span with no assembly says what is missing. Reading
+    /// `n/a: same-file` on a `cross_file_first` row would name the wrong
+    /// tier, and the count of cross-file tasks would still be one.
+    #[test]
+    fn a_cross_file_span_without_an_assembly_says_the_definition_is_missing() {
+        let mut picked = pick(TaskTier::InFile);
+        picked.candidate.tier = TaskTier::CrossFileFirst;
+        let task = assemble(
+            &picked,
+            &Context {
+                text: SRC,
+                cfg_test_lines: 0,
+                cross: None,
+            },
+        );
+        assert_eq!(task.tier, TaskTier::CrossFileFirst);
+        assert_eq!(task.excluded.cross_file, super::NO_DEFINITION);
+        assert!(task.extra.is_none());
+        assert!(task.name.is_none());
     }
 
     #[test]

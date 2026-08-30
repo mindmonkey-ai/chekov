@@ -14,6 +14,13 @@ use serde::{Deserialize, Serialize};
 /// Printed once per run: the masks come from a brace scanner, not a parser.
 pub const MASK_LABEL: &str = "boundary-scanned (not AST)";
 
+/// What the with-extra arm's `task_id` ends in (§5).
+///
+/// `run::arms` writes it and `store::base_id` strips it back off to pair the
+/// two arms of one task: two literals, and a run whose ids the report could
+/// not pair would show every task as two.
+pub const ARM_EXTRA_SUFFIX: &str = "+extra";
+
 /// Which kind of span was masked (`RepoBench` taxonomy; cross-file is slice B).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -426,7 +433,7 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
 
-    use super::{CodebaseTask, TaskTier, filter, prepare};
+    use super::{CodebaseTask, Prepared, TaskTier, crossfile, filter, prepare, rule_one_ambiguous};
 
     /// A production function with a real body, and the inline test module a
     /// Rust file of this shape always has.
@@ -495,11 +502,10 @@ mod tests {
     }
 
     /// Two files: one defines, the other calls into it — the shape the
-    /// cross-file tier exists for.
-    fn repo_with_a_cross_file_call() -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join("chekov-test-codebase-prepare")
-            .join("cross");
+    /// cross-file tier exists for. `name` keys the directory, so two tests
+    /// that want this shape never wipe each other's checkout.
+    fn repo_with_a_cross_file_call(name: &str) -> PathBuf {
+        let dir = scratch_for(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).expect("mkdir");
         std::fs::write(
@@ -544,7 +550,7 @@ mod tests {
     #[test]
     fn a_cross_file_task_carries_the_defining_file_and_the_others_carry_none() {
         let prepared = prepare(
-            &repo_with_a_cross_file_call(),
+            &repo_with_a_cross_file_call("cross"),
             &scratch_for("scratch-cross"),
             24,
         )
@@ -629,6 +635,59 @@ mod tests {
             &[&author[..], &["commit", "-q", "-m", "init"]].concat(),
         );
         dir
+    }
+
+    /// Rule 2 gets its own name back: a name F declares itself is SHADOWED,
+    /// not ambiguous, and the shortfall must not count it as an ambiguity the
+    /// index saw. From any other file the very same name really is ambiguous.
+    #[test]
+    fn a_name_declared_in_both_files_is_shadowed_not_ambiguous() {
+        let files = vec![
+            ("src/f.rs".to_owned(), "pub fn build() {}\n".to_owned()),
+            ("src/g.rs".to_owned(), "pub fn build() {}\n".to_owned()),
+        ];
+        let index = crossfile::Index::build(&files);
+        let names: std::collections::BTreeSet<String> = ["build".to_owned()].into();
+        assert!(
+            rule_one_ambiguous(&index, "src/f.rs", &names).is_empty(),
+            "rule 2 skipped it as a local shadow — counting it here would claim \
+             an ambiguity the index never had to resolve"
+        );
+        assert_eq!(
+            rule_one_ambiguous(&index, "src/h.rs", &names),
+            names,
+            "from a third file the same name is genuinely ambiguous"
+        );
+    }
+
+    /// The set is a function of HEAD, so the same commit prepares the same
+    /// tasks with the same defining files — otherwise `corpus_id` promises a
+    /// comparability it does not have.
+    #[test]
+    fn preparing_the_same_commit_twice_yields_the_same_set_and_the_same_extra_files() {
+        let repo = repo_with_a_cross_file_call("cross-twice");
+        let first = prepare(&repo, &scratch_for("scratch-det-a"), 24).expect("prepare");
+        let second = prepare(&repo, &scratch_for("scratch-det-b"), 24).expect("prepare");
+        assert_eq!(first.set_hash, second.set_hash);
+        let extras = |p: &Prepared| {
+            p.tasks
+                .iter()
+                .map(|t| {
+                    (
+                        t.id.clone(),
+                        t.extra.as_ref().map(|e| e.path.clone()),
+                        t.name.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(extras(&first), extras(&second));
+        assert!(
+            extras(&first)
+                .iter()
+                .any(|(_, path, name)| path.is_some() && name.is_some()),
+            "the fixture has a crossing, so the comparison is not vacuous"
+        );
     }
 
     /// A method call whose name happens to be declared somewhere is not a
