@@ -30,6 +30,10 @@ const CFG_TEST: &str = "#[cfg(test)]";
 pub struct Elided {
     pub text: String,
     pub lines_removed: usize,
+    /// The regions removed, in ORIGINAL coordinates, ascending and
+    /// non-overlapping. Tier 6 splices into the file on disk, so a span found
+    /// in `text` has to be mapped back through these.
+    pub cuts: Vec<Range<usize>>,
 }
 
 /// The file kept, its `#[cfg(test)]` items cut out.
@@ -48,12 +52,13 @@ pub fn elide_cfg_test(text: &str) -> Elided {
         return Elided {
             text: text.to_owned(),
             lines_removed: 0,
+            cuts,
         };
     }
     let mut kept = String::with_capacity(text.len());
     let mut lines_removed = 0;
     let mut from = 0;
-    for cut in cuts {
+    for cut in &cuts {
         kept.push_str(&text[from..cut.start]);
         lines_removed += text[cut.clone()].matches('\n').count();
         from = cut.end;
@@ -62,7 +67,32 @@ pub fn elide_cfg_test(text: &str) -> Elided {
     Elided {
         text: kept,
         lines_removed,
+        cuts,
     }
+}
+
+/// A span found in the elided text, as a span of the original.
+///
+/// The start shifts past a cut that begins at or before it — the cut's bytes
+/// were removed there, so the span's text begins after them. The end shifts
+/// only past a cut that begins strictly before it, or a cut abutting the
+/// span's end would be swallowed into the span.
+#[must_use]
+pub fn original_range(cuts: &[Range<usize>], elided: &Range<usize>) -> Range<usize> {
+    shift(cuts, elided.start, |start, at| start <= at)..shift(cuts, elided.end, |start, at| {
+        start < at
+    })
+}
+
+fn shift(cuts: &[Range<usize>], at: usize, precedes: fn(usize, usize) -> bool) -> usize {
+    let mut out = at;
+    for cut in cuts {
+        if !precedes(cut.start, out) {
+            break;
+        }
+        out += cut.end - cut.start;
+    }
+    out
 }
 
 /// Every region to remove, ascending and non-overlapping. An attribute nested
@@ -144,6 +174,9 @@ pub struct Context<'a> {
     /// What `elide_cfg_test` removed from THAT file, carried onto the row so
     /// the report can say what the repository's inline tests cost.
     pub cfg_test_lines: usize,
+    /// Where that file's cuts fell, so the span can be mapped onto the file
+    /// as it sits on disk.
+    pub cuts: &'a [Range<usize>],
     /// The cross-file assembly, for a `cross_file_first` span only.
     pub cross: Option<&'a super::crossfile::Assembled>,
 }
@@ -159,6 +192,7 @@ pub fn assemble(picked: &Picked, ctx: &Context) -> CodebaseTask {
         tier: c.tier,
         file: picked.path.clone(),
         line: c.line,
+        byte_range: original_range(ctx.cuts, &c.byte_range),
         gold: ctx.text[c.byte_range.clone()].to_owned(),
         prefix,
         suffix: ctx.text[c.byte_range.end..].to_owned(),
@@ -243,6 +277,7 @@ mod tests {
             &Context {
                 text: SRC,
                 cfg_test_lines: 0,
+                cuts: &[],
                 cross: None,
             },
         );
@@ -259,6 +294,7 @@ mod tests {
             &Context {
                 text: SRC,
                 cfg_test_lines: 4,
+                cuts: &[],
                 cross: None,
             },
         );
@@ -290,6 +326,7 @@ mod tests {
             &Context {
                 text: ATTRIBUTED,
                 cfg_test_lines: 0,
+                cuts: &[],
                 cross: None,
             },
         );
@@ -307,6 +344,45 @@ mod tests {
         assert_eq!(task.excluded.doc_comment, 1);
     }
 
+    /// The elided text drops whole `#[cfg(test)]` regions, so an offset into
+    /// it is short by every cut before it. Tier 6 splices into the file as it
+    /// sits on disk — test modules intact, because tier 7 runs them — so the
+    /// range the task carries has to be the original's.
+    #[test]
+    fn a_span_after_a_cut_maps_back_onto_the_original_bytes() {
+        let original =
+            "#[cfg(test)]\nmod a {\n    fn t() {}\n}\n\nfn keep() {\n    let x = 1;\n}\n";
+        let elided = super::elide_cfg_test(original);
+        assert!(!elided.text.contains("cfg(test)"), "{}", elided.text);
+        let at = elided
+            .text
+            .find("let x = 1;")
+            .expect("the span survives the cut");
+        let span = at..at + "let x = 1;".len();
+        let mapped = super::original_range(&elided.cuts, &span);
+        assert_eq!(&original[mapped], "let x = 1;");
+    }
+
+    /// A cut that begins exactly where the span ends is NOT inside the span.
+    #[test]
+    fn a_cut_starting_at_the_spans_end_stays_outside_it() {
+        let original = "fn keep() {\n    let x = 1;\n}\n#[cfg(test)]\nmod a {\n    fn t() {}\n}\n";
+        let elided = super::elide_cfg_test(original);
+        let at = elided.text.find("let x = 1;").expect("the span survives");
+        let span = at..at + "let x = 1;".len();
+        let mapped = super::original_range(&elided.cuts, &span);
+        assert_eq!(&original[mapped], "let x = 1;");
+    }
+
+    /// A file with no test module maps one-to-one.
+    #[test]
+    fn a_file_with_nothing_cut_maps_identically() {
+        let original = "fn keep() {\n    let x = 1;\n}\n";
+        let elided = super::elide_cfg_test(original);
+        assert!(elided.cuts.is_empty());
+        assert_eq!(super::original_range(&elided.cuts, &(12..22)), 12..22);
+    }
+
     #[test]
     fn an_in_file_task_keeps_the_doc_comment_and_records_zero() {
         let task = assemble(
@@ -314,6 +390,7 @@ mod tests {
             &Context {
                 text: SRC,
                 cfg_test_lines: 0,
+                cuts: &[],
                 cross: None,
             },
         );

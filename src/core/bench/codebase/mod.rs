@@ -81,6 +81,13 @@ pub struct CodebaseTask {
     pub tier: TaskTier,
     pub file: String,
     pub line: usize,
+    /// The span in the file as it sits in the worktree — test modules intact.
+    ///
+    /// `masker::Candidate.byte_range` indexes the ELIDED text; tier 6 splices
+    /// into the original, because tier 7 runs the very test modules elision
+    /// cut. `filter::original_range` is the map between them, and the
+    /// invariant is `&original[byte_range] == gold`.
+    pub byte_range: std::ops::Range<usize>,
     pub gold: String,
     pub prefix: String,
     pub suffix: String,
@@ -143,20 +150,36 @@ pub struct Prepared {
     pub counts: Counts,
 }
 
+/// What one file's `#[cfg(test)]` cut cost, and where it fell.
+struct FileElision {
+    lines: usize,
+    cuts: Vec<std::ops::Range<usize>>,
+}
+
 /// Every walked file with its `#[cfg(test)]` items already cut, keyed back to
-/// what each cut cost so a task's row can carry its own file's number.
+/// what each cut cost so a task's row can carry its own file's number — and
+/// to WHERE each cut fell, so a span can be mapped onto the original.
 struct Elisions {
     files: Vec<(String, String)>,
-    per_file: std::collections::HashMap<String, usize>,
+    per_file: std::collections::HashMap<String, FileElision>,
 }
 
 impl Elisions {
     fn lines(&self) -> usize {
-        self.per_file.values().sum()
+        self.per_file.values().map(|e| e.lines).sum()
     }
 
     fn files_cut(&self) -> usize {
-        self.per_file.values().filter(|n| **n > 0).count()
+        self.per_file.values().filter(|e| e.lines > 0).count()
+    }
+
+    /// One file's cut list, or an empty one for a file that gave nothing up.
+    fn cuts(&self, path: &str) -> &[std::ops::Range<usize>] {
+        self.per_file.get(path).map_or(&[], |e| e.cuts.as_slice())
+    }
+
+    fn lines_of(&self, path: &str) -> usize {
+        self.per_file.get(path).map_or(0, |e| e.lines)
     }
 }
 
@@ -171,7 +194,13 @@ fn elide_tests(files: Vec<(String, String)>) -> Elisions {
         .into_iter()
         .map(|(path, text)| {
             let cut = filter::elide_cfg_test(&text);
-            per_file.insert(path.clone(), cut.lines_removed);
+            per_file.insert(
+                path.clone(),
+                FileElision {
+                    lines: cut.lines_removed,
+                    cuts: cut.cuts,
+                },
+            );
             (path, cut.text)
         })
         .collect();
@@ -392,7 +421,8 @@ fn assembled_tasks(picked: &[sample::Picked], a: &Assembly) -> Vec<CodebaseTask>
                 p,
                 &filter::Context {
                     text,
-                    cfg_test_lines: a.elided.per_file.get(&p.path).copied().unwrap_or(0),
+                    cfg_test_lines: a.elided.lines_of(&p.path),
+                    cuts: a.elided.cuts(&p.path),
                     cross: cross_for(p, a, text).as_ref(),
                 },
             ))
@@ -455,6 +485,44 @@ mod tests {
             .expect("git")
             .success();
         assert!(ok, "git {args:?}");
+    }
+
+    /// A committed two-file repo and the `Prepared` sampled from it. The repo
+    /// path comes back because the worktree is gone by then, and a clean
+    /// checkout of the same HEAD has byte-identical files.
+    fn prepared_fixture(name: &str) -> (PathBuf, Prepared) {
+        let root = std::env::temp_dir().join("chekov-test-codebase").join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("src")).expect("src dir");
+        std::fs::write(repo.join("src/alpha.rs"), source("alpha")).expect("alpha");
+        std::fs::write(repo.join("src/beta.rs"), source("beta")).expect("beta");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "fixture"]);
+        let prepared = prepare(&repo, &root.join("scratch"), 8).expect("prepare");
+        (repo, prepared)
+    }
+
+    /// Every assembled task's `byte_range` indexes the file as it sits in the
+    /// worktree — test modules intact — and lands exactly on the gold.
+    #[test]
+    fn every_tasks_byte_range_indexes_the_worktrees_own_file() {
+        let (repo, prepared) = prepared_fixture("byte-range");
+        assert!(!prepared.tasks.is_empty(), "the fixture yields tasks");
+        for task in &prepared.tasks {
+            let original =
+                std::fs::read_to_string(repo.join(&task.file)).expect("the file on disk");
+            assert_eq!(
+                &original[task.byte_range.clone()],
+                task.gold,
+                "task {} in {}",
+                task.id,
+                task.file
+            );
+        }
     }
 
     /// `name` keys the directory: two tests that both want this shape must not

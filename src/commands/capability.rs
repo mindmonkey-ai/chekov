@@ -1937,6 +1937,7 @@ mod tests {
             tier: TaskTier::InFile,
             file: "src/a.rs".into(),
             line,
+            byte_range: 9..19,
             gold: "let a = 1;".into(),
             prefix: "fn f() {\n".into(),
             suffix: "\n}\n".into(),

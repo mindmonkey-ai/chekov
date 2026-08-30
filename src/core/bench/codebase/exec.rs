@@ -361,6 +361,111 @@ fn fetch(cargo: &Path, worktree: &Path, target_dir: &Path) {
     }
 }
 
+/// One crossing's edit: which file, what it held, and the bytes to replace.
+pub struct Splice<'a> {
+    pub path: &'a Path,
+    pub original: &'a str,
+    pub span: std::ops::Range<usize>,
+}
+
+/// `original` with `span` replaced by `fill`, every other byte identical —
+/// test modules included, because tier 7 runs them.
+#[must_use]
+pub fn spliced(splice: &Splice, fill: &str) -> String {
+    let mut out = String::with_capacity(splice.original.len() + fill.len());
+    out.push_str(&splice.original[..splice.span.start]);
+    out.push_str(fill);
+    out.push_str(&splice.original[splice.span.end..]);
+    out
+}
+
+/// The splice, written. No other file in the worktree is touched.
+pub fn apply(splice: &Splice, fill: &str) -> Result<(), ChekovError> {
+    std::fs::write(splice.path, spliced(splice, fill))
+        .map_err(|e| ChekovError::io(format!("writing {}", splice.path.display()), e))
+}
+
+/// The first `error` diagnostic in a `--message-format=json` stream, as
+/// `<file>:<line>: <message>`.
+///
+/// Warnings are ignored — a fill that compiles with warnings compiles — and a
+/// line that is not JSON is ignored, because cargo interleaves plain progress
+/// text on the same stream. The diagnostics, not the exit status, are the
+/// verdict: cargo exits non-zero for things it also reports, and the stream is
+/// the auditable record.
+#[must_use]
+pub fn first_error(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(error_line)
+}
+
+fn error_line(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let message = value.get("message")?;
+    if message.get("level")?.as_str()? != "error" {
+        return None;
+    }
+    let text = message.get("message")?.as_str()?;
+    Some(match primary_span(message) {
+        Some((file, at)) => format!("{file}:{at}: {text}"),
+        None => text.to_owned(),
+    })
+}
+
+fn primary_span(message: &serde_json::Value) -> Option<(String, u64)> {
+    let span = message
+        .get("spans")?
+        .as_array()?
+        .iter()
+        .find(|s| s.get("is_primary").and_then(serde_json::Value::as_bool) == Some(true))?;
+    Some((
+        span.get("file_name")?.as_str()?.to_owned(),
+        span.get("line_start")?.as_u64()?,
+    ))
+}
+
+/// cargo's own line when `--offline` is what stopped it, or `None`.
+///
+/// This is never retried online: the run fetched once before the loop, and a
+/// crossing that still wants the registry is a skip with cargo's words, not a
+/// second trip to the network mid-benchmark.
+#[must_use]
+pub fn needs_network(stderr: &str) -> Option<String> {
+    const MARKERS: [&str; 4] = [
+        "--offline",
+        "failed to download",
+        "no matching package named",
+        "unable to get packages from source",
+    ];
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| MARKERS.iter().any(|marker| line.contains(marker)))
+        .map(str::to_owned)
+}
+
+/// `git checkout -- F`, then the bytes back.
+///
+/// A revert that does not restore aborts the run: every later crossing would
+/// be measured against a file nobody can vouch for, and a benchmark that
+/// cannot say what it compiled has measured nothing.
+pub fn revert(env: &Env, file: &str, original: &str) -> Result<(), ChekovError> {
+    super::tree::git(
+        &env.worktree.path,
+        &["checkout", "--", file],
+        "git checkout (undo the tier-6 splice)",
+    )?;
+    let path = env.worktree.path.join(file);
+    let now = std::fs::read_to_string(&path)
+        .map_err(|e| ChekovError::io(format!("re-reading {}", path.display()), e))?;
+    if now == original {
+        return Ok(());
+    }
+    Err(ChekovError::ExecWorktreeDirty {
+        path: env.worktree.path.clone(),
+        file: file.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -637,6 +742,163 @@ mod tests {
             !dir.join(format!("target-{HEAD12}")).exists(),
             "no scratch target for a run that cannot happen"
         );
+    }
+
+    fn splice_of<'a>(
+        path: &'a Path,
+        original: &'a str,
+        span: std::ops::Range<usize>,
+    ) -> super::Splice<'a> {
+        super::Splice {
+            path,
+            original,
+            span,
+        }
+    }
+
+    #[test]
+    fn a_splice_replaces_the_span_and_leaves_every_other_byte_alone() {
+        let original = "fn f() {\n    let a = 1;\n}\n\n#[cfg(test)]\nmod t {\n    fn q() {}\n}\n";
+        let at = original.find("let a = 1;").expect("the span");
+        let out = super::spliced(
+            &splice_of(Path::new("/nowhere"), original, at..at + 10),
+            "let a = 2;",
+        );
+        assert_eq!(out, original.replace("let a = 1;", "let a = 2;"));
+        assert!(
+            out.contains("#[cfg(test)]"),
+            "the test module is intact: {out}"
+        );
+    }
+
+    #[test]
+    fn a_span_at_byte_zero_and_a_span_at_eof_both_splice() {
+        let original = "abcdef";
+        let head = super::spliced(&splice_of(Path::new("/n"), original, 0..3), "XY");
+        assert_eq!(head, "XYdef");
+        let tail = super::spliced(&splice_of(Path::new("/n"), original, 6..6), "Z");
+        assert_eq!(tail, "abcdefZ");
+    }
+
+    #[test]
+    fn the_first_error_wins_and_warnings_are_ignored() {
+        let stream = concat!(
+            r#"{"reason":"compiler-artifact","package_id":"x"}"#,
+            "\n",
+            r#"{"reason":"compiler-message","message":{"level":"warning","message":"unused","spans":[{"file_name":"src/a.rs","line_start":3,"is_primary":true}]}}"#,
+            "\n",
+            r#"{"reason":"compiler-message","message":{"level":"error","message":"mismatched types","spans":[{"file_name":"src/b.rs","line_start":42,"is_primary":true}]}}"#,
+            "\n",
+        );
+        assert_eq!(
+            super::first_error(stream).as_deref(),
+            Some("src/b.rs:42: mismatched types")
+        );
+    }
+
+    #[test]
+    fn warnings_alone_are_a_pass_and_malformed_lines_are_ignored() {
+        let stream = concat!(
+            "warning: this line is not JSON at all\n",
+            "{ not json either\n",
+            r#"{"reason":"compiler-message","message":{"level":"warning","message":"unused","spans":[]}}"#,
+            "\n",
+        );
+        assert_eq!(super::first_error(stream), None);
+    }
+
+    /// A fill can break a caller in another file — that IS the point of the
+    /// cross-file tier — so an error anywhere in the workspace counts.
+    #[test]
+    fn an_error_in_another_file_still_counts() {
+        let stream = concat!(
+            r#"{"reason":"compiler-message","message":{"level":"error","message":"no method `zap`","spans":[{"file_name":"src/caller.rs","line_start":9,"is_primary":true}]}}"#,
+            "\n",
+        );
+        assert_eq!(
+            super::first_error(stream).as_deref(),
+            Some("src/caller.rs:9: no method `zap`")
+        );
+    }
+
+    /// An error with no primary span is still an error.
+    #[test]
+    fn an_error_without_a_primary_span_keeps_its_message() {
+        let stream = r#"{"reason":"compiler-message","message":{"level":"error","message":"linking failed","spans":[]}}"#;
+        assert_eq!(
+            super::first_error(stream).as_deref(),
+            Some("linking failed")
+        );
+    }
+
+    #[test]
+    fn cargos_offline_complaint_is_recognised_and_quoted() {
+        let stderr = "    Updating crates.io index\nerror: no matching package named `serde` \
+                      found\nperhaps you meant to use --offline\n";
+        let found = super::needs_network(stderr).expect("cargo said it needed the registry");
+        assert!(found.contains("no matching package named"), "{found}");
+        assert_eq!(super::needs_network("error: mismatched types\n"), None);
+    }
+
+    /// A committed crate whose `src/a.rs` bytes the revert test knows, a
+    /// worktree over it, and the `Env` the revert acts on — with the file's
+    /// text as the worktree holds it. `repo` writes a different file, so this
+    /// builds its own.
+    fn revert_fixture(dir: &Path) -> (super::Env, String) {
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("src")).expect("src");
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("manifest");
+        std::fs::write(repo.join("src/a.rs"), "fn f() {\n    let a = 1;\n}\n").expect("a.rs");
+        let who = ["-c", "user.email=t@t", "-c", "user.name=t"];
+        git(&repo, &["init", "-q"]);
+        git(&repo, &[&who[..], &["add", "-A"]].concat());
+        git(&repo, &[&who[..], &["commit", "-qm", "fixture"]].concat());
+        let worktree = Worktree::add(&repo, &dir.join("tree")).expect("worktree");
+        let original =
+            std::fs::read_to_string(worktree.path.join("src/a.rs")).expect("the original");
+        let env = super::Env {
+            worktree,
+            cargo: PathBuf::from("cargo"),
+            target_dir: dir.join("target"),
+            cargo_version: "cargo 1.95.0".to_owned(),
+            timeouts: Timeouts::DEFAULT,
+        };
+        (env, original)
+    }
+
+    /// A worktree the revert restores, and one it cannot: the second is the
+    /// abort, and it names the file.
+    #[test]
+    fn a_revert_restores_the_file_and_a_failure_to_restore_aborts() {
+        let dir = scratch("revert");
+        let (env, original) = revert_fixture(&dir);
+        let path = env.worktree.path.join("src/a.rs");
+        super::apply(
+            &super::Splice {
+                path: &path,
+                original: &original,
+                span: 9..19,
+            },
+            "let a = 2;",
+        )
+        .expect("apply");
+        assert_ne!(
+            std::fs::read_to_string(&path).expect("read"),
+            original,
+            "the splice landed"
+        );
+        super::revert(&env, "src/a.rs", &original).expect("the revert restores");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), original);
+
+        // A file whose committed content is not what we claim it was: the
+        // checkout succeeds and the bytes still differ, which is the abort.
+        let wrong = format!("{original}// drifted\n");
+        let err = super::revert(&env, "src/a.rs", &wrong)
+            .expect_err("a worktree that will not restore stops the run");
+        let text = err.to_string();
+        assert!(text.contains("src/a.rs"), "{text}");
+        assert!(text.contains("--resume"), "{text}");
+        env.finish().expect("cleanup");
     }
 
     #[test]
