@@ -1,8 +1,240 @@
+//! The position-swapped binary judge (spec C §4).
+//!
+//! What one verdict IS — rubric, eligibility, the request pair, the strict
+//! reply parse and the swap rule. No HTTP here: requests go out through
+//! `runner`, and what comes back is the Anthropic body `runner` already
+//! hands every probe.
+
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::core::bench::codebase::TaskTier;
+use crate::core::bench::codebase::ladder::trimmed_to_gold;
+use crate::core::bench::store::{CodebaseRow, DecidedBy, ExecScore, JudgeRow};
+use crate::core::proxy::http::HttpRequest;
+
+/// The prompt, and nothing else — a file so it diffs as text (§16.10).
+pub const RUBRIC: &str = include_str!("judge_rubric.md");
+pub const CONTEXT_BEFORE_LINES: usize = 40;
+pub const CONTEXT_AFTER_LINES: usize = 20;
+pub const SPAN_MAX_CHARS: usize = 4096;
+const RUBRIC_VERSION: &str = "judge-v1";
+
+/// The grammar every judge request asks for, and the shape `parse_reply` checks.
+#[must_use]
+pub fn schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {"same_behavior": {"type": "boolean"}},
+        "required": ["same_behavior"],
+        "additionalProperties": false,
+    })
+}
+
+/// `sha256(file bytes ‖ schema ‖ the three constants ‖ "judge-v1")[..12]`.
+#[must_use]
+pub fn rubric_hash() -> String {
+    let canonical = format!(
+        "{RUBRIC}|{}|{CONTEXT_BEFORE_LINES}|{CONTEXT_AFTER_LINES}|{SPAN_MAX_CHARS}|{RUBRIC_VERSION}",
+        schema()
+    );
+    crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
+}
+
+/// `general.architecture` with a trailing `moe` removed: `qwen35moe` and
+/// `qwen35` are one family. A floor against sibling preference, not a proof
+/// of independence (spec C §2.1).
+#[must_use]
+pub fn family_key(arch: &str) -> &str {
+    arch.strip_suffix("moe").unwrap_or(arch)
+}
+
+/// Whether a stored row gets a judge row, and which kind.
+pub enum Eligibility<'a> {
+    Identical,
+    Skipped(&'static str),
+    Judge(Pair<'a>),
+}
+
+/// The two spans and their bounded context, as the rubric shows them.
+pub struct Pair<'a> {
+    pub file: &'a str,
+    pub before: String,
+    pub after: String,
+    pub gold: String,
+    pub prediction: String,
+}
+
+/// `None` is "not a judge row at all": another tier, or a crossing nobody
+/// answered. A compile failure is decided already and is skipped, never
+/// re-opened.
+#[must_use]
+pub fn eligibility(row: &CodebaseRow) -> Option<Eligibility<'_>> {
+    if row.tier != TaskTier::FunctionBody || row.prediction.is_empty() {
+        return None;
+    }
+    if let Some(exec) = &row.exec
+        && exec.compile == ExecScore::Value(0.0)
+    {
+        return Some(Eligibility::Skipped("did not compile"));
+    }
+    let prediction = trimmed_to_gold(&row.gold, &row.prediction);
+    if row.gold.trim() == prediction.trim() {
+        return Some(Eligibility::Identical);
+    }
+    Some(Eligibility::Judge(Pair {
+        file: &row.file,
+        before: last_lines(&row.prefix, CONTEXT_BEFORE_LINES),
+        after: first_lines(&row.suffix, CONTEXT_AFTER_LINES),
+        gold: cap(&row.gold),
+        prediction: cap(&prediction),
+    }))
+}
+
+fn last_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+fn first_lines(text: &str, n: usize) -> String {
+    text.lines().take(n).collect::<Vec<_>>().join("\n")
+}
+
+fn cap(span: &str) -> String {
+    span.char_indices()
+        .nth(SPAN_MAX_CHARS)
+        .map_or_else(|| span.to_owned(), |(at, _)| span[..at].to_owned())
+}
+
+/// Gold-first, then prediction-first: the same bytes with A and B swapped.
+#[must_use]
+pub fn requests(pair: &Pair, max_tokens: u32) -> [HttpRequest; 2] {
+    let ask = |a: &str, b: &str| {
+        crate::core::bench::probes::anthropic_post(&serde_json::json!({
+            "model": "claude-sonnet-4",
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": render(pair, a, b)}],
+        }))
+    };
+    [
+        ask(&pair.gold, &pair.prediction),
+        ask(&pair.prediction, &pair.gold),
+    ]
+}
+
+fn render(pair: &Pair, a: &str, b: &str) -> String {
+    RUBRIC
+        .replace("{{file}}", pair.file)
+        .replace("{{before}}", &pair.before)
+        .replace("{{after}}", &pair.after)
+        .replace("{{a}}", a)
+        .replace("{{b}}", b)
+}
+
+/// One order's outcome: the parsed answer, or why there is none.
+pub enum Reply {
+    Answer(bool),
+    Skipped(String),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JudgeAnswer {
+    same_behavior: bool,
+}
+
+/// The schema is asked for on the wire AND checked on the way back.
+///
+/// A grammar can be silently inactive (llama.cpp #20345), and a cut-off
+/// reply is read from `stop_reason`, the one place the engine says so.
+#[must_use]
+pub fn parse_reply(anthropic_body: &str, max_tokens: u32) -> Reply {
+    let Ok(body) = serde_json::from_str::<Value>(anthropic_body) else {
+        return Reply::Skipped("reply was not the schema: <unreadable body>".to_owned());
+    };
+    if body["stop_reason"] == "max_tokens" {
+        return Reply::Skipped(format!("reply truncated at {max_tokens} tokens"));
+    }
+    let text = body["content"]
+        .as_array()
+        .and_then(|blocks| blocks.iter().find(|b| b["type"] == "text"))
+        .and_then(|b| b["text"].as_str())
+        .unwrap_or_default();
+    serde_json::from_str::<JudgeAnswer>(text).map_or_else(
+        |_| {
+            Reply::Skipped(format!(
+                "reply was not the schema: {}",
+                text.chars().take(80).collect::<String>()
+            ))
+        },
+        |answer| Reply::Answer(answer.same_behavior),
+    )
+}
+
+/// What the two orders settle to.
+pub struct Verdict {
+    pub equivalent: Option<bool>,
+    pub decided_by: DecidedBy,
+    pub skipped: Option<String>,
+}
+
+/// Agreement is the verdict; disagreement is an abstention; a skipped order
+/// skips the crossing with its reason (the first one, in order).
+#[must_use]
+pub fn combine(gold_first: &Reply, prediction_first: &Reply) -> Verdict {
+    match (gold_first, prediction_first) {
+        (Reply::Answer(a), Reply::Answer(b)) if a == b => Verdict {
+            equivalent: Some(*a),
+            decided_by: DecidedBy::SwapAgreement,
+            skipped: None,
+        },
+        (Reply::Answer(_), Reply::Answer(_)) => Verdict {
+            equivalent: None,
+            decided_by: DecidedBy::SwapDisagreement,
+            skipped: None,
+        },
+        (Reply::Skipped(reason), _) | (_, Reply::Skipped(reason)) => Verdict {
+            equivalent: None,
+            decided_by: DecidedBy::Skipped,
+            skipped: Some(reason.clone()),
+        },
+    }
+}
+
+/// `agreements / crossings both orders answered`, rounded; `None` when no
+/// crossing was answered twice — a rate over nothing is not 0 %.
+#[must_use]
+pub fn consistency_pct(rows: &[&JudgeRow]) -> Option<u32> {
+    let answered: Vec<&&JudgeRow> = rows
+        .iter()
+        .filter(|r| r.gold_first.is_some() && r.prediction_first.is_some())
+        .collect();
+    if answered.is_empty() {
+        return None;
+    }
+    let agreed = answered
+        .iter()
+        .filter(|r| r.gold_first == r.prediction_first)
+        .count();
+    Some(u32::try_from((agreed * 100 + answered.len() / 2) / answered.len()).unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Eligibility, Reply, combine, consistency_pct, eligibility, family_key, parse_reply, requests, rubric_hash};
+    use super::{
+        Eligibility, Reply, combine, consistency_pct, eligibility, family_key, parse_reply,
+        requests, rubric_hash,
+    };
     use crate::core::bench::codebase::TaskTier;
     use crate::core::bench::store::{CodebaseRow, DecidedBy, ExecRow, ExecScore, JudgeRow};
+    use std::fmt::Write as _;
+
+    fn numbered_lines(label: &str, n: usize) -> String {
+        (1..=n).fold(String::new(), |mut lines, i| {
+            let _ = writeln!(lines, "{label} {i}");
+            lines
+        })
+    }
 
     fn row(tier: TaskTier, gold: &str, prediction: &str) -> CodebaseRow {
         CodebaseRow {
@@ -12,8 +244,8 @@ mod tests {
             label: "<mask>".into(),
             gold: gold.into(),
             prediction: prediction.into(),
-            prefix: (1..=60).map(|i| format!("before {i}\n")).collect(),
-            suffix: (1..=30).map(|i| format!("after {i}\n")).collect(),
+            prefix: numbered_lines("before", 60),
+            suffix: numbered_lines("after", 30),
             excluded: crate::core::bench::codebase::Excluded::default(),
             symbols_score: Some(1.0),
             unsupported: false,
@@ -53,51 +285,111 @@ mod tests {
     #[test]
     fn only_answered_function_bodies_are_judged() {
         assert!(eligibility(&row(TaskTier::InFile, "a", "b")).is_none());
-        assert!(eligibility(&row(TaskTier::FunctionBody, "a", "")).is_none(), "nobody answered");
-        assert!(matches!(eligibility(&row(TaskTier::FunctionBody, "x = 1;", "x = 1;\nextra")), Some(Eligibility::Identical)), "identical after the tiers-1-4 trim");
+        assert!(
+            eligibility(&row(TaskTier::FunctionBody, "a", "")).is_none(),
+            "nobody answered"
+        );
+        assert!(
+            matches!(
+                eligibility(&row(TaskTier::FunctionBody, "x = 1;", "x = 1;\nextra")),
+                Some(Eligibility::Identical)
+            ),
+            "identical after the tiers-1-4 trim"
+        );
         let mut failed = row(TaskTier::FunctionBody, "x = 1;", "y = 2;");
-        failed.exec = Some(ExecRow { compile: ExecScore::Value(0.0), ..ExecRow::skipped("") });
-        assert!(matches!(eligibility(&failed), Some(Eligibility::Skipped("did not compile"))));
+        failed.exec = Some(ExecRow {
+            compile: ExecScore::Value(0.0),
+            ..ExecRow::skipped("")
+        });
+        assert!(matches!(
+            eligibility(&failed),
+            Some(Eligibility::Skipped("did not compile"))
+        ));
         let mut passed = row(TaskTier::FunctionBody, "x = 1;", "y = 2;");
-        passed.exec = Some(ExecRow { compile: ExecScore::Value(1.0), ..ExecRow::skipped("") });
+        passed.exec = Some(ExecRow {
+            compile: ExecScore::Value(1.0),
+            ..ExecRow::skipped("")
+        });
         assert!(matches!(eligibility(&passed), Some(Eligibility::Judge(_))));
-        assert!(matches!(eligibility(&row(TaskTier::FunctionBody, "x = 1;", "y = 2;")), Some(Eligibility::Judge(_))), "no exec means no compile verdict to defer to");
+        assert!(
+            matches!(
+                eligibility(&row(TaskTier::FunctionBody, "x = 1;", "y = 2;")),
+                Some(Eligibility::Judge(_))
+            ),
+            "no exec means no compile verdict to defer to"
+        );
     }
 
     #[test]
     fn the_two_requests_swap_a_and_b_and_bound_the_context() {
-        let Some(Eligibility::Judge(pair)) = eligibility(&row(TaskTier::FunctionBody, "GOLD;", "PRED;")) else {
+        let stored = row(TaskTier::FunctionBody, "GOLD;", "PRED;");
+        let Some(Eligibility::Judge(pair)) = eligibility(&stored) else {
             panic!("eligible");
         };
         let [first, second] = requests(&pair, 512);
         let text = |r: &crate::core::proxy::http::HttpRequest| {
             let v: serde_json::Value = serde_json::from_slice(&r.body).expect("json");
             assert_eq!(v["max_tokens"], 512);
-            assert_eq!(v["messages"].as_array().map(Vec::len), Some(1), "one user turn: Gemma has no system role");
-            v["messages"][0]["content"].as_str().expect("text").to_owned()
+            assert_eq!(
+                v["messages"].as_array().map(Vec::len),
+                Some(1),
+                "one user turn: Gemma has no system role"
+            );
+            v["messages"][0]["content"]
+                .as_str()
+                .expect("text")
+                .to_owned()
         };
         let (t1, t2) = (text(&first), text(&second));
-        assert!(t1.find("A:\n```rust\nGOLD;").is_some() && t1.find("B:\n```rust\nPRED;").is_some(), "{t1}");
-        assert!(t2.find("A:\n```rust\nPRED;").is_some() && t2.find("B:\n```rust\nGOLD;").is_some(), "{t2}");
-        assert!(t1.contains("before 21\n") && !t1.contains("before 20\n"), "last 40 prefix lines: {t1}");
-        assert!(t1.contains("after 20\n") && !t1.contains("after 21\n"), "first 20 suffix lines: {t1}");
+        assert!(
+            t1.contains("A:\n```rust\nGOLD;") && t1.contains("B:\n```rust\nPRED;"),
+            "{t1}"
+        );
+        assert!(
+            t2.contains("A:\n```rust\nPRED;") && t2.contains("B:\n```rust\nGOLD;"),
+            "{t2}"
+        );
+        assert!(
+            t1.contains("before 21\n") && !t1.contains("before 20\n"),
+            "last 40 prefix lines: {t1}"
+        );
+        assert!(
+            t1.contains("after 20\n") && !t1.contains("after 21\n"),
+            "first 20 suffix lines: {t1}"
+        );
         assert!(t1.contains("File: src/lib.rs"));
     }
 
     #[test]
     fn both_spans_are_cut_at_the_same_cap() {
         let long = "x".repeat(super::SPAN_MAX_CHARS + 50);
-        let Some(Eligibility::Judge(pair)) = eligibility(&row(TaskTier::FunctionBody, &long, "y")) else { panic!() };
+        let stored = row(TaskTier::FunctionBody, &long, "y");
+        let Some(Eligibility::Judge(pair)) = eligibility(&stored) else {
+            panic!()
+        };
         assert_eq!(pair.gold.len(), super::SPAN_MAX_CHARS);
     }
 
     #[test]
     fn a_reply_is_parsed_strictly_or_skipped_with_the_reason() {
-        assert!(matches!(parse_reply(&body("{\"same_behavior\":true}", "end_turn"), 512), Reply::Answer(true)));
-        assert!(matches!(parse_reply(&body("{\"same_behavior\": false}", "end_turn"), 512), Reply::Answer(false)));
-        for bad in ["yes", "```json\n{\"same_behavior\":true}\n```", "{\"same_behavior\":true,\"why\":\"x\"}", ""] {
+        assert!(matches!(
+            parse_reply(&body("{\"same_behavior\":true}", "end_turn"), 512),
+            Reply::Answer(true)
+        ));
+        assert!(matches!(
+            parse_reply(&body("{\"same_behavior\": false}", "end_turn"), 512),
+            Reply::Answer(false)
+        ));
+        for bad in [
+            "yes",
+            "```json\n{\"same_behavior\":true}\n```",
+            "{\"same_behavior\":true,\"why\":\"x\"}",
+            "",
+        ] {
             match parse_reply(&body(bad, "end_turn"), 512) {
-                Reply::Skipped(reason) => assert!(reason.starts_with("reply was not the schema: "), "{reason}"),
+                Reply::Skipped(reason) => {
+                    assert!(reason.starts_with("reply was not the schema: "), "{reason}");
+                }
                 Reply::Answer(_) => panic!("{bad:?} must not parse"),
             }
         }
@@ -110,16 +402,28 @@ mod tests {
             "stop_reason": "end_turn",
         })
         .to_string();
-        assert!(matches!(parse_reply(&with_thinking, 512), Reply::Answer(false)), "reasoning beside a valid answer is ignored");
+        assert!(
+            matches!(parse_reply(&with_thinking, 512), Reply::Answer(false)),
+            "reasoning beside a valid answer is ignored"
+        );
     }
 
     #[test]
     fn agreement_is_the_verdict_and_disagreement_an_abstention() {
         let v = combine(&Reply::Answer(true), &Reply::Answer(true));
-        assert_eq!((v.equivalent, v.decided_by, v.skipped), (Some(true), DecidedBy::SwapAgreement, None));
+        assert_eq!(
+            (v.equivalent, v.decided_by, v.skipped),
+            (Some(true), DecidedBy::SwapAgreement, None)
+        );
         let v = combine(&Reply::Answer(true), &Reply::Answer(false));
-        assert_eq!((v.equivalent, v.decided_by), (None, DecidedBy::SwapDisagreement));
-        let v = combine(&Reply::Answer(true), &Reply::Skipped("reply truncated at 512 tokens".into()));
+        assert_eq!(
+            (v.equivalent, v.decided_by),
+            (None, DecidedBy::SwapDisagreement)
+        );
+        let v = combine(
+            &Reply::Answer(true),
+            &Reply::Skipped("reply truncated at 512 tokens".into()),
+        );
         assert_eq!((v.equivalent, v.decided_by), (None, DecidedBy::Skipped));
         assert_eq!(v.skipped.as_deref(), Some("reply truncated at 512 tokens"));
     }
@@ -140,11 +444,24 @@ mod tests {
 
     #[test]
     fn consistency_counts_only_crossings_both_orders_answered() {
-        let rows = [judged(Some(true), Some(true)), judged(Some(false), Some(true)), judged(Some(false), None), judged(Some(false), Some(false))];
+        let rows = [
+            judged(Some(true), Some(true)),
+            judged(Some(false), Some(true)),
+            judged(Some(false), None),
+            judged(Some(false), Some(false)),
+        ];
         let refs: Vec<&JudgeRow> = rows.iter().collect();
-        assert_eq!(consistency_pct(&refs), Some(67), "2 agreements of 3 answered pairs");
+        assert_eq!(
+            consistency_pct(&refs),
+            Some(67),
+            "2 agreements of 3 answered pairs"
+        );
         assert_eq!(consistency_pct(&[]), None);
         let one = [judged(None, None)];
-        assert_eq!(consistency_pct(&[&one[0]]), None, "nothing answered twice: no rate, not 0%");
+        assert_eq!(
+            consistency_pct(&[&one[0]]),
+            None,
+            "nothing answered twice: no rate, not 0%"
+        );
     }
 }

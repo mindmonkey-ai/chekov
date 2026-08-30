@@ -48,7 +48,7 @@ impl TaskTier {
 /// `cfg_test_lines` is what the `#[cfg(test)]` cutter took out of this task's
 /// file before anything else read it. Rows written before the cutter existed
 /// load as 0, which is what they were.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Excluded {
     pub doc_comment: u8,
     pub cross_file: String,
