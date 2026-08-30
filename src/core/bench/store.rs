@@ -765,7 +765,11 @@ pub fn render_codebase(log: &RunLog) -> String {
     if kept.is_empty() {
         return codebase_na_line(&rows);
     }
-    let mut out = codebase_header(&kept, excluded);
+    let mut out = codebase_header(&Header {
+        kept: &kept,
+        excluded,
+        stamp: &log.head.stamp,
+    });
     out.push_str(&scores_line(
         "in_file",
         &group(&kept, TaskTier::InFile, None),
@@ -775,11 +779,19 @@ pub fn render_codebase(log: &RunLog) -> String {
         &group(&kept, TaskTier::FunctionBody, None),
     ));
     out.push_str(&cross_lines(&rows, &kept));
-    out.push_str("             tiers 6-7 skipped: slice B2 (--allow-exec)\n");
+    out.push_str(&exec_trailer(&kept, &log.head.stamp));
     out
 }
 
-fn codebase_header(kept: &[&TaskRow], excluded: usize) -> String {
+/// What the header line reads (§4 — three parameters).
+struct Header<'a> {
+    kept: &'a [&'a TaskRow],
+    excluded: usize,
+    stamp: &'a crate::core::bench::stamp::Stamp,
+}
+
+fn codebase_header(header: &Header) -> String {
+    let kept = header.kept;
     let counts = crate::core::bench::codebase::Counts {
         in_file: tier_tasks(kept, TaskTier::InFile),
         function_body: tier_tasks(kept, TaskTier::FunctionBody),
@@ -788,15 +800,25 @@ fn codebase_header(kept: &[&TaskRow], excluded: usize) -> String {
     format!(
         "codebase     {} tasks, {} crossings, from {} files ({}) — {}; context: same-file, \
          plus the defining file for cross_file_first (engine window ≤ n_batch; extra from \
-         ctx); tiers 1-4 score the first gold_lines lines of each fill{}{}\n",
+         ctx); tiers 1-4 score the first gold_lines lines of each fill{}{}{}\n",
         distinct_tasks(kept),
         kept.len(),
         distinct_files(kept),
         crate::core::bench::codebase::tier_counts_clause(counts),
         crate::core::bench::codebase::MASK_LABEL,
         elided_note(kept),
-        excluded_note(excluded),
+        exec_clause(header.stamp),
+        excluded_note(header.excluded),
     )
+}
+
+/// `; exec: cargo 1.95.0 (…), offline, scratch target` — what the exec tiers
+/// ran under, once per run, and nothing at all when they did not run.
+fn exec_clause(stamp: &crate::core::bench::stamp::Stamp) -> String {
+    match (stamp.allow_exec, stamp.cargo_version.as_deref()) {
+        (true, Some(version)) => format!("; exec: {version}, offline, scratch target"),
+        _ => String::new(),
+    }
 }
 
 /// The cross-file tier's two arm lines and the lift — or one line saying
@@ -903,6 +925,7 @@ fn scores_line(label: &str, group: &[&CodebaseRow]) -> String {
         }
     }
     cells.push(symbols_cell(group));
+    cells.extend(exec_cells(group));
     format!(
         "             {label:<24}{}   (n={})\n",
         cells.join("   "),
@@ -929,6 +952,7 @@ fn lift_line(kept: &[&TaskRow]) -> String {
     if let Some(delta) = symbols_delta(&pairs) {
         cells.push(format!("symbols {delta:+.2}"));
     }
+    cells.extend(exec_delta_cells(&pairs));
     format!(
         "             {:<24}{}   ({})\n",
         "context lift",
@@ -1027,6 +1051,179 @@ fn symbols_cell(group: &[&CodebaseRow]) -> String {
     }
     let mean = scored.iter().sum::<f64>() / as_f64(scored.len());
     format!("symbols {mean:.2} (scored at run time)")
+}
+
+/// `compile 0.83 (n=12)` and `test 1.00 (n=3 of 12 had a covering test)`, or
+/// nothing at all when this run never ran the exec tiers.
+///
+/// `compile`'s `n` counts crossings with a VERDICT: a skip is excluded from
+/// the mean and counted in the trailer by reason, because averaging a skip in
+/// as a zero would score the model down for a question the machine could not
+/// ask. `test`'s parenthetical always says how many crossings had a covering
+/// test at all — the number that makes the mean readable.
+fn exec_cells(group: &[&CodebaseRow]) -> Vec<String> {
+    let execs: Vec<&ExecRow> = group.iter().filter_map(|c| c.exec.as_ref()).collect();
+    if execs.is_empty() {
+        return Vec::new();
+    }
+    let covered = execs.iter().filter(|e| !e.tests.is_empty()).count();
+    let total = execs.len();
+    let compile = match exec_mean(execs.iter().map(|e| &e.compile)) {
+        Some((mean, n)) => format!("compile {mean:.2} (n={n})"),
+        None => "compile n/a".to_owned(),
+    };
+    let test = match exec_mean(execs.iter().map(|e| &e.test)) {
+        Some((mean, n)) => format!("test {mean:.2} (n={n} of {total} had a covering test)"),
+        None => format!("test n/a ({covered} of {total} had a covering test)"),
+    };
+    vec![compile, test]
+}
+
+/// The mean of the scored values and how many there were — `None` when every
+/// one of them was skipped.
+fn exec_mean<'a>(scores: impl Iterator<Item = &'a ExecScore>) -> Option<(f64, usize)> {
+    let values: Vec<f64> = scores
+        .filter_map(|s| match s {
+            ExecScore::Value(v) => Some(*v),
+            ExecScore::Skipped(_) => None,
+        })
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    Some((
+        values.iter().sum::<f64>() / as_f64(values.len()),
+        values.len(),
+    ))
+}
+
+/// The exec tiers' lift: `compile +0.33` and `test n/a`.
+///
+/// A pair contributes only when BOTH arms produced a verdict for that tier —
+/// a difference against a skip is not a measurement, and would read as a lift
+/// of exactly the arm that ran. Nothing at all when neither arm ever ran the
+/// exec tiers.
+fn exec_delta_cells(pairs: &[(&CodebaseRow, &CodebaseRow)]) -> Vec<String> {
+    if !pairs
+        .iter()
+        .any(|(a, b)| a.exec.is_some() || b.exec.is_some())
+    {
+        return Vec::new();
+    }
+    [
+        ("compile", exec_delta(pairs, |e| &e.compile)),
+        ("test", exec_delta(pairs, |e| &e.test)),
+    ]
+    .into_iter()
+    .map(|(label, delta)| {
+        delta.map_or_else(
+            || format!("{label} n/a"),
+            |value| format!("{label} {value:+.2}"),
+        )
+    })
+    .collect()
+}
+
+fn exec_delta(
+    pairs: &[(&CodebaseRow, &CodebaseRow)],
+    pick: fn(&ExecRow) -> &ExecScore,
+) -> Option<f64> {
+    let deltas: Vec<f64> = pairs
+        .iter()
+        .filter_map(
+            |(a, b)| match (pick(a.exec.as_ref()?), pick(b.exec.as_ref()?)) {
+                (ExecScore::Value(x), ExecScore::Value(y)) => Some(y - x),
+                _ => None,
+            },
+        )
+        .collect();
+    if deltas.is_empty() {
+        return None;
+    }
+    Some(deltas.iter().sum::<f64>() / as_f64(deltas.len()))
+}
+
+/// The block's last line: what the exec tiers cost, or why there are none.
+///
+/// Three shapes, and the rows decide which: no exec half anywhere is a run
+/// that was never given the flag; every crossing skipped for one reason is
+/// that reason, said once; anything else is the timing plus the skips
+/// counted by reason.
+fn exec_trailer(rows: &[&TaskRow], stamp: &crate::core::bench::stamp::Stamp) -> String {
+    let execs: Vec<&ExecRow> = rows
+        .iter()
+        .filter_map(|r| r.codebase.as_ref()?.exec.as_ref())
+        .collect();
+    if execs.is_empty() || !stamp.allow_exec {
+        return "             tiers 6-7 skipped: --allow-exec not given\n".to_owned();
+    }
+    let checks: Vec<f64> = execs
+        .iter()
+        .filter(|e| matches!(e.compile, ExecScore::Value(_)))
+        .map(|e| e.check_secs)
+        .collect();
+    let skips = skip_tally(&execs);
+    if checks.is_empty() {
+        return format!(
+            "             tiers 6-7 skipped: {}\n",
+            one_reason(&skips).unwrap_or_else(|| "no crossing produced a verdict".to_owned())
+        );
+    }
+    format!(
+        "             tiers 6-7: cold check {:.0} s, then {:.0} s median per crossing{}\n",
+        checks[0],
+        median(&checks[1..]).unwrap_or(checks[0]),
+        skip_note(&skips),
+    )
+}
+
+/// Every skip reason with its count, most frequent first and ties by reason —
+/// a stable order, so the line is testable.
+fn skip_tally(execs: &[&ExecRow]) -> Vec<(String, usize)> {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for exec in execs {
+        if let ExecScore::Skipped(reason) = &exec.compile {
+            *counts.entry(reason.as_str()).or_default() += 1;
+        }
+    }
+    let mut tally: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(reason, n)| (reason.to_owned(), n))
+        .collect();
+    tally.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    tally
+}
+
+/// The one reason every crossing was skipped for, when there is only one.
+fn one_reason(skips: &[(String, usize)]) -> Option<String> {
+    match skips {
+        [(reason, _)] => Some(reason.clone()),
+        _ => None,
+    }
+}
+
+/// `; 3 skipped (2 check timed out after 120 s, 1 needs network)`, or nothing
+/// when nothing was skipped.
+fn skip_note(skips: &[(String, usize)]) -> String {
+    let total: usize = skips.iter().map(|(_, n)| n).sum();
+    if total == 0 {
+        return String::new();
+    }
+    let parts: Vec<String> = skips
+        .iter()
+        .map(|(reason, n)| format!("{n} {reason}"))
+        .collect();
+    format!("; {total} skipped ({})", parts.join(", "))
+}
+
+/// The middle value of a sorted copy — the upper of the two on an even count.
+fn median(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    Some(sorted[sorted.len() / 2])
 }
 
 /// The mean of the values that tier recomputes for this group — `None` when
@@ -1827,7 +2024,7 @@ mod tests {
             "             cross_file_first+extra  exact 1.00",
             "             context lift            exact +1.00",
             "(1 files sent, 2.0 KiB, 0 truncated; 2 withheld)",
-            "             tiers 6-7 skipped: slice B2 (--allow-exec)",
+            "             tiers 6-7 skipped: --allow-exec not given",
         ] {
             assert!(rendered.contains(line), "{line}\n---\n{rendered}");
         }
@@ -1954,7 +2151,7 @@ mod tests {
             "in_file                 exact 0.50   edit_sim",
             "symbols 1.00 (scored at run time)   (n=2)",
             "function_body           ident_f1",
-            "tiers 6-7 skipped: slice B2 (--allow-exec)",
+            "tiers 6-7 skipped: --allow-exec not given",
         ];
         for line in expected {
             assert!(rendered.contains(line), "{rendered}");
@@ -2242,5 +2439,204 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("fixture FAIL greeting"), "{rendered}");
+    }
+    /// A codebase task whose exec half is what the caller says.
+    fn exec_task(id: &str, compile: super::ExecScore, tests: &[&str]) -> Task {
+        let mut task = codebase_task(CodebaseFixture {
+            id,
+            tier: TaskTier::InFile,
+            gold: "let a = 1;",
+            prediction: "let a = 1;",
+        });
+        task.task_id = id.into();
+        let passed = compile == super::ExecScore::Value(1.0);
+        if let Some(row) = task.codebase.as_mut() {
+            row.exec = Some(super::ExecRow {
+                compile,
+                compile_error: None,
+                tests: tests.iter().map(|t| (*t).to_owned()).collect(),
+                test: if !passed {
+                    super::ExecScore::Skipped("did not compile".into())
+                } else if tests.is_empty() {
+                    super::ExecScore::Skipped("no covering test".into())
+                } else {
+                    super::ExecScore::Value(1.0)
+                },
+                test_failure: None,
+                check_secs: 6.0,
+                test_secs: 0.0,
+            });
+        }
+        task
+    }
+
+    /// A head whose stamp says the run was allowed to build.
+    fn exec_head() -> RunHead {
+        let mut head = head();
+        head.stamp.allow_exec = true;
+        head.stamp.cargo_version = Some("cargo 1.95.0 (deadbeef 2026-01-01)".into());
+        head.stamp.exec_target = "scratch".into();
+        head
+    }
+
+    #[test]
+    fn a_tier_line_carries_the_two_exec_cells_after_symbols() {
+        let eval = scratch("codebase-exec-cells");
+        let mut writer = RunWriter::create(&eval, "r30-model", &exec_head()).expect("create");
+        writer
+            .append(exec_task(
+                "in_file-abc123-L7",
+                super::ExecScore::Value(1.0),
+                &["covers_alpha"],
+            ))
+            .expect("append");
+        writer
+            .append(exec_task(
+                "in_file-abc123-L9",
+                super::ExecScore::Value(0.0),
+                &[],
+            ))
+            .expect("append");
+        let block = super::render_codebase(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            block.contains("compile 0.50 (n=2)   test 1.00 (n=1 of 2 had a covering test)"),
+            "{block}"
+        );
+    }
+
+    /// Every crossing skipped: the cell says `n/a`, never `0.00`.
+    #[test]
+    fn a_tier_line_with_no_verdict_says_n_a_and_never_zero() {
+        let eval = scratch("codebase-exec-na");
+        let mut writer = RunWriter::create(&eval, "r31-model", &exec_head()).expect("create");
+        writer
+            .append(exec_task(
+                "in_file-abc123-L7",
+                super::ExecScore::Skipped("needs network: no matching package".into()),
+                &[],
+            ))
+            .expect("append");
+        let block = super::render_codebase(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            block.contains("compile n/a   test n/a (0 of 1 had a covering test)"),
+            "{block}"
+        );
+        assert!(
+            !block.contains("compile 0.00"),
+            "a skip is not a zero: {block}"
+        );
+    }
+
+    /// One crossing's recorded check time, reached through the two optional
+    /// halves the fixture always fills.
+    fn set_check_secs(task: &mut Task, secs: f64) {
+        if let Some(exec) = task.codebase.as_mut().and_then(|row| row.exec.as_mut()) {
+            exec.check_secs = secs;
+        }
+    }
+
+    #[test]
+    fn the_header_names_the_toolchain_and_the_trailer_the_timing_and_the_skips() {
+        let eval = scratch("codebase-exec-trailer");
+        let mut writer = RunWriter::create(&eval, "r32-model", &exec_head()).expect("create");
+        let mut cold = exec_task("in_file-abc123-L7", super::ExecScore::Value(1.0), &["t"]);
+        set_check_secs(&mut cold, 84.0);
+        writer.append(cold).expect("append");
+        for (i, secs) in [6.0_f64, 6.0, 7.0].into_iter().enumerate() {
+            let mut task = exec_task(
+                &format!("in_file-abc123-L{}", 10 + i),
+                super::ExecScore::Value(1.0),
+                &["t"],
+            );
+            set_check_secs(&mut task, secs);
+            writer.append(task).expect("append");
+        }
+        writer
+            .append(exec_task(
+                "in_file-abc123-L20",
+                super::ExecScore::Skipped("check timed out after 120 s".into()),
+                &[],
+            ))
+            .expect("append");
+        let block = super::render_codebase(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            block.contains("; exec: cargo 1.95.0 (deadbeef 2026-01-01), offline, scratch target"),
+            "{block}"
+        );
+        assert!(
+            block.contains(
+                "             tiers 6-7: cold check 84 s, then 6 s median per crossing; \
+                 1 skipped (1 check timed out after 120 s)\n"
+            ),
+            "{block}"
+        );
+    }
+
+    /// The two runs that never built anything each say so in their own words.
+    #[test]
+    fn a_run_without_the_flag_and_a_run_without_a_toolchain_say_different_things() {
+        let eval = scratch("codebase-exec-off");
+        let mut writer = RunWriter::create(&eval, "r33-model", &head()).expect("create");
+        writer
+            .append(codebase_task(CodebaseFixture {
+                id: "in_file-abc123-L7",
+                tier: TaskTier::InFile,
+                gold: "let a = 1;",
+                prediction: "let a = 1;",
+            }))
+            .expect("append");
+        let block = super::render_codebase(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            block.contains("             tiers 6-7 skipped: --allow-exec not given\n"),
+            "{block}"
+        );
+        assert!(
+            !block.contains("compile"),
+            "no cells without the flag: {block}"
+        );
+
+        let eval = scratch("codebase-exec-no-toolchain");
+        let mut writer = RunWriter::create(&eval, "r34-model", &exec_head()).expect("create");
+        writer
+            .append(exec_task(
+                "in_file-abc123-L7",
+                super::ExecScore::Skipped("no Rust toolchain: cargo is not runnable".into()),
+                &[],
+            ))
+            .expect("append");
+        let block = super::render_codebase(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            block.contains(
+                "             tiers 6-7 skipped: no Rust toolchain: cargo is not runnable\n"
+            ),
+            "{block}"
+        );
+    }
+
+    /// The lift's exec columns come from the pairs measured in BOTH arms.
+    #[test]
+    fn the_context_lift_reports_the_exec_tiers_too() {
+        let eval = scratch("codebase-exec-lift");
+        let mut writer = RunWriter::create(&eval, "r35-model", &exec_head()).expect("create");
+        for (id, arm, compile) in [
+            ("cross_file_first-abc123-L2", "no_extra", 0.0),
+            ("cross_file_first-abc123-L2+extra", "extra", 1.0),
+        ] {
+            let mut task = cross_arm(id, arm, "let a = build(1);");
+            if let Some(row) = task.codebase.as_mut() {
+                row.exec = Some(super::ExecRow {
+                    compile: super::ExecScore::Value(compile),
+                    compile_error: None,
+                    tests: Vec::new(),
+                    test: super::ExecScore::Skipped("no covering test".into()),
+                    test_failure: None,
+                    check_secs: 6.0,
+                    test_secs: 0.0,
+                });
+            }
+            writer.append(task).expect("append");
+        }
+        let block = super::render_codebase(&RunLog::load(writer.dir()).expect("load"));
+        assert!(block.contains("compile +1.00  test n/a"), "{block}");
     }
 }
