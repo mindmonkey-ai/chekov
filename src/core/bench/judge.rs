@@ -49,6 +49,59 @@ pub fn family_key(arch: &str) -> &str {
     arch.strip_suffix("moe").unwrap_or(arch)
 }
 
+/// The refusal when the judge shares a family with any candidate — or IS one.
+#[must_use]
+pub fn family_conflict(
+    judge: (&str, &str),
+    candidates: &[(String, String)],
+) -> Option<crate::error::ChekovError> {
+    let (judge_name, judge_arch) = judge;
+    candidates
+        .iter()
+        .find(|(name, arch)| name == judge_name || family_key(arch) == family_key(judge_arch))
+        .map(|(name, _)| crate::error::ChekovError::JudgeFamilyConflict {
+            judge: judge_name.to_owned(),
+            candidate: name.clone(),
+            family: family_key(judge_arch).to_owned(),
+        })
+}
+
+/// Everything the judge phase needs, resolved before any launch (spec C §3).
+pub struct JudgePlan {
+    pub judge: crate::core::registry::Effective,
+    pub arch: String,
+    pub rubric_hash: String,
+    pub max_tokens: u32,
+    pub min_consistency_pct: u32,
+    pub reasoning_effort: crate::core::config::ReasoningEffort,
+}
+
+impl JudgePlan {
+    #[must_use]
+    pub fn stamp(&self) -> crate::core::bench::stamp::JudgeStamp {
+        let entry = &self.judge.entry;
+        crate::core::bench::stamp::JudgeStamp {
+            model: self.judge.name.clone(),
+            quant: entry.quant.clone(),
+            revision: entry.revision[..12.min(entry.revision.len())].to_owned(),
+            arch: self.arch.clone(),
+            rubric_hash: self.rubric_hash.clone(),
+            max_tokens: self.max_tokens,
+            reasoning_effort: self.reasoning_effort.as_str().to_owned(),
+            min_consistency_pct: self.min_consistency_pct,
+        }
+    }
+
+    /// The forced wire's inputs for a judge request.
+    #[must_use]
+    pub const fn forced<'a>(&self, schema: &'a Value) -> crate::core::bench::runner::Forced<'a> {
+        crate::core::bench::runner::Forced {
+            schema,
+            reasoning_effort: Some(self.reasoning_effort.as_str()),
+        }
+    }
+}
+
 /// Whether a stored row gets a judge row, and which kind.
 pub enum Eligibility<'a> {
     Identical,

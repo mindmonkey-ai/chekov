@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::bench::codebase::ladder::{self, Score, Tier, as_f64};
 use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
-use crate::core::bench::stamp::{Stamp, mismatch_error};
+use crate::core::bench::stamp::{JudgeStamp, Stamp, mismatch_error};
 use crate::core::bench::sweep::curve_note;
 use crate::core::stats;
 use crate::error::ChekovError;
@@ -414,6 +414,22 @@ impl RunLog {
             r.suite == key.suite && r.task_id == key.task_id && r.transport == key.transport
         })
     }
+}
+
+/// A run recorded before it had a judge takes the judge on resume.
+///
+/// The head is rewritten with the field added and nothing else changed. A run
+/// that already names a different judge is left alone — `resume` refuses it.
+pub fn adopt_judge(run_dir: &Path, judge: Option<&JudgeStamp>) -> Result<(), ChekovError> {
+    let mut log = RunLog::load(run_dir)?;
+    if log.head.stamp.judge.is_some() || judge.is_none() {
+        return Ok(());
+    }
+    log.head.stamp.judge = judge.cloned();
+    let stamp_path = run_dir.join("stamp.json");
+    let json = serde_json::to_string_pretty(&log.head).map_err(|e| invalid(&stamp_path, e))?;
+    std::fs::write(&stamp_path, json)
+        .map_err(|e| ChekovError::io(format!("writing {}", stamp_path.display()), e))
 }
 
 /// What identifies one recorded crossing: the case and the door it took.
