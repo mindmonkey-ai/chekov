@@ -1503,6 +1503,7 @@ fn infill_or_latch(
         prefix: &task.prefix,
         suffix: &task.suffix,
         gold_lines: task.gold.lines().count().max(1),
+        extra: None,
     };
     match cross_infill(wire, &infill_task) {
         Ok(InfillOutcome::Answered(artifact)) => Ok(artifact),
