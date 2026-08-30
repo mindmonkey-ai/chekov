@@ -659,6 +659,14 @@ pub(crate) fn judge_rows(log: &RunLog) -> Vec<&TaskRow> {
         .collect()
 }
 
+/// The verdicts themselves — what the `equiv` cell, the judge clause and the
+/// judge trailer all read, without each of them unwrapping the task row.
+fn verdicts(log: &RunLog) -> Vec<&JudgeRow> {
+    rows_of(log, JUDGE_SUITE)
+        .filter_map(|r| r.judge.as_ref())
+        .collect()
+}
+
 fn rows_via<'a>(
     log: &'a RunLog,
     suite: &'a str,
@@ -1260,10 +1268,7 @@ fn exec_trailer(rows: &[&TaskRow], stamp: &crate::core::bench::stamp::Stamp) -> 
 /// when the run has no judge rows at all.
 fn judge_cell(kept: &[&TaskRow], log: &RunLog) -> Option<String> {
     let stamp = log.head.stamp.judge.as_ref()?;
-    let rows: Vec<&JudgeRow> = judge_rows(log)
-        .iter()
-        .filter_map(|r| r.judge.as_ref())
-        .collect();
+    let rows = verdicts(log);
     if rows.is_empty() {
         return None;
     }
@@ -1299,10 +1304,7 @@ fn judge_clause(log: &RunLog) -> String {
     let Some(j) = log.head.stamp.judge.as_ref() else {
         return String::new();
     };
-    let rows: Vec<&JudgeRow> = judge_rows(log)
-        .iter()
-        .filter_map(|r| r.judge.as_ref())
-        .collect();
+    let rows = verdicts(log);
     let answered = rows
         .iter()
         .filter(|r| r.gold_first.is_some() && r.prediction_first.is_some())
@@ -1327,19 +1329,16 @@ fn judge_trailer(kept: &[&TaskRow], log: &RunLog) -> String {
     let Some(stamp) = log.head.stamp.judge.as_ref() else {
         return "             judge skipped: --judge not given\n".to_owned();
     };
-    let rows: Vec<&JudgeRow> = judge_rows(log)
-        .iter()
-        .filter_map(|r| r.judge.as_ref())
-        .collect();
+    let rows = verdicts(log);
     let total = tier_tasks(kept, TaskTier::FunctionBody);
     if rows.is_empty() {
         return unjudged_trailer(total, &stamp.model);
     }
     let count = |d: DecidedBy| rows.iter().filter(|r| r.decided_by == d).count();
-    let called = rows.iter().filter(|r| r.gold_first.is_some()).count();
+    let called = rows.iter().filter(|r| was_called(r)).count();
     let secs: Vec<f64> = rows
         .iter()
-        .filter(|r| r.gold_first.is_some())
+        .filter(|r| was_called(r))
         .map(|r| r.judge_secs)
         .collect();
     let mut out = format!(
@@ -1354,6 +1353,16 @@ fn judge_trailer(kept: &[&TaskRow], log: &RunLog) -> String {
         out.push_str(&warning);
     }
     out
+}
+
+/// Whether the judge was actually asked about this crossing.
+///
+/// Not "did it answer": an off-schema or truncated reply is a request that was
+/// sent and paid for, and it belongs in both the count and the median. The two
+/// pre-call settlements — an identical pair, and a `did not compile` skip —
+/// never reach the wire, and record `0.0` seconds because nothing was spent.
+fn was_called(row: &JudgeRow) -> bool {
+    row.decided_by != DecidedBy::Identical && row.judge_secs > 0.0
 }
 
 /// A run under a judge that holds no verdict.
@@ -2926,7 +2935,13 @@ mod tests {
         prediction_first: Option<bool>,
         decided_by: DecidedBy,
         skipped: Option<&'a str>,
+        /// What the pair cost. `0.0` is what production records for a crossing
+        /// settled before any request went out.
+        judge_secs: f64,
     }
+
+    /// The pair time a crossing that reached the wire records.
+    const ASKED_SECS: f64 = 2.1;
 
     fn judge_verdict(fixture: JudgeFixture) -> Task {
         judge_task(
@@ -2937,7 +2952,7 @@ mod tests {
                 prediction_first: fixture.prediction_first,
                 decided_by: fixture.decided_by,
                 skipped: fixture.skipped.map(str::to_owned),
-                judge_secs: 2.1,
+                judge_secs: fixture.judge_secs,
             },
         )
     }
@@ -2953,6 +2968,7 @@ mod tests {
                 prediction_first: None,
                 decided_by: DecidedBy::Identical,
                 skipped: None,
+                judge_secs: 0.0,
             },
             JudgeFixture {
                 id: "fb-2",
@@ -2961,6 +2977,7 @@ mod tests {
                 prediction_first: Some(true),
                 decided_by: DecidedBy::SwapAgreement,
                 skipped: None,
+                judge_secs: ASKED_SECS,
             },
             JudgeFixture {
                 id: "fb-3",
@@ -2969,6 +2986,7 @@ mod tests {
                 prediction_first: Some(false),
                 decided_by: DecidedBy::SwapAgreement,
                 skipped: None,
+                judge_secs: ASKED_SECS,
             },
             JudgeFixture {
                 id: "fb-4",
@@ -2977,6 +2995,7 @@ mod tests {
                 prediction_first: Some(false),
                 decided_by: DecidedBy::SwapAgreement,
                 skipped: None,
+                judge_secs: ASKED_SECS,
             },
         ]
     }
@@ -2991,6 +3010,7 @@ mod tests {
                 prediction_first: Some(false),
                 decided_by: DecidedBy::SwapDisagreement,
                 skipped: None,
+                judge_secs: ASKED_SECS,
             },
             JudgeFixture {
                 id: "fb-6",
@@ -2999,6 +3019,7 @@ mod tests {
                 prediction_first: None,
                 decided_by: DecidedBy::Skipped,
                 skipped: Some("reply was not the schema: yes"),
+                judge_secs: ASKED_SECS,
             },
         ]
     }
@@ -3009,8 +3030,9 @@ mod tests {
             .chain(disagreement_and_skip())
     }
 
-    /// Three `function_body` crossings, all skipped for the same off-schema
-    /// reason — no order of either crossing was ever answered.
+    /// Three `function_body` crossings, all skipped for the same truncation —
+    /// no order of any of them parsed, yet every one of them was asked, and
+    /// paid for.
     fn all_skipped_verdicts() -> [JudgeFixture<'static>; 3] {
         ["fb-1", "fb-2", "fb-3"].map(|id| JudgeFixture {
             id,
@@ -3019,6 +3041,7 @@ mod tests {
             prediction_first: None,
             decided_by: DecidedBy::Skipped,
             skipped: Some("reply truncated at 512 tokens"),
+            judge_secs: ASKED_SECS,
         })
     }
 
@@ -3205,7 +3228,7 @@ mod tests {
             out.contains("equiv 0.50 (n=4 judged of 6; 1 undecided)"),
             "identical counts as true, 2 true of 4: {out}"
         );
-        assert!(out.contains("             judge: 1 identical, 4 called, 1 undecided, 1 skipped; 2.1 s median per verdict\n"), "{out}");
+        assert!(out.contains("             judge: 1 identical, 5 called, 1 undecided, 1 skipped; 2.1 s median per verdict\n"), "the off-schema crossing was asked like any other: {out}");
         assert!(out.contains("             warning: 1 reply was not the schema — the grammar was not enforced for this judge and the column is measuring the prompt alone\n"), "{out}");
         let in_file_line = out
             .lines()
@@ -3262,7 +3285,8 @@ mod tests {
 
     /// A judge that never got an answered order still names a rate — `n/a`,
     /// not a zero it never measured, and no `(k of n)` for a denominator
-    /// of zero.
+    /// of zero. The calls it made are counted all the same: three crossings
+    /// were asked and three replies came back truncated.
     #[test]
     fn an_all_skipped_judge_run_renders_n_a_not_a_number() {
         let out = render_codebase(&all_skipped_judged_run());
@@ -3273,10 +3297,37 @@ mod tests {
         assert!(out.contains("swap consistency n/a\n"), "{out}");
         assert!(
             out.contains(
-                "             judge: 0 identical, 0 called, 0 undecided, 3 skipped; 0.0 s \
+                "             judge: 0 identical, 3 called, 0 undecided, 3 skipped; 2.1 s \
                  median per verdict\n"
             ),
-            "{out}"
+            "a reply nobody could parse still cost a request: {out}"
         );
+    }
+
+    /// The call count is "was a request sent", not "did an answer come back".
+    #[test]
+    fn a_crossing_settled_before_the_wire_is_the_only_uncalled_one() {
+        let row = |decided_by, judge_secs| JudgeRow {
+            equivalent: None,
+            gold_first: None,
+            prediction_first: None,
+            decided_by,
+            skipped: None,
+            judge_secs,
+        };
+        assert!(
+            !super::was_called(&row(DecidedBy::Identical, 0.0)),
+            "an identical pair is never asked"
+        );
+        assert!(
+            !super::was_called(&row(DecidedBy::Skipped, 0.0)),
+            "a `did not compile` skip is decided before the wire"
+        );
+        assert!(
+            super::was_called(&row(DecidedBy::Skipped, 2.1)),
+            "an off-schema reply is a request that was sent"
+        );
+        assert!(super::was_called(&row(DecidedBy::SwapAgreement, 2.1)));
+        assert!(super::was_called(&row(DecidedBy::SwapDisagreement, 2.1)));
     }
 }
