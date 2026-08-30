@@ -458,15 +458,31 @@ fn collect_declarations(line: &str, set: &mut BTreeSet<String>) {
 /// so indexing them would make every `name:` in the repository look like a
 /// definition to cross a file for.
 pub(super) fn declaration_names(line: &str, set: &mut BTreeSet<String>) {
+    names_after(line, &DECLARATION_KEYWORDS, set);
+}
+
+/// The `struct`/`enum` names on this line — the subset of
+/// `declaration_names` that a `{` can open a literal for.
+///
+/// The cross-file index keeps this apart so a `{` after a name in a type
+/// position (`-> Widget {`, `impl Widget {`) is told from a struct literal.
+pub(super) fn type_declaration_names(line: &str, set: &mut BTreeSet<String>) {
+    names_after(line, &["struct", "enum"], set);
+}
+
+const DECLARATION_KEYWORDS: [&str; 8] = [
+    "fn", "struct", "enum", "trait", "type", "const", "static", "mod",
+];
+
+/// The word following any of `keywords` on this line.
+fn names_after(line: &str, keywords: &[&str], set: &mut BTreeSet<String>) {
     let words: Vec<&str> = line
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())
         .collect();
     for (i, w) in words.iter().enumerate() {
-        if matches!(
-            *w,
-            "fn" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "mod"
-        ) && let Some(name) = words.get(i + 1)
+        if keywords.contains(w)
+            && let Some(name) = words.get(i + 1)
         {
             set.insert((*name).to_owned());
         }
@@ -505,7 +521,7 @@ fn collect_members(trimmed: &str, set: &mut BTreeSet<String>) {
 /// keyword, so a field name split off `pub balance: i64,` isn't rejected
 /// for containing a space. Guards against `public_key` false-matching
 /// `pub` by requiring the keyword be followed by whitespace or `(`.
-fn strip_visibility(s: &str) -> &str {
+pub(super) fn strip_visibility(s: &str) -> &str {
     let s = s.trim_start();
     let Some(after_pub) = s.strip_prefix("pub") else {
         return s;
