@@ -112,6 +112,16 @@ impl Worktree {
         Ok(())
     }
 
+    /// Commit a fixture repository from an integration test.
+    ///
+    /// `git` itself stays `pub(super)` — the module's error contract is not
+    /// something a caller outside it should be able to spell — and this is the
+    /// one shape a test needs.
+    #[doc(hidden)]
+    pub fn run_git_for_test(repo: &Path, args: &[&str]) -> Result<(), ChekovError> {
+        git(repo, args, "test fixture").map(|_| ())
+    }
+
     /// A `Worktree` over a plain directory, for tests that need the PATH and
     /// nothing git does. `removed` is pre-set so `Drop` runs no git command.
     #[cfg(test)]
