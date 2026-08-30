@@ -125,8 +125,9 @@ pub struct CodebaseComparison {
     pub tiers: Vec<TierDelta>,
     pub dropped: Vec<GroupDrop>,
     /// Why the `equiv` row is absent: the two runs' judges were not the same
-    /// instrument. `None` when there is nothing to explain — either both
-    /// runs share a judge (the row is present) or neither used one.
+    /// instrument, or they were and no crossing reached a verdict in both.
+    /// `None` when there is nothing to explain — the row is present, or
+    /// neither run used a judge.
     pub judge_note: Option<String>,
 }
 
@@ -473,12 +474,22 @@ fn equiv_delta(pair: &RunPair) -> Option<TierDelta> {
 }
 
 /// The `equiv` row when both runs were judged by the same instrument, or
-/// the note saying why they were not compared.
+/// the note saying why they were not compared. Silence would read as "the
+/// judge had nothing to say", so a shared judge with no shared verdict says
+/// which of the two it was.
 fn compare_judge(pair: &RunPair) -> (Option<TierDelta>, Option<String>) {
     let (ja, jb) = (&pair.a.head.stamp.judge, &pair.b.head.stamp.judge);
     match (ja, jb) {
         (None, None) => (None, None),
-        (Some(a), Some(b)) if a == b => (equiv_delta(pair), None),
+        (Some(a), Some(b)) if a == b => equiv_delta(pair).map_or_else(
+            || {
+                (
+                    None,
+                    Some("equiv: not compared (no crossing judged in both runs)".to_owned()),
+                )
+            },
+            |delta| (Some(delta), None),
+        ),
         _ => (
             None,
             Some(format!(
@@ -1603,6 +1614,29 @@ mod tests {
         let out = super::render_comparison(&RunPair { a: &a, b: &b }, &cmp);
         assert!(
             out.contains("  equiv: not compared (judge differs: a=gpt-oss-20b@1a2b3c4d5e6f/9f8e7d6c5b4a b=none)\n"),
+            "{out}"
+        );
+    }
+
+    /// One judge, both runs, and not one crossing decided in both of them:
+    /// the absent `equiv` row is a fact about the overlap, not silence.
+    #[test]
+    fn a_shared_judge_with_no_shared_verdict_says_why_there_is_no_equiv_row() {
+        let (mut a, mut b) = judged_pair();
+        // a decides fb-1 and fb-2; b decides only fb-3 — no id is in both.
+        a.rows
+            .retain(|r| r.suite != JUDGE_SUITE || r.task_id != "fb-3");
+        b.rows.retain(|r| r.suite != JUDGE_SUITE);
+        b.rows.push(judge_row(3, "fb-3", verdict(Some(true))));
+        let cmp = super::compare_runs(&a, &b, 5.0).expect("compare");
+        assert!(cmp.codebase.tiers.iter().all(|t| t.tier != "equiv"));
+        assert_eq!(
+            cmp.codebase.judge_note.as_deref(),
+            Some("equiv: not compared (no crossing judged in both runs)")
+        );
+        let out = super::render_comparison(&RunPair { a: &a, b: &b }, &cmp);
+        assert!(
+            out.contains("  equiv: not compared (no crossing judged in both runs)\n"),
             "{out}"
         );
     }
