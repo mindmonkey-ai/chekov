@@ -109,6 +109,28 @@ impl Default for DoctorSection {
     }
 }
 
+/// llama.cpp's `reasoning_effort` spellings, as the judge wire sends them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 /// `chekov capability bench` tunables (§6: knobs live here, not in code).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -136,6 +158,16 @@ pub struct BenchSection {
     /// Tasks per `--codebase` run: two-thirds `in_file`, one-third
     /// `function_body`, sampled deterministically from HEAD.
     pub codebase_tasks: u32,
+    /// `max_tokens` on every judge request. 512 is twice the longest reply
+    /// the 2026-08-30 probe saw from a thinking judge; a non-thinking judge
+    /// stops at ~8 tokens regardless.
+    pub judge_max_tokens: u32,
+    /// Below this swap-agreement rate the `equiv` column is voided, never
+    /// down-weighted (spec §10).
+    pub judge_min_consistency_pct: u32,
+    /// `reasoning_effort` on every judge request — gpt-oss needs it, Gemma's
+    /// template ignores it.
+    pub judge_reasoning_effort: ReasoningEffort,
 }
 
 impl Default for BenchSection {
@@ -152,6 +184,9 @@ impl Default for BenchSection {
             release_max_polls: 60,
             release_interval_ms: 500,
             codebase_tasks: 24,
+            judge_max_tokens: 512,
+            judge_min_consistency_pct: 70,
+            judge_reasoning_effort: ReasoningEffort::Low,
         }
     }
 }
@@ -360,7 +395,10 @@ mod tests {
         let cfg: super::FileConfig = toml::from_str("").expect("defaults");
         assert_eq!(cfg.bench.judge_max_tokens, 512);
         assert_eq!(cfg.bench.judge_min_consistency_pct, 70);
-        assert_eq!(cfg.bench.judge_reasoning_effort, super::ReasoningEffort::Low);
+        assert_eq!(
+            cfg.bench.judge_reasoning_effort,
+            super::ReasoningEffort::Low
+        );
         assert_eq!(cfg.bench.judge_reasoning_effort.as_str(), "low");
         let cfg: super::FileConfig = toml::from_str(
             "[bench]\njudge_max_tokens = 64\njudge_min_consistency_pct = 80\njudge_reasoning_effort = \"none\"\n",
@@ -368,9 +406,13 @@ mod tests {
         .expect("overrides parse");
         assert_eq!(cfg.bench.judge_max_tokens, 64);
         assert_eq!(cfg.bench.judge_min_consistency_pct, 80);
-        assert_eq!(cfg.bench.judge_reasoning_effort, super::ReasoningEffort::None);
+        assert_eq!(
+            cfg.bench.judge_reasoning_effort,
+            super::ReasoningEffort::None
+        );
         assert!(
-            toml::from_str::<super::FileConfig>("[bench]\njudge_reasoning_effort = \"max\"\n").is_err(),
+            toml::from_str::<super::FileConfig>("[bench]\njudge_reasoning_effort = \"max\"\n")
+                .is_err(),
             "an effort llama.cpp does not spell is refused at load"
         );
     }
