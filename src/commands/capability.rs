@@ -2338,6 +2338,11 @@ mod tests {
             symbols: Symbols::default(),
             cfg_test_lines: 11,
             cfg_test_files: 1,
+            counts: crate::core::bench::codebase::Counts {
+                in_file: 2,
+                function_body: 0,
+                cross_file_first: 0,
+            },
         }
     }
 
