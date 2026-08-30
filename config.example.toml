@@ -2,12 +2,15 @@
 # Every key is optional; a missing file means all defaults. Unknown keys are
 # rejected loudly. Tunables live here, never in code (§16.11).
 #
-# Worked example: a 256 GB Mac running MiniMax-M2.7 UD-Q5_K_XL.
-# 157.81 GiB of weights + 20.59 GiB q8_0 KV at 163840 ctx + ~2.6 GiB compute
-# buffers = ~181 GiB wired. macOS's system-default wired limit is 75% of RAM
-# (192 GiB), so 187000 MB is the honest requirement without a sysctl bump.
-# Scale this to your own machine and model; `chekov run` refuses to start if
-# the effective limit is below it, and prints the exact sysctl to fix it.
+# There is no built-in memory floor: `chekov run` judges each model's own
+# footprint (weights + KV cache at its context) against the GPU budget this
+# Mac reports, so a fresh install works the same on a 16 GB laptop and a
+# 256 GB Studio. `wired_limit_mb` is an opt-in floor for a tuned machine —
+# worked example, a 256 GB Mac running MiniMax-M2.7 UD-Q5_K_XL: 157.81 GiB
+# of weights + 20.59 GiB q8_0 KV at 163840 ctx + ~2.6 GiB compute buffers =
+# ~181 GiB wired, under macOS's 75%-of-RAM default (192 GiB), so 187000 MB
+# is an honest floor there without a sysctl bump. Set it only if you want
+# `run` to refuse below a number you chose; it prints the exact sysctl.
 
 [server]
 host = "127.0.0.1"
@@ -15,7 +18,7 @@ port = 8080
 api_key = "chekov-local"
 
 [limits]
-wired_limit_mb = 187000
+# wired_limit_mb = 187000
 hermes_ctx_floor = 65536
 
 [doctor]

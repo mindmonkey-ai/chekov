@@ -1,5 +1,5 @@
 //! `chekov status` — running?, pid, model, revision, port, ctx, uptime,
-//! wired-limit actual vs required, log tail path.
+//! the GPU budget and what `run` checks against it, log tail path.
 
 use std::process::ExitCode;
 
@@ -41,19 +41,23 @@ fn model_facts(reg: &crate::core::registry::Registry, model: &str) -> (String, S
     (revision, ctx_size)
 }
 
-/// The GPU budget, resolved through the same function `chekov capability`
-/// prints so the gate and the report can never disagree.
-fn wired_row(ctx: &Ctx, required: u64) -> String {
-    crate::core::machine::live_gpu_budget(&ctx.config.engine_dir()).map_or_else(
-        || format!("unreadable (need {required} MB)"),
-        |b| {
-            format!(
-                "{} MiB ({}) (need {required} MB)",
-                b.value,
-                b.provenance.label()
-            )
-        },
-    )
+/// The GPU budget (resolved through the same function `chekov capability`
+/// prints, so the gate and the report can never disagree) and what `run` will
+/// judge against it: a configured floor, or the model's own footprint.
+fn wired_cell(budget: Option<crate::core::machine::Probed<u64>>, floor: Option<u64>) -> String {
+    let need = floor.map_or_else(
+        || "no floor configured".to_owned(),
+        |required| format!("need {required} MB"),
+    );
+    match budget {
+        Some(b) if floor.is_none() => format!(
+            "{} MiB ({}) ({need}; run checks the model's footprint)",
+            b.value,
+            b.provenance.label()
+        ),
+        Some(b) => format!("{} MiB ({}) ({need})", b.value, b.provenance.label()),
+        None => format!("unreadable ({need})"),
+    }
 }
 
 /// The engine commit chekov last built. Never guessed: an unrecorded engine
@@ -71,8 +75,10 @@ fn status_rows(ctx: &Ctx) -> Result<Vec<Vec<String>>, ChekovError> {
         .or_else(|| reg.active.clone())
         .unwrap_or_else(|| "none".to_owned());
     let (revision, ctx_size) = model_facts(&reg, &model);
-    let required = ctx.config.file.limits.wired_limit_mb;
-    let wired = wired_row(ctx, required);
+    let wired = wired_cell(
+        crate::core::machine::live_gpu_budget(&ctx.config.engine_dir()),
+        ctx.config.file.limits.wired_limit_mb,
+    );
     Ok(vec![
         vec![
             "running".into(),

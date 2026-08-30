@@ -360,37 +360,10 @@ fn kv_for(
     )
 }
 
-/// Bytes actually on disk for a model directory, or `None` when it is absent.
-///
-/// Walks one level of subdirectories: a repo like `unsloth/MiniMax-M2.7-GGUF`
-/// keeps its shards under a quant folder (`UD-Q5_K_XL/…`), so a top-level-only
-/// scan reports a fully downloaded 158 GiB model as absent.
+/// Bytes actually on disk for a model directory — `footprint`'s sum, so the
+/// gate, `recommend` and `graph` size a model the same way.
 fn weights_on_disk(ctx: &Ctx, entry: &crate::core::registry::ModelEntry) -> Option<u64> {
-    let dir = ctx.config.root.join(&entry.path);
-    let total = gguf_bytes_in(&dir) + subdir_gguf_bytes(&dir);
-    (total > 0).then_some(total)
-}
-
-fn gguf_bytes_in(dir: &std::path::Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|e| e.path().extension().is_some_and(|x| x == "gguf"))
-        .filter_map(|e| e.metadata().ok().map(|m| m.len()))
-        .sum()
-}
-
-fn subdir_gguf_bytes(dir: &std::path::Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|e| e.path().is_dir())
-        .map(|e| gguf_bytes_in(&e.path()))
-        .sum()
+    crate::core::footprint::weights_on_disk(&ctx.config.root, entry)
 }
 
 /// A deliberately coarse KV reserve, labelled Predicted at the call site.

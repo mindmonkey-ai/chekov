@@ -73,8 +73,11 @@ impl Default for ServerSection {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LimitsSection {
-    /// Minimum `iogpu.wired_limit_mb` required before `run` will start.
-    pub wired_limit_mb: u64,
+    /// An opt-in floor: `run` refuses when the GPU budget is below it. Absent
+    /// — the default — means the model is the requirement: `run` judges the
+    /// model's own footprint against the live budget instead. A number chosen
+    /// for one machine must never refuse every model on another.
+    pub wired_limit_mb: Option<u64>,
     /// Hermes needs at least this effective ctx when a model is `hermes_ok`.
     pub hermes_ctx_floor: u32,
 }
@@ -82,7 +85,7 @@ pub struct LimitsSection {
 impl Default for LimitsSection {
     fn default() -> Self {
         Self {
-            wired_limit_mb: 187_000,
+            wired_limit_mb: None,
             hermes_ctx_floor: 65_536,
         }
     }

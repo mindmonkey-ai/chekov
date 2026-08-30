@@ -92,6 +92,19 @@ pub enum ChekovError {
     WiredLimitLow { actual_mb: u64, required_mb: u64 },
 
     #[error(
+        "model '{name}' needs about {need_mib} MiB at ctx {ctx} (weights + KV cache) \
+         but this Mac's GPU budget is {budget_mib} MiB — pull a smaller quant, lower \
+         its ctx_size in models.toml, or run `chekov capability recommend` to see \
+         what fits"
+    )]
+    ModelExceedsBudget {
+        name: String,
+        need_mib: u64,
+        budget_mib: u64,
+        ctx: u32,
+    },
+
+    #[error(
         "a llama-server is already running with '{running}' but this launch would \
          advertise '{requested}' to the agent — every token would come from \
          '{running}' at its context, not '{requested}'; \

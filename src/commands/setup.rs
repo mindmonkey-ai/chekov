@@ -1,5 +1,6 @@
-//! `chekov setup` — clone/pull + cmake Metal build of llama.cpp, then verify
-//! the GPU wired limit, printing (never executing) the sudo command (STOP-2).
+//! `chekov setup` — clone/pull + cmake Metal build of llama.cpp, then read the
+//! GPU budget; a configured floor is verified against it, printing (never
+//! executing) the sudo command (STOP-2).
 
 use std::process::ExitCode;
 
@@ -15,7 +16,7 @@ pub struct SetupCmd {
 
 impl Command for SetupCmd {
     fn run(&self, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
-        use crate::core::{checks, engine};
+        use crate::core::engine;
         let cfg = &ctx.config;
         let pin = cfg.file.engine.git_ref.as_deref();
         engine::run_steps(&engine::setup_steps(&cfg.engine_dir(), pin), self.dry_run)?;
@@ -30,31 +31,58 @@ impl Command for SetupCmd {
         {
             engine::record_commit(&cfg.logs_dir(), &commit)?;
         }
-        let required = cfg.file.limits.wired_limit_mb;
-        let actual = checks::wired_limit_mb();
+        let floor = cfg.file.limits.wired_limit_mb;
+        let budget = crate::core::machine::live_gpu_budget(&cfg.engine_dir());
         if self.dry_run {
-            println!("[dry-run] would verify iogpu.wired_limit_mb >= {required} (now: {actual:?})");
+            let against = floor.map_or_else(String::new, |f| format!(" >= {f} MB"));
+            println!(
+                "[dry-run] would verify the GPU budget{against} (now: {:?})",
+                budget.map(|b| b.value)
+            );
             return Ok(ExitCode::SUCCESS);
         }
-        match actual {
-            Some((actual, is_default)) if actual >= required => {
-                let origin = if is_default { ", system default" } else { "" };
-                println!("wired limit OK ({actual} MB{origin} >= {required} MB) — setup complete");
-                Ok(ExitCode::SUCCESS)
-            }
-            Some((actual, _)) => Err(ChekovError::SetupIncomplete {
-                remaining: format!(
-                    "iogpu.wired_limit_mb is {actual}, need {required}; run: \
-                     sudo sysctl iogpu.wired_limit_mb={required}"
-                ),
-            }),
-            None => Err(ChekovError::SetupIncomplete {
-                remaining: format!(
-                    "could not read iogpu.wired_limit_mb; run: \
-                     sudo sysctl iogpu.wired_limit_mb={required} and re-run `chekov setup`"
-                ),
-            }),
-        }
+        println!("{}", setup_verdict(floor, budget)?);
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// What setup says about this machine's budget. Without a floor, a readable
+/// budget is the whole verification — the model's footprint is `run`'s job;
+/// with one, the floor is checked the way it always was.
+fn setup_verdict(
+    floor: Option<u64>,
+    budget: Option<crate::core::machine::Probed<u64>>,
+) -> Result<String, ChekovError> {
+    match (floor, budget) {
+        (None, Some(b)) => Ok(format!(
+            "GPU budget {} MiB ({}) — setup complete",
+            b.value,
+            b.provenance.label()
+        )),
+        (Some(required), Some(b)) if b.value >= required => Ok(format!(
+            "wired limit OK ({} MiB, {} >= {required} MB) — setup complete",
+            b.value,
+            b.provenance.label()
+        )),
+        (Some(required), Some(b)) => Err(ChekovError::SetupIncomplete {
+            remaining: format!(
+                "the GPU budget is {} MiB but the configured floor needs {required}; run: \
+                 sudo sysctl iogpu.wired_limit_mb={required}",
+                b.value
+            ),
+        }),
+        (Some(required), None) => Err(ChekovError::SetupIncomplete {
+            remaining: format!(
+                "could not read the GPU budget; run: sudo sysctl \
+                 iogpu.wired_limit_mb={required} and re-run `chekov setup`"
+            ),
+        }),
+        (None, None) => Err(ChekovError::SetupIncomplete {
+            remaining: "could not read the GPU budget (neither `llama-server --list-devices` \
+                        nor sysctl answered) — check the engine build with `chekov update \
+                        --engine`, then re-run `chekov setup`"
+                .to_owned(),
+        }),
     }
 }
 
@@ -64,14 +92,14 @@ mod tests {
     use crate::core::machine::{Probed, Provenance};
     use crate::error::ChekovError;
 
-    fn budget(mib: u64, provenance: Provenance) -> Option<Probed<u64>> {
-        Some(Probed::new(mib, provenance))
+    fn budget(mib: u64, provenance: Provenance) -> Probed<u64> {
+        Probed::new(mib, provenance)
     }
 
     #[test]
     fn without_a_floor_setup_completes_on_any_readable_budget() {
-        let line =
-            setup_verdict(None, budget(24_576, Provenance::EngineReported)).expect("complete");
+        let line = setup_verdict(None, Some(budget(24_576, Provenance::EngineReported)))
+            .expect("complete");
         assert_eq!(
             line,
             "GPU budget 24576 MiB (engine-reported) — setup complete"
@@ -80,13 +108,17 @@ mod tests {
 
     #[test]
     fn a_configured_floor_is_verified_the_way_it_always_was() {
-        let ok = setup_verdict(Some(150_000), budget(196_608, Provenance::Measured)).expect("met");
+        let ok =
+            setup_verdict(Some(150_000), Some(budget(196_608, Provenance::Measured))).expect("met");
         assert_eq!(
             ok,
             "wired limit OK (196608 MiB, measured >= 150000 MB) — setup complete"
         );
-        let err = setup_verdict(Some(150_000), budget(24_576, Provenance::EngineReported))
-            .expect_err("below the floor");
+        let err = setup_verdict(
+            Some(150_000),
+            Some(budget(24_576, Provenance::EngineReported)),
+        )
+        .expect_err("below the floor");
         assert!(
             matches!(&err, ChekovError::SetupIncomplete { remaining } if remaining.contains("sudo sysctl iogpu.wired_limit_mb=150000")),
             "{err}"

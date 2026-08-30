@@ -80,12 +80,13 @@ impl NewModel {
 
 /// The memory budget quant choices are judged against: the live effective
 /// wired limit (sysctl, 0-sentinel already resolved), falling back to the
-/// configured requirement when sysctl is unreadable.
+/// configured floor when sysctl is unreadable — and to no verdict column at
+/// all when there is no floor either.
 #[must_use]
 pub(crate) fn wired_budget_mb(ctx: &Ctx) -> Option<u64> {
     crate::core::checks::wired_limit_mb()
         .map(|(actual, _is_default)| actual)
-        .or(Some(ctx.config.file.limits.wired_limit_mb))
+        .or(ctx.config.file.limits.wired_limit_mb)
 }
 
 /// `LICENSE.provenance` content: where the snapshot came from and when.
