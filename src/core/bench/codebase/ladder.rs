@@ -378,19 +378,33 @@ pub fn identifiers(text: &str) -> Vec<String> {
     out
 }
 
-/// `text` with every string, char, and comment literal blanked out, so the
-/// tokeniser walks code bytes only. Lengths need not survive — nothing here
-/// maps a token back to an offset.
-fn code_only(text: &str) -> String {
+/// `text` with every string, char, and comment literal blanked out, so a
+/// scanner walks code bytes only.
+///
+/// Byte lengths and line breaks survive the blanking: the cross-file index
+/// reads declarations out of this and then reports the OFFSET of one, so an
+/// offset into the result has to be an offset into the original.
+pub(super) fn code_only(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut pos = 0;
     for range in super::masker::literal_ranges(text) {
         out.push_str(&text[pos..range.start]);
-        out.push(' ');
+        blank_into(&text[range.clone()], &mut out);
         pos = range.end;
     }
     out.push_str(&text[pos..]);
     out
+}
+
+/// One space per BYTE of the literal, and a newline for a newline — the
+/// offsets and the line structure of the original both survive.
+fn blank_into(literal: &str, out: &mut String) {
+    for c in literal.chars() {
+        match c {
+            '\n' => out.push('\n'),
+            _ => out.extend(std::iter::repeat_n(' ', c.len_utf8())),
+        }
+    }
 }
 
 #[must_use]
@@ -484,6 +498,19 @@ pub(super) fn type_declaration_names(line: &str, set: &mut BTreeSet<String>) {
 const DECLARATION_KEYWORDS: [&str; 8] = [
     "fn", "struct", "enum", "trait", "type", "const", "static", "mod",
 ];
+
+/// The cross-file index's declaration names: the same list without `mod`.
+///
+/// Amended 2026-08-30 (§3.2). `mod agents;` declares a FILE, not a symbol a
+/// span can call: indexing it made every `agents::` path in the repository
+/// look like a cross-file first use of a name nothing defines. Tier 5's
+/// declaration list keeps `mod` — there the question is only whether a name
+/// the model emitted exists.
+pub(super) fn cross_file_declaration_names(line: &str, set: &mut BTreeSet<String>) {
+    names_after(line, &CROSS_FILE_KEYWORDS, set);
+}
+
+const CROSS_FILE_KEYWORDS: [&str; 7] = ["fn", "struct", "enum", "trait", "type", "const", "static"];
 
 /// The word following any of `keywords` on this line.
 fn names_after(line: &str, keywords: &[&str], set: &mut BTreeSet<String>) {
@@ -754,6 +781,7 @@ mod tests {
                 cfg_test_lines: 0,
                 cross_file_withheld: 0,
             },
+            name: None,
             also_first_uses: Vec::new(),
             extra: None,
             extra_text: String::new(),

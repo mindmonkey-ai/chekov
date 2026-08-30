@@ -165,6 +165,16 @@ pub struct CodebaseRow {
     /// Other names whose first use in the file also falls in this span.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also_first_uses: Vec<String>,
+    /// The symbol a cross-file crossing is keyed on — which name the model
+    /// was asked to recover. `None` on the same-file tiers, which key on a
+    /// span and not on a name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The `n_predict` this crossing actually sent, so a reader can tell a
+    /// short fill from one the budget cut off. `None` on rows written before
+    /// the field, where the number is unrecorded rather than zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_predict: Option<u32>,
 }
 
 /// One task to append: its identity plus what was measured.
@@ -1500,6 +1510,8 @@ mod tests {
                 arm: None,
                 extra: None,
                 also_first_uses: Vec::new(),
+                name: None,
+                n_predict: Some(64),
             }),
         }
     }

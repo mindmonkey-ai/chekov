@@ -106,6 +106,12 @@ fn extra_chunk<'a>(crossing: &'a Crossing) -> Option<runner::ExtraChunk<'a>> {
     })
 }
 
+/// The gold's line count as the wire bounds `n_predict` by — floored at one,
+/// so an empty gold still buys the crossing room to answer.
+fn gold_lines(task: &CodebaseTask) -> usize {
+    task.gold.lines().count().max(1)
+}
+
 /// One codebase task through `/infill`, or the reason it could not be
 /// measured.
 ///
@@ -128,7 +134,7 @@ fn infill_or_latch(
     let infill_task = InfillTask {
         prefix: &task.prefix,
         suffix: &task.suffix,
-        gold_lines: task.gold.lines().count().max(1),
+        gold_lines: gold_lines(task),
         extra: extra_chunk(crossing),
     };
     match cross_infill(wire, &infill_task) {
@@ -271,6 +277,8 @@ fn record_codebase_task(
             arm: arm.label.map(str::to_owned),
             extra: arm.with_extra.then(|| task.extra.clone()).flatten(),
             also_first_uses: task.also_first_uses.clone(),
+            name: task.name.clone(),
+            n_predict: Some(runner::n_predict_for(gold_lines(task))),
         }),
     })
 }
@@ -426,6 +434,7 @@ mod tests {
                 cfg_test_lines: 11,
                 cross_file_withheld: 0,
             },
+            name: None,
             also_first_uses: Vec::new(),
             extra: None,
             extra_text: String::new(),
@@ -479,6 +488,7 @@ mod tests {
                 cfg_test_lines: 0,
                 cross_file_withheld: 0,
             },
+            name: Some("build".into()),
             also_first_uses: vec!["Widget".into()],
             extra: Some(ExtraFile {
                 path: "src/defs.rs".into(),

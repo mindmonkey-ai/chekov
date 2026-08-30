@@ -162,6 +162,7 @@ pub fn assemble(picked: &Picked, ctx: &Context) -> CodebaseTask {
             cfg_test_lines: ctx.cfg_test_lines,
             cross_file_withheld: ctx.cross.map_or(0, |a| a.withheld),
         },
+        name: ctx.cross.map(|a| a.name.clone()),
         also_first_uses: ctx
             .cross
             .map_or_else(Vec::new, |a| a.also_first_uses.clone()),

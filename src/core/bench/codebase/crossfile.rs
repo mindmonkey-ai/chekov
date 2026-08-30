@@ -32,18 +32,23 @@ pub struct Index {
 }
 
 impl Index {
-    /// Every `fn`/`struct`/`enum`/`trait`/`type`/`const`/`static`/`mod` name
-    /// in the elided texts, minus keywords and the prelude — a name every
-    /// Rust program may use without reading another file teaches nothing.
+    /// Every `fn`/`struct`/`enum`/`trait`/`type`/`const`/`static` name in the
+    /// elided texts, minus keywords and the prelude — a name every Rust
+    /// program may use without reading another file teaches nothing.
+    ///
+    /// The scan runs over the literal-blanked text (§3.2, amended
+    /// 2026-08-30): `/// the fn build …` is prose about a declaration, not
+    /// one, and indexing it named a file that declares nothing of the sort.
     #[must_use]
     pub fn build(files: &[(String, String)]) -> Self {
         let mut declared: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut types = BTreeSet::new();
         for (path, text) in files {
-            for name in indexable_names(text) {
+            let code = ladder::code_only(text);
+            for name in indexable_names(&code) {
                 declared.entry(name).or_default().insert(path.clone());
             }
-            for line in text.lines() {
+            for line in code.lines() {
                 ladder::type_declaration_names(line, &mut types);
             }
         }
@@ -92,11 +97,11 @@ impl Index {
 
 /// One file's declaration names, minus keywords and the prelude: a name every
 /// Rust program may use without reading another file teaches nothing, so it
-/// never earns a cross-file task.
-fn indexable_names(text: &str) -> BTreeSet<String> {
+/// never earns a cross-file task. `code` is the file's literal-blanked text.
+fn indexable_names(code: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    for line in text.lines() {
-        ladder::declaration_names(line, &mut names);
+    for line in code.lines() {
+        ladder::cross_file_declaration_names(line, &mut names);
     }
     names.retain(|name| {
         !ladder::KEYWORDS.contains(&name.as_str()) && !ladder::PRELUDE.contains(&name.as_str())
@@ -125,6 +130,13 @@ pub struct Meta {
 pub struct Found {
     pub candidates: Vec<Candidate>,
     pub meta: Vec<(usize, Meta)>,
+    /// Names with exactly one other defining file that F never names (§3.2
+    /// rule 5, amended 2026-08-30) — counted in the tier's shortfall.
+    pub no_import: BTreeSet<String>,
+    /// The distinct identifiers of F's `in_file` spans — the only names the
+    /// cross-file rule had an opinion about. Returned rather than recomputed
+    /// by the caller, so the rule and the count that reports it walk one set.
+    pub span_names: BTreeSet<String>,
 }
 
 /// Where each name's first call-shaped use in one file sits, and the file
@@ -167,11 +179,16 @@ impl Skipped {
 /// rule: a name's first use is in exactly one span.
 #[must_use]
 pub fn first_uses(index: &Index, file: &FileText<'_>) -> Found {
-    let firsts = first_use_offsets(index, file);
-    let mut found = Found::default();
+    let span_names = span_identifiers(file);
+    let scan = first_use_offsets(index, file, &span_names);
+    let mut found = Found {
+        no_import: scan.no_import,
+        span_names,
+        ..Found::default()
+    };
     let mut claimed: BTreeSet<String> = BTreeSet::new();
     for span in file.spans.iter().filter(|c| c.tier == TaskTier::InFile) {
-        let names = names_first_used_in(&firsts, &span.byte_range);
+        let names = names_first_used_in(&scan.firsts, &span.byte_range);
         let Some((first, rest)) = names.split_first() else {
             continue;
         };
@@ -196,30 +213,93 @@ pub fn first_uses(index: &Index, file: &FileText<'_>) -> Found {
     found
 }
 
+/// One file's scan: where each candidate name is first used, and the names
+/// whose defining file F never refers to.
+struct Scan {
+    firsts: FirstUses,
+    no_import: BTreeSet<String>,
+}
+
 /// §3.2 rule 4 scans F's text once *per name*, so the offset is found once
 /// here for every name any span mentions, not once per (name, span).
-fn first_use_offsets(index: &Index, file: &FileText<'_>) -> FirstUses {
+///
+/// Rule 5 (amended 2026-08-30) runs first: a name whose defining module F
+/// never refers to is not a candidate at all, and is counted instead.
+fn first_use_offsets(index: &Index, file: &FileText<'_>, span_names: &BTreeSet<String>) -> Scan {
     let literals = masker::literal_ranges(file.text);
     let skip = Skipped {
         uses: use_statements(file.text, &literals),
         literals,
     };
-    let mut out = FirstUses::new();
-    for name in span_identifiers(file) {
-        let Defined::In(other) = index.defined_in(&name, file.path) else {
+    let modules = module_references(&ladder::code_only(file.text), &skip);
+    let mut scan = Scan {
+        firsts: FirstUses::new(),
+        no_import: BTreeSet::new(),
+    };
+    for name in span_names {
+        let Defined::In(other) = index.defined_in(name, file.path) else {
             continue;
         };
+        if !modules.contains(module_stem(&other)) {
+            scan.no_import.insert(name.clone());
+            continue;
+        }
         let needle = Needle {
             text: file.text,
-            name: &name,
-            is_type: index.declares_type(&name),
+            name,
+            is_type: index.declares_type(name),
             skip: &skip,
         };
         if let Some(at) = first_use_at(&needle) {
-            out.insert(name, (at, other));
+            scan.firsts.insert(name.clone(), (at, other));
         }
     }
+    scan
+}
+
+/// G's module stem as F would have to name it: the file stem, or the parent
+/// directory for `mod.rs`, `lib.rs` and `main.rs`.
+///
+/// `src/core/bench/store.rs` is `store`; `src/agents/mod.rs` is `agents`.
+fn module_stem(path: &str) -> &str {
+    let mut parts = path.rsplit('/');
+    let file = parts.next().unwrap_or(path);
+    let stem = file.strip_suffix(".rs").unwrap_or(file);
+    if matches!(stem, "mod" | "lib" | "main") {
+        return parts.next().unwrap_or(stem);
+    }
+    stem
+}
+
+/// Every module name F refers to: each identifier inside one of F's `use`
+/// statements, and the segment before every `::` elsewhere.
+///
+/// §3.2 rule 5, amended 2026-08-30. Matching on the declaration name alone
+/// linked a bare `x.next()` to whichever file happened to declare `fn next`
+/// — a file F never names, whose contents say nothing about that call. The
+/// text is the literal-blanked one, so a module named in a comment does not
+/// count as a reference.
+fn module_references(code: &str, skip: &Skipped) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for range in &skip.uses {
+        out.extend(ladder::identifiers(&code[range.clone()]));
+    }
+    for (at, _) in code.match_indices("::") {
+        out.extend(word_ending_at(code, at));
+    }
     out
+}
+
+/// The identifier immediately before `at`, or `None` when the `::` follows
+/// anything else — `>::`, a bracket, whitespace.
+fn word_ending_at(code: &str, at: usize) -> Option<String> {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let start = code[..at]
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !ident(*c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    (start < at).then(|| code[start..at].to_owned())
 }
 
 /// The distinct identifiers of this file's `in_file` spans — the only names a
@@ -348,6 +428,10 @@ pub const EXTRA_CAP: usize = 32 * 1024;
 /// Everything a cross-file task carries beyond its span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assembled {
+    /// The name this task is keyed on — the one whose first use the span
+    /// holds. On the row it is what makes a crossing auditable: which symbol
+    /// the model was asked to recover, and from which file.
+    pub name: String,
     pub extra: ExtraFile,
     pub extra_text: String,
     pub also_first_uses: Vec<String>,
@@ -385,6 +469,7 @@ pub fn assemble_extra(meta: &Meta, gold: &str, corpus: &Corpus<'_>) -> Option<As
     let (_, text) = corpus.files.iter().find(|(p, _)| *p == meta.defined_in)?;
     let extra_text = window(text, &meta.name);
     Some(Assembled {
+        name: meta.name.clone(),
         extra: ExtraFile {
             path: meta.defined_in.clone(),
             bytes: extra_text.len() as u64,
@@ -449,11 +534,17 @@ fn last_line_end_within_cap(text: &str, start: usize) -> usize {
 
 /// The start of the line that declares `name`, so the window is centred on
 /// the definition rather than on the middle of the file.
+///
+/// Literal-blanked first (§3.2, amended 2026-08-30): `/// the fn build …` is
+/// a doc line about the declaration, and centring the window on it would
+/// leave the definition itself outside the cap on a big file. The blanking
+/// preserves byte lengths, so the offset counted here is an offset into the
+/// original text.
 fn declaration_offset(text: &str, name: &str) -> Option<usize> {
     let mut at = 0;
-    for line in text.split_inclusive('\n') {
+    for line in ladder::code_only(text).split_inclusive('\n') {
         let mut names = BTreeSet::new();
-        ladder::declaration_names(line, &mut names);
+        ladder::cross_file_declaration_names(line, &mut names);
         if names.contains(name) {
             return Some(at);
         }
@@ -540,10 +631,11 @@ mod tests {
     #[test]
     fn the_first_use_wins_and_a_later_one_is_not_a_second_task() {
         let idx = index(&[("src/defs.rs", DEFS)]);
-        let user = "pub fn run() {\n    let a = build(1);\n    let b = build(2);\n    a + b\n}\n";
+        let user = "use crate::defs::build;\n\
+                    pub fn run() {\n    let a = build(1);\n    let b = build(2);\n    a + b\n}\n";
         assert_eq!(
             uses(&idx, "src/user.rs", user),
-            vec![(2, "build".to_owned())]
+            vec![(3, "build".to_owned())]
         );
     }
 
@@ -551,13 +643,16 @@ mod tests {
     fn every_call_shape_counts_and_a_use_line_never_does() {
         let idx = index(&[("src/defs.rs", DEFS)]);
         for (src, want) in [
-            ("pub fn r() {\n    let w = build(1);\n    w\n}\n", "build"),
             (
-                "pub fn r() {\n    let w = paint::go();\n    w\n}\n",
-                "paint",
+                "use crate::defs::build;\npub fn r() {\n    let w = build(1);\n    w\n}\n",
+                "build",
             ),
             (
-                "pub fn r() {\n    let w = Widget { id: 1 };\n    w\n}\n",
+                "use crate::defs::Widget;\npub fn r() {\n    let w = Widget::default();\n    w\n}\n",
+                "Widget",
+            ),
+            (
+                "use crate::defs::Widget;\npub fn r() {\n    let w = Widget { id: 1 };\n    w\n}\n",
                 "Widget",
             ),
         ] {
@@ -565,7 +660,8 @@ mod tests {
             assert_eq!(got.len(), 1, "{src}");
             assert_eq!(got[0].1, want, "{src}");
         }
-        let method = "pub fn r(x: Thing) {\n    let w = x.build();\n    let _ = w;\n}\n";
+        let method = "use crate::defs::build;\n\
+                      pub fn r(x: Thing) {\n    let w = x.build();\n    let _ = w;\n}\n";
         assert_eq!(uses(&idx, "src/user.rs", method)[0].1, "build");
         let imported = "use crate::defs::build;\npub fn r() {\n    let _ = 1;\n}\n";
         assert!(
@@ -581,14 +677,15 @@ mod tests {
             ("src/b.rs", "pub fn build() {}\n"),
         ]);
         assert_eq!(two.defined_in("build", "src/c.rs"), Defined::Ambiguous);
-        let user = "pub fn r() {\n    let w = build(1);\n    w\n}\n";
+        let user = "use crate::a::build;\npub fn r() {\n    let w = build(1);\n    w\n}\n";
         assert!(
             uses(&two, "src/c.rs", user).is_empty(),
             "ambiguous is skipped"
         );
 
         let idx = index(&[("src/defs.rs", DEFS)]);
-        let shadow = "fn build(n: u32) -> u32 {\n    n\n}\n\
+        let shadow = "use crate::defs::build;\n\
+                      fn build(n: u32) -> u32 {\n    n\n}\n\
                       pub fn r() {\n    let w = build(1);\n    w\n}\n";
         assert!(
             uses(&idx, "src/user.rs", shadow).is_empty(),
@@ -612,15 +709,17 @@ mod tests {
             ("src/defs.rs", DEFS),
             ("src/consts.rs", "pub const ROWS: [u8; 1] = [0];\n"),
         ]);
-        let typed = "impl Widget {\n}\nfn make() -> Widget {\n    todo!()\n}\n\
+        let typed = "use crate::defs::Widget;\n\
+                     impl Widget {\n}\nfn make() -> Widget {\n    todo!()\n}\n\
                      pub fn r() {\n    let w = Widget { id: 1 };\n    w\n}\n";
         assert_eq!(
             uses(&idx, "src/user.rs", typed),
-            vec![(7, "Widget".to_owned())],
+            vec![(8, "Widget".to_owned())],
             "impl and -> take a block, not a struct literal"
         );
 
-        let looped = "pub fn r() {\n    for x in ROWS {\n        drop(x);\n    }\n}\n";
+        let looped = "use crate::consts::ROWS;\n\
+                      pub fn r() {\n    for x in ROWS {\n        drop(x);\n    }\n}\n";
         assert!(
             uses(&idx, "src/user.rs", looped).is_empty(),
             "a loop head is not a call site"
@@ -630,26 +729,101 @@ mod tests {
     #[test]
     fn a_use_block_wrapped_across_lines_is_still_one_import() {
         let idx = index(&[("src/defs.rs", DEFS)]);
-        let wrapped = "use crate::{\n    paint::go,\n    defs::build,\n};\n\
-                       pub fn r() {\n    let w = paint::go();\n    w\n}\n";
+        let wrapped = "use crate::{\n    defs::Widget,\n    defs::build,\n};\n\
+                       pub fn r() {\n    let w = Widget { id: 1 };\n    w\n}\n";
         assert_eq!(
             uses(&idx, "src/user.rs", wrapped),
-            vec![(6, "paint".to_owned())],
+            vec![(6, "Widget".to_owned())],
             "a continuation line of a use block is not the first call site"
+        );
+    }
+
+    /// The failure §3.2's rule 5 was added for: `x.next()` and
+    /// `conn.execute(…)` are method calls on some other type, and the file
+    /// that happens to declare `fn next` is not the file to read.
+    #[test]
+    fn a_method_call_without_an_import_of_the_defining_module_is_no_candidate() {
+        let idx = index(&[
+            ("src/iter.rs", "pub fn next(n: u32) -> u32 {\n    n\n}\n"),
+            ("src/db.rs", "pub fn execute(q: &str) -> u32 {\n    0\n}\n"),
+        ]);
+        let user = "pub fn r(x: Rows, conn: Conn) {\n    let a = x.next();\n    \
+                    let b = conn.execute(\"select 1\");\n    let _ = (a, b);\n}\n";
+        let spans = RustBraceMasker.candidates(user);
+        let found = first_uses(
+            &idx,
+            &FileText {
+                path: "src/user.rs",
+                text: user,
+                spans: &spans,
+            },
+        );
+        assert!(found.candidates.is_empty(), "{:?}", found.meta);
+        assert_eq!(
+            found.no_import,
+            ["execute".to_owned(), "next".to_owned()].into(),
+            "both are counted, so the shortfall can say why"
+        );
+    }
+
+    /// The shape rule 5 keeps: F names the module, so G really is the file
+    /// the model would have had to read.
+    #[test]
+    fn an_imported_module_makes_its_declaring_file_the_candidate() {
+        let idx = index(&[(
+            "src/hash.rs",
+            "pub fn sha256_hex(b: &[u8]) -> String {\n    String::new()\n}\n",
+        )]);
+        let user = "use crate::hash::sha256_hex;\n\
+                    pub fn r(b: &[u8]) {\n    let h = sha256_hex(b);\n    let _ = h;\n}\n";
+        let spans = RustBraceMasker.candidates(user);
+        let found = first_uses(
+            &idx,
+            &FileText {
+                path: "src/user.rs",
+                text: user,
+                spans: &spans,
+            },
+        );
+        assert!(found.no_import.is_empty(), "{:?}", found.no_import);
+        assert_eq!(found.meta.len(), 1, "{:?}", found.meta);
+        assert_eq!(found.meta[0].1.name, "sha256_hex");
+        assert_eq!(found.meta[0].1.defined_in, "src/hash.rs");
+    }
+
+    /// `mod agents;` declares a file, not a symbol, so no span ever crosses
+    /// for it — and a doc line naming a declaration is prose, not one.
+    #[test]
+    fn a_module_declaration_is_never_g_and_a_doc_line_never_declares() {
+        let idx = index(&[
+            ("src/lib.rs", "pub mod agents;\n"),
+            (
+                "src/docs.rs",
+                "/// the fn build of the pipeline\npub fn go() {}\n",
+            ),
+        ]);
+        assert_eq!(idx.defined_in("agents", "src/user.rs"), Defined::Nowhere);
+        assert_eq!(idx.defined_in("build", "src/user.rs"), Defined::Nowhere);
+        assert_eq!(
+            idx.defined_in("go", "src/user.rs"),
+            Defined::In("src/docs.rs".to_owned()),
+            "the declaration on the line below the doc still indexes"
         );
     }
 
     #[test]
     fn a_name_inside_a_string_or_a_comment_is_not_a_use() {
         let idx = index(&[("src/defs.rs", DEFS)]);
-        let quoted = "pub fn r() {\n    let s = \"build(1)\";\n    // build(2)\n    s\n}\n";
+        let quoted = "use crate::defs::build;\n\
+                      pub fn r() {\n    let s = \"build(1)\";\n    // build(2)\n    s\n}\n";
         assert!(uses(&idx, "src/user.rs", quoted).is_empty(), "{quoted}");
     }
 
     #[test]
     fn a_span_that_first_uses_two_names_is_one_task_keyed_on_the_earlier() {
         let idx = index(&[("src/defs.rs", DEFS)]);
-        let both = "pub fn r() {\n    let w = build(Widget { id: 1 });\n    w\n}\n";
+        let both = "use crate::defs::{Widget, build};\n\
+                    pub fn r() {\n    let w = build(Widget { id: 1 });\n    w\n}\n";
         let spans = RustBraceMasker.candidates(both);
         let found = first_uses(
             &idx,

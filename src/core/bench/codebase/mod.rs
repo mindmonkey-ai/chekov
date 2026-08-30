@@ -77,6 +77,9 @@ pub struct CodebaseTask {
     pub prefix: String,
     pub suffix: String,
     pub excluded: Excluded,
+    /// The symbol this cross-file task is keyed on, `None` on the other
+    /// tiers — the name whose first use the span holds.
+    pub name: Option<String>,
     /// Other names whose first use in this file also falls in this span —
     /// informational, carried onto the row.
     pub also_first_uses: Vec<String>,
@@ -180,6 +183,9 @@ struct Candidates {
     /// `(file, span start)` is unique within a run.
     meta: std::collections::HashMap<(String, usize), crossfile::Meta>,
     ambiguous: std::collections::BTreeSet<String>,
+    /// Rule 5's tally: names with one defining file that their own file never
+    /// refers to. Distinct names, like `ambiguous`.
+    no_import: std::collections::BTreeSet<String>,
     files_without_use: usize,
 }
 
@@ -189,6 +195,7 @@ fn all_candidates(index: &crossfile::Index, elided: &Elisions) -> Candidates {
         per_file: Vec::new(),
         meta: std::collections::HashMap::new(),
         ambiguous: std::collections::BTreeSet::new(),
+        no_import: std::collections::BTreeSet::new(),
         files_without_use: 0,
     };
     for (path, text) in &elided.files {
@@ -202,11 +209,9 @@ fn all_candidates(index: &crossfile::Index, elided: &Elisions) -> Candidates {
             },
         );
         out.files_without_use += usize::from(found.candidates.is_empty());
-        out.ambiguous.extend(rule_one_ambiguous(
-            index,
-            path,
-            &span_identifiers(text, &candidates),
-        ));
+        out.ambiguous
+            .extend(rule_one_ambiguous(index, path, &found.span_names));
+        out.no_import.extend(found.no_import);
         for (candidate, (start, meta)) in found.candidates.into_iter().zip(found.meta) {
             out.meta.insert((path.clone(), start), meta);
             candidates.push(candidate);
@@ -217,19 +222,6 @@ fn all_candidates(index: &crossfile::Index, elided: &Elisions) -> Candidates {
         });
     }
     out
-}
-
-/// Every identifier appearing in this file's `in_file` spans — the names the
-/// cross-file rule had an opinion about.
-fn span_identifiers(
-    text: &str,
-    candidates: &[masker::Candidate],
-) -> std::collections::BTreeSet<String> {
-    candidates
-        .iter()
-        .filter(|c| c.tier == TaskTier::InFile)
-        .flat_map(|c| ladder::identifiers(&text[c.byte_range.clone()]))
-        .collect()
 }
 
 /// The names §3.2's rule 1 actually passed over here: declared in two or more
@@ -342,9 +334,10 @@ fn counts_of(set: &sample::TaskSet) -> Counts {
     }
 }
 
-/// `cross_file_first: 4 of 6 (2 short: 17 ambiguous names skipped, 9 files
-/// have no cross-file use)` — the lane's own reason, which `sample` cannot
-/// know. `None` when the lane was filled.
+/// `cross_file_first: 4 of 6 (2 short: 17 ambiguous names skipped, 5 names
+/// skipped (no import of the defining module), 9 files have no cross-file
+/// use)` — the lane's own reason, which `sample` cannot know. `None` when the
+/// lane was filled.
 fn cross_shortfall(set: &sample::TaskSet, candidates: &Candidates) -> Option<String> {
     let lane = set
         .lanes
@@ -355,11 +348,13 @@ fn cross_shortfall(set: &sample::TaskSet, candidates: &Candidates) -> Option<Str
     }
     Some(format!(
         "cross_file_first: {} of {} ({} short: {} ambiguous names skipped, \
+         {} names skipped (no import of the defining module), \
          {} files have no cross-file use)",
         lane.picked,
         lane.want,
         lane.want - lane.picked,
         candidates.ambiguous.len(),
+        candidates.no_import.len(),
         candidates.files_without_use
     ))
 }
@@ -515,7 +510,8 @@ mod tests {
         .expect("write");
         std::fs::write(
             dir.join("src/user.rs"),
-            "pub fn run(n: u32) -> u32 {\n    let a = build(n);\n    let b = a + 1;\n    \
+            "use crate::defs::build;\n\
+             pub fn run(n: u32) -> u32 {\n    let a = build(n);\n    let b = a + 1;\n    \
              let c = b * 3;\n    c\n}\n",
         )
         .expect("write");
@@ -600,9 +596,56 @@ mod tests {
         assert_eq!(
             line,
             "cross_file_first: 0 of 6 (6 short: 0 ambiguous names skipped, \
+             0 names skipped (no import of the defining module), \
              3 files have no cross-file use)",
             "{:?}",
             prepared.shortfall
+        );
+    }
+
+    /// Three files that all call `build`, and none of which imports the file
+    /// that declares it — the shape §3.2's rule 5 exists for. The lane is
+    /// empty and the sentence says why, name by name.
+    fn repo_without_imports() -> PathBuf {
+        let dir = scratch_for("no-import");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+        std::fs::write(
+            dir.join("src/defs.rs"),
+            "pub fn build(n: u32) -> u32 {\n    let m = n + 1;\n    let k = m * 2;\n    k\n}\n",
+        )
+        .expect("write");
+        std::fs::write(
+            dir.join("src/user.rs"),
+            "pub fn run(x: u32) -> u32 {\n    let a = x.build();\n    let b = a + 1;\n    \
+             let c = b * 3;\n    c\n}\n",
+        )
+        .expect("write");
+        let author = ["-c", "user.email=t@t", "-c", "user.name=t"];
+        git(&dir, &["init", "-q"]);
+        git(&dir, &[&author[..], &["add", "."]].concat());
+        git(
+            &dir,
+            &[&author[..], &["commit", "-q", "-m", "init"]].concat(),
+        );
+        dir
+    }
+
+    /// A method call whose name happens to be declared somewhere is not a
+    /// crossing: without an import, the defining file is not the file to read.
+    #[test]
+    fn a_call_whose_defining_module_the_file_never_names_is_counted_not_crossed() {
+        let prepared =
+            prepare(&repo_without_imports(), &scratch_for("scratch-noimp"), 24).expect("prepare");
+        assert_eq!(prepared.counts.cross_file_first, 0);
+        let line = prepared
+            .shortfall
+            .iter()
+            .find(|s| s.starts_with("cross_file_first: "))
+            .expect("the short lane reports itself");
+        assert!(
+            line.contains("1 names skipped (no import of the defining module)"),
+            "{line}"
         );
     }
 }

@@ -1874,6 +1874,7 @@ mod tests {
                 cfg_test_lines: 0,
                 cross_file_withheld: 0,
             },
+            name: None,
             also_first_uses: vec![],
             extra: None,
             extra_text: String::new(),
