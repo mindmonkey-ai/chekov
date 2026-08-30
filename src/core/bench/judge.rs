@@ -464,4 +464,60 @@ mod tests {
             "nothing answered twice: no rate, not 0%"
         );
     }
+
+    #[test]
+    fn a_family_conflict_names_judge_candidate_and_family() {
+        let candidates = vec![
+            ("ornith-1.5-35b-a3b".to_owned(), "qwen35moe".to_owned()),
+            ("minimax-m2.7".to_owned(), "minimax-m2".to_owned()),
+        ];
+        let err = super::family_conflict(("qwen3.8-27b", "qwen35"), &candidates).expect("conflict");
+        assert!(
+            matches!(err, crate::error::ChekovError::JudgeFamilyConflict { ref candidate, ref family, .. }
+                if candidate == "ornith-1.5-35b-a3b" && family == "qwen35")
+        );
+        assert!(super::family_conflict(("gpt-oss-20b", "gpt-oss"), &candidates).is_none());
+        let itself = vec![("gpt-oss-20b".to_owned(), "gpt-oss".to_owned())];
+        assert!(
+            super::family_conflict(("gpt-oss-20b", "gpt-oss"), &itself).is_some(),
+            "a judge among the candidates conflicts with itself"
+        );
+    }
+
+    #[test]
+    fn the_plan_stamps_what_it_was_built_from() {
+        let plan = super::JudgePlan {
+            judge: crate::core::registry::Effective {
+                name: "gpt-oss-20b".into(),
+                ctx_size: 98_304,
+                flags: vec![],
+                entry: crate::core::registry::ModelEntry {
+                    repo: "unsloth/gpt-oss-20b-GGUF".into(),
+                    quant: "F16".into(),
+                    revision: "d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4".into(),
+                    path: "models/gpt-oss-20b@d449b42d93e1".into(),
+                    first_shard: "gpt-oss-20b-F16.gguf".into(),
+                    hermes_ok: true,
+                    ctx_size: None,
+                    extra_flags: vec![],
+                    role: Some(crate::core::registry::ModelRole::Judge),
+                },
+            },
+            arch: "gpt-oss".into(),
+            rubric_hash: super::rubric_hash(),
+            max_tokens: 512,
+            min_consistency_pct: 70,
+            reasoning_effort: crate::core::config::ReasoningEffort::Low,
+        };
+        let stamp = plan.stamp();
+        assert_eq!(
+            (
+                stamp.model.as_str(),
+                stamp.revision.as_str(),
+                stamp.reasoning_effort.as_str(),
+                stamp.max_tokens
+            ),
+            ("gpt-oss-20b", "d449b42d93e1", "low", 512)
+        );
+    }
 }
