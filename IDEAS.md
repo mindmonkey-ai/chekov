@@ -73,7 +73,7 @@ serves plain HTTPS with a content-length, verified against
 unsloth/MiniMax-M2.7-GGUF. Range-request resume was NOT built — an interrupted
 shard restarts from zero. Recorded here 2026-08-29 because the entry still
 read OPEN.
-Proposed 2026-08-25 — status: DONE (resume of a partial shard still OPEN)
+Proposed 2026-08-25 — status: DONE (partial-shard resume SHIPPED 2026-08-29)
 
 ## `chekov stop --if-running` (2026-08-26)
 A teardown script cannot call `stop` idempotently: stopping an already-stopped
@@ -358,10 +358,14 @@ Proposed 2026-08-27 — status: RESOLVED
 download and a hung one look identical. Proposal: a per-shard progress line on
 stderr — bytes / total, MiB/s, ETA, shard N of M — plain text when stderr is not
 a TTY, and nothing new on stdout so `pull` stays scriptable. Sibling of the
-still-OPEN partial-shard resume ("Replace hf-hub…", 2026-08-25): both need the
-same per-shard bookkeeping, so whichever lands first should build it for the
-other. Rationale: today's 397B pull is 5 × ~39 GB with no feedback at all.
-Proposed 2026-08-29 — status: OPEN
+partial-shard resume ("Replace hf-hub…", 2026-08-25): both need the same
+per-shard bookkeeping, so whichever lands first should build it for the other.
+Rationale: today's 397B pull is 5 × ~39 GB with no feedback at all.
+SHIPPED 2026-08-29 together with the resume, as predicted: `core/progress.rs`
+holds `Progress` (a pure `line`), `CountingReader` (≤ 1 tick/second, always at
+EOF) and `Sink { Tty, Plain }`, and `hub::download_shard` builds one per shard
+and hands its resumed offset to the `Range` request.
+Proposed 2026-08-29 — status: SHIPPED 2026-08-29
 
 ## Portability sweep: any Apple Silicon Mac, not this Mac Studio (2026-08-29)
 chekov says it is for Apple Silicon, but it has only ever run on one M3 Ultra

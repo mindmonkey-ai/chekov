@@ -102,7 +102,7 @@ The registry stores the absolute path; everything else works unchanged.
 | `capability bench [--models a,b] [--suite throughput\|agentic\|all] [--fixture F] [--resume RUN] [--dry-run] [--yes]` | Measure candidates through chekov's own Anthropic↔OpenAI translator and store every run. `--models` takes a **comma-separated** list and benches them **sequentially**: bench launches and tears down its own server behind `run`'s preflight gates and **never stops a server it did not start** — a running server is reused only when it *is* the single request, and is otherwise a refusal. `--suite` defaults to `throughput`: the depth sweep over `[bench] depths`, `[bench] repetitions` per depth with the first dropped as warmup. `agentic` runs the probe set (`tool_emit`, `grammar_gap`, `instruction`), with each unconstrained case crossing both the buffered and the streamed door so an asymmetry between them is named. `all` runs both. Each run lands in `eval/<timestamp>-<model>/` as `stamp.json` (the configuration stamp plus the exact launch argv) and `results.jsonl` (one flushed append per task), so a crash loses at most one task and `--resume <RUN>` skips what that run already holds — resuming under a changed stamp is refused. `--dry-run` prints the plan and a rough wall-clock estimate as data; `--yes` pre-approves the launch confirmation; `--fixture` supplies graded probes from your own TOML (there is deliberately no compiled-in fixture). |
 | `capability bench --codebase <PATH>` | The repository at PATH (clean tree required) as 24 deterministic same-file infill tasks, sampled from HEAD (`[bench] codebase_tasks`), run through `/infill`, graded on tiers 1–5 (exact, edit similarity, identifier F1, parse, repo-symbol existence); tiers 6–7 and cross-file context are slice B. Masks are boundary-scanned, not AST, and the report says so. A model without FIM tokens is N/A, never zero. Given without `--suite`, the codebase corpus is the whole run — the throughput sweep does not come along. |
 | `capability compare <A> <B>` | Compare two stored bench runs, named by run id under `eval/` or by run directory. **Same environment only**: it refuses on the FIRST differing stamp field and names it, because llama.cpp does not promise bit-identical results across configurations. The subject fields (`weights_revision`, `quant`) are exempt — they are what is being compared — and a differing task set always refuses. `no significant difference` is a first-class printed outcome, never resolved into a winner. |
-| `pull <spec> [--name N] [--dry-run] [--model-loc DIR] [--license-url URL]` | Resolve revision, download (or adopt) quant-matching files, snapshot license + provenance, register. Idempotent: same spec+revision is a verified no-op; a NEW revision downloads but never repoints (that is `update`'s gated job). |
+| `pull <spec> [--name N] [--dry-run] [--model-loc DIR] [--license-url URL]` | Resolve revision, download (or adopt) quant-matching files, snapshot license + provenance, register. Shows a per-shard progress line on stderr (bytes, percent, rate, ETA) and resumes a partial shard from its `.part` with an HTTP `Range` request, size-verified before it is renamed into place. Idempotent: same spec+revision is a verified no-op; a NEW revision downloads but never repoints (that is `update`'s gated job). |
 | `list` | Table: active marker, name, quant, size on disk, revision. |
 | `use <name>` | Set the active model. Never auto-restarts — prints the restart hint. |
 | `rm <name> [--yes]` | Remove a model and its files. Confirmation required; refuses the active or currently running model. |
@@ -250,9 +250,18 @@ what would be downloaded; `--license-url` points the license snapshot at a
 non-standard location when the repo keeps it elsewhere.
 
 `--dry-run` prints the shard list with each file's byte size and the directory
-they would land in, and registers nothing. There is **no resume of a partial
-shard**: a download interrupted mid-file starts that file again from zero
-(finished shards are kept), which matters when a single shard is 40 GB.
+they would land in, and registers nothing. A download **resumes a partial
+shard**: each in-flight shard is written to a `.part` sibling, and the next
+`chekov pull` asks the hub for the rest of it with an HTTP `Range` request
+instead of starting the file again — which matters when a single shard is
+40 GB. The resumed bytes are checked before they are appended (the server has
+to answer `206` at exactly the offset already on disk, for a file of the size
+the API published) and the finished `.part` is checked against that size again
+before it is renamed into place: a short file is never renamed, and its `.part`
+is kept for the next run. A `.part` longer than the file can be is discarded
+rather than appended to. While a shard is in flight, a progress line — shard
+number, bytes, percent, rate, ETA — is written to **stderr**, so `chekov pull >
+log` keeps its one-line-per-shard stdout unchanged.
 
 **Which repo layouts `pull` reads.** The quant tag is matched against three
 shapes, and a repo only has to use one of them:

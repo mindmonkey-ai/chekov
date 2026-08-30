@@ -6,6 +6,7 @@
 
 use serde::Deserialize;
 
+use crate::core::progress::{CountingReader, Progress, Shard, Sink, format_size};
 use crate::core::pullspec::RepoId;
 use crate::error::ChekovError;
 
@@ -387,27 +388,254 @@ pub fn link_verified(
     Ok(true)
 }
 
+/// What to do with a `.part` once the server has answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeAction {
+    /// Keep the existing bytes and write after them.
+    Append,
+    /// Truncate and write from zero — the server is sending the whole file.
+    Restart,
+}
+
+/// The server's answer to a resume attempt, as the numbers that decide it.
+/// Bundled because §3.4 caps `resume_action` at three arguments.
+#[derive(Debug, Clone, Copy)]
+pub struct RangeAnswer<'a> {
+    /// Bytes already on disk in the `.part`.
+    pub part_len: u64,
+    pub status: u16,
+    pub content_range: Option<&'a str>,
+    /// The API's byte size for the file, when it published one.
+    pub expected: Option<u64>,
+}
+
+/// Decide whether a resumed transfer may append. Pure, so every arm is tested
+/// without a network.
+///
+/// Refuses rather than guesses: writing at the wrong offset would corrupt a
+/// shard silently, which no later size check would catch.
+pub fn resume_action(answer: &RangeAnswer<'_>) -> Result<ResumeAction, String> {
+    match (answer.status, answer.expected) {
+        (206, _) => appendable(answer),
+        // 200: the server sent the whole file instead of the tail, so the
+        // part is worthless but the transfer is fine. 416 with no published
+        // size: the part may simply be the whole file — start over and find
+        // out, because there is no number to check it against.
+        (200, _) | (416, None) => Ok(ResumeAction::Restart),
+        // A 416 for a range that starts inside a file the API says is longer
+        // means the server's copy is not the copy that was planned.
+        (416, Some(total)) => Err(format!(
+            "server answered 416 to bytes={}- but the repo lists {total} bytes — \
+             the server's file is not the one the plan was built from",
+            answer.part_len
+        )),
+        (status, _) => Err(format!(
+            "server answered {status} to bytes={}-",
+            answer.part_len
+        )),
+    }
+}
+
+/// The 206 arm: append only when the tail starts exactly where the `.part`
+/// ends and describes the file the plan expects.
+fn appendable(answer: &RangeAnswer<'_>) -> Result<ResumeAction, String> {
+    let Some(header) = answer.content_range else {
+        return Err(format!(
+            "server answered 206 to bytes={}- without a content-range header",
+            answer.part_len
+        ));
+    };
+    let Some((start, total)) = parse_content_range(header) else {
+        return Err(format!(
+            "server answered 206 to bytes={}- with an unreadable content-range {header:?}",
+            answer.part_len
+        ));
+    };
+    let expected = answer.expected.unwrap_or(total);
+    if start != answer.part_len || total != expected {
+        return Err(format!(
+            "server answered 206 as bytes {start}-/{total} for a {}-byte partial file of an \
+             expected {expected} bytes — refusing to write at the wrong offset",
+            answer.part_len
+        ));
+    }
+    Ok(ResumeAction::Append)
+}
+
+/// `bytes 100-199/200` → `(100, 200)`. `None` for `*` totals and anything
+/// else the header may carry.
+fn parse_content_range(header: &str) -> Option<(u64, u64)> {
+    let (range, total) = header.trim().strip_prefix("bytes ")?.split_once('/')?;
+    let (start, _end) = range.split_once('-')?;
+    Some((start.trim().parse().ok()?, total.trim().parse().ok()?))
+}
+
+/// GET `url`, asking only for the tail when `from` is past zero.
+///
+/// `http_status_as_error(false)` so a 416 or a 200-instead-of-206 reaches
+/// `resume_action` as a number to classify rather than as an opaque failure.
+fn send(url: &str, from: u64) -> Result<ureq::http::Response<ureq::Body>, ChekovError> {
+    let mut request = ureq::get(url).config().http_status_as_error(false).build();
+    if from > 0 {
+        request = request.header("Range", &format!("bytes={from}-"));
+    }
+    request.call().map_err(|e| ChekovError::HubRequestFailed {
+        url: url.to_owned(),
+        reason: e.to_string(),
+    })
+}
+
+/// Classify the answer: `Restart` writes the `.part` from zero, `Append`
+/// continues it. A fresh download only ever accepts a 200.
+fn decide(
+    res: &ureq::http::Response<ureq::Body>,
+    url: &str,
+    progress: &Progress,
+) -> Result<ResumeAction, ChekovError> {
+    let status = res.status().as_u16();
+    let refused = |reason: String| ChekovError::HubRequestFailed {
+        url: url.to_owned(),
+        reason,
+    };
+    let from = progress.resumed_from();
+    if from == 0 {
+        return if status == 200 {
+            Ok(ResumeAction::Restart)
+        } else {
+            Err(refused(format!("server answered {status}")))
+        };
+    }
+    let answer = RangeAnswer {
+        part_len: from,
+        status,
+        content_range: res
+            .headers()
+            .get("content-range")
+            .and_then(|v| v.to_str().ok()),
+        expected: progress.total(),
+    };
+    resume_action(&answer).map_err(refused)
+}
+
+/// Copy the body into the `.part` — appending when the shard resumed —
+/// reporting bytes on stderr as they land. Returns the part's new length.
+fn stream(
+    part: &std::path::Path,
+    res: ureq::http::Response<ureq::Body>,
+    progress: &mut Progress,
+) -> Result<u64, ChekovError> {
+    let from = progress.resumed_from();
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(from > 0)
+        .truncate(from == 0)
+        .open(part)
+        .map_err(|e| ChekovError::io(format!("opening {}", part.display()), e))?;
+    let mut screen = std::io::stderr();
+    let mut reader = CountingReader::new(res.into_body().into_reader(), from, |done| {
+        drop(progress.emit(&mut screen, done));
+    });
+    let copied = std::io::copy(&mut reader, &mut out)
+        .map_err(|e| ChekovError::io(format!("writing {}", part.display()), e))?;
+    drop(reader);
+    drop(progress.finish(&mut screen, from + copied));
+    out.sync_all()
+        .map_err(|e| ChekovError::io(format!("flushing {}", part.display()), e))?;
+    Ok(from + copied)
+}
+
 /// Stream one file to `dest`, via a `.part` sibling so an interrupted transfer
 /// never leaves a short file that `file_matches` would have to catch later.
 ///
 /// Network path — exercised only by real pulls, never by tests (prompt §2.4).
-fn fetch_to(url: &str, dest: &std::path::Path) -> Result<(), ChekovError> {
+fn fetch_to(url: &str, dest: &std::path::Path, progress: &mut Progress) -> Result<(), ChekovError> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| ChekovError::io(format!("creating {}", parent.display()), e))?;
     }
-    let res = ureq::get(url)
-        .call()
-        .map_err(|e| ChekovError::io(format!("requesting {url}"), std::io::Error::other(e)))?;
     let part = dest.with_extension("part");
-    let mut out = std::fs::File::create(&part)
-        .map_err(|e| ChekovError::io(format!("creating {}", part.display()), e))?;
-    std::io::copy(&mut res.into_body().into_reader(), &mut out)
-        .map_err(|e| ChekovError::io(format!("writing {}", part.display()), e))?;
-    out.sync_all()
+    let res = send(url, progress.resumed_from())?;
+    if decide(&res, url, progress)? == ResumeAction::Restart && progress.resumed_from() > 0 {
+        eprintln!(
+            "server ignored Range — restarting {} from zero",
+            progress.label()
+        );
+        progress.restart();
+    }
+    let written = stream(&part, res, progress)?;
+    verify_length(written, progress.total()).map_err(|reason| ChekovError::HubRequestFailed {
+        url: url.to_owned(),
+        reason,
+    })?;
+    finalize(&part, dest)
+}
+
+/// A shard that ended short of its published size is never renamed into
+/// place; the `.part` stays so the next run resumes it.
+fn verify_length(written: u64, expected: Option<u64>) -> Result<(), String> {
+    let Some(expected) = expected.filter(|expected| *expected != written) else {
+        return Ok(());
+    };
+    Err(format!(
+        "transfer ended at {written} bytes but the repo lists {expected} — \
+         the partial file is kept so the next run can resume it"
+    ))
+}
+
+/// fsync the finished `.part` and move it onto the real name.
+fn finalize(part: &std::path::Path, dest: &std::path::Path) -> Result<(), ChekovError> {
+    std::fs::File::open(part)
+        .and_then(|handle| handle.sync_all())
         .map_err(|e| ChekovError::io(format!("flushing {}", part.display()), e))?;
-    std::fs::rename(&part, dest)
+    std::fs::rename(part, dest)
         .map_err(|e| ChekovError::io(format!("renaming {} into place", part.display()), e))
+}
+
+/// How many bytes of `part` may be resumed. Zero when there is none, and zero
+/// after discarding one longer than the file can be — a corrupt part is never
+/// kept and never appended to.
+fn prepare_part(
+    part: &std::path::Path,
+    total: Option<u64>,
+    label: &str,
+) -> Result<u64, ChekovError> {
+    let part_len = std::fs::metadata(part).map_or(0, |meta| meta.len());
+    if let Some(total) = total
+        && part_len > total
+    {
+        eprintln!(
+            "{label}: partial file is {part_len} bytes but the repo lists {total} — \
+             discarding it and starting from zero"
+        );
+        std::fs::remove_file(part)
+            .map_err(|e| ChekovError::io(format!("removing {}", part.display()), e))?;
+        return Ok(0);
+    }
+    Ok(part_len)
+}
+
+/// Fetch one shard: finish a complete `.part`, resume a partial one, or start
+/// fresh — announcing which on stdout before the stderr progress begins.
+fn download_shard(spec: &DownloadSpec<'_>, shard: Shard, sink: Sink) -> Result<(), ChekovError> {
+    let target = spec.dest.join(&shard.label);
+    let part = target.with_extension("part");
+    let resume_at = prepare_part(&part, shard.total, &shard.label)?;
+    if shard.total == Some(resume_at) {
+        println!("{} already complete — finishing", shard.label);
+        return finalize(&part, &target);
+    }
+    if resume_at > 0 {
+        println!(
+            "downloading {} … (resuming at {})",
+            shard.label,
+            format_size(resume_at)
+        );
+    } else {
+        println!("downloading {} …", shard.label);
+    }
+    let url = resolve_url(spec.repo, spec.revision, &shard.label);
+    fetch_to(&url, &target, &mut Progress::new(shard, resume_at, sink))
 }
 
 /// The revision-pinned download URL for one file.
@@ -430,7 +658,8 @@ pub fn download_plan(spec: &DownloadSpec<'_>, plan: &PullPlan) -> Result<(), Che
     if !spec.repo.contains('/') {
         return Err(failed("repo id is missing the org/ prefix".to_owned()));
     }
-    for file in &plan.files {
+    let sink = Sink::for_stderr();
+    for (index, file) in plan.files.iter().enumerate() {
         let target = spec.dest.join(&file.path);
         if file_matches(&target, file.size) {
             println!("{} already present (size verified) — skipping", file.path);
@@ -443,9 +672,13 @@ pub fn download_plan(spec: &DownloadSpec<'_>, plan: &PullPlan) -> Result<(), Che
             );
             continue;
         }
-        println!("downloading {} …", file.path);
-        fetch_to(&resolve_url(spec.repo, spec.revision, &file.path), &target)
-            .map_err(|e| failed(format!("{}: {e}", file.path)))?;
+        let shard = Shard {
+            index: index + 1,
+            count: plan.files.len(),
+            label: file.path.clone(),
+            total: file.size,
+        };
+        download_shard(spec, shard, sink).map_err(|e| failed(format!("{}: {e}", file.path)))?;
     }
     Ok(())
 }
@@ -495,7 +728,140 @@ fn strip_shard_suffix(stem: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_url;
+    use super::{RangeAnswer, ResumeAction, resolve_url, resume_action};
+
+    /// A resume of a 100-byte `.part` of a 200-byte file, answered as asked.
+    fn answered(status: u16, content_range: Option<&str>) -> RangeAnswer<'_> {
+        RangeAnswer {
+            part_len: 100,
+            status,
+            content_range,
+            expected: Some(200),
+        }
+    }
+
+    #[test]
+    fn a_206_at_the_expected_offset_appends() {
+        let answer = answered(206, Some("bytes 100-199/200"));
+        assert_eq!(resume_action(&answer), Ok(ResumeAction::Append));
+    }
+
+    #[test]
+    fn a_206_without_a_known_size_appends_on_the_offset_alone() {
+        let answer = RangeAnswer {
+            expected: None,
+            ..answered(206, Some("bytes 100-199/200"))
+        };
+        assert_eq!(resume_action(&answer), Ok(ResumeAction::Append));
+    }
+
+    #[test]
+    fn a_206_at_the_wrong_offset_names_all_three_numbers() {
+        let answer = answered(206, Some("bytes 40-199/200"));
+        let reason = resume_action(&answer).unwrap_err();
+        for number in ["100", "40", "200"] {
+            assert!(reason.contains(number), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_206_over_a_different_total_names_all_three_numbers() {
+        let answer = answered(206, Some("bytes 100-998/999"));
+        let reason = resume_action(&answer).unwrap_err();
+        for number in ["100", "999", "200"] {
+            assert!(reason.contains(number), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_206_without_a_content_range_is_refused() {
+        let reason = resume_action(&answered(206, None)).unwrap_err();
+        assert!(reason.contains("content-range"), "{reason}");
+    }
+
+    #[test]
+    fn a_200_means_the_server_ignored_the_range_and_restarts() {
+        let answer = answered(200, None);
+        assert_eq!(resume_action(&answer), Ok(ResumeAction::Restart));
+    }
+
+    #[test]
+    fn a_416_restarts_only_when_no_size_was_published() {
+        let answer = RangeAnswer {
+            expected: None,
+            ..answered(416, None)
+        };
+        assert_eq!(resume_action(&answer), Ok(ResumeAction::Restart));
+    }
+
+    #[test]
+    fn a_416_against_a_published_size_is_refused() {
+        let reason = resume_action(&answered(416, None)).unwrap_err();
+        assert!(reason.contains("416"), "{reason}");
+        assert!(reason.contains("200"), "{reason}");
+    }
+
+    #[test]
+    fn any_other_status_is_refused_by_name() {
+        let reason = resume_action(&answered(503, None)).unwrap_err();
+        assert!(reason.contains("503"), "{reason}");
+    }
+
+    /// A scratch directory holding one `.part` of `len` bytes.
+    fn scratch_part(name: &str, len: usize) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("chekov-test-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let part = dir.join("shard.part");
+        std::fs::write(&part, vec![7u8; len]).expect("write");
+        part
+    }
+
+    #[test]
+    fn a_partial_file_is_resumed_from_its_current_length() {
+        let part = scratch_part("resume-partial", 40);
+        assert_eq!(
+            super::prepare_part(&part, Some(100), "shard.gguf").expect("prepare"),
+            40
+        );
+        assert!(part.exists(), "a resumable part is kept");
+    }
+
+    #[test]
+    fn a_missing_part_resumes_from_zero() {
+        let part = scratch_part("resume-missing", 0);
+        std::fs::remove_file(&part).expect("remove");
+        assert_eq!(
+            super::prepare_part(&part, Some(100), "shard.gguf").expect("prepare"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_part_longer_than_the_file_is_discarded_not_appended_to() {
+        let part = scratch_part("resume-overlong", 140);
+        assert_eq!(
+            super::prepare_part(&part, Some(100), "shard.gguf").expect("prepare"),
+            0
+        );
+        assert!(!part.exists(), "a corrupt part is never kept");
+    }
+
+    #[test]
+    fn a_short_transfer_is_refused_with_both_numbers() {
+        let reason = super::verify_length(90, Some(100)).unwrap_err();
+        assert!(reason.contains("90") && reason.contains("100"), "{reason}");
+        assert!(super::verify_length(100, Some(100)).is_ok());
+        assert!(super::verify_length(90, None).is_ok());
+    }
+
+    #[test]
+    fn a_complete_part_is_renamed_into_place() {
+        let part = scratch_part("resume-complete", 100);
+        let dest = part.with_extension("gguf");
+        super::finalize(&part, &dest).expect("finalize");
+        assert!(!part.exists() && dest.exists());
+    }
 
     #[test]
     fn a_download_url_pins_the_revision_not_main() {

@@ -21,6 +21,29 @@ All notable changes to chekov are recorded here. The format follows
   only on a real refusal now, never on a dead socket.
 
 ### Added
+- `chekov pull` shows a per-shard progress line while a file is in flight:
+  `  shard 2/5  12.3 / 39.9 GB  31%  97 MiB/s  ETA 4m29s`, with the rate
+  measured over the last five seconds so a stall shows up as it happens
+  rather than being averaged away. It goes to **stderr** and stdout is
+  untouched, so a script still reads one line per shard. On a terminal the
+  line is redrawn in place and padded so no tail of a longer line survives;
+  when stderr is redirected it becomes one plain line per 10% plus a final
+  one, because a log file has no use for carriage returns. A resumed shard
+  says where it picked up. Before this, a 40 GB shard was a silent hour.
+- `chekov pull` resumes a partial shard instead of starting the file again.
+  Each transfer already went to a `.part` sibling; now the next run asks for
+  the rest of it with `Range: bytes=<n>-`. The bytes are checked before any
+  of them are written: a `206` must start at exactly the offset already on
+  disk and describe a file of the size the API published, or the shard is
+  refused with all three numbers named — writing at the wrong offset would
+  corrupt a shard that no later size check could catch. A `200` means the
+  server ignored the range, so the `.part` is truncated and restarted from
+  zero and says so; a `416` restarts only when no size was published, and is
+  refused against a known size, because that means the server's file is not
+  the one the plan was built from. A `.part` longer than the file can be is
+  discarded rather than appended to. When the stream ends, the part's length
+  is compared to the published size once more: a short file is never renamed
+  into place, and its `.part` is kept so the next run can resume it.
 - `capability graph --svg` under `--metric tok-s` draws the measured
   throughput: a "decode tok/s (measured)" panel under the grid, on the grid's
   own ctx columns, with a filled dot at each measured cell's decode median, a

@@ -11,6 +11,7 @@ pub mod hub;
 pub mod launch;
 pub mod machine;
 pub mod plugins;
+pub mod progress;
 pub mod proxy;
 pub mod pullspec;
 pub mod recommend;
