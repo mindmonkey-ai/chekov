@@ -2976,17 +2976,21 @@ mod tests {
             .chain(disagreement_and_skip())
     }
 
-    /// Six `function_body` crossings plus the verdicts `judge_verdicts`
-    /// describes.
-    ///
-    /// Every call gets its own scratch directory — three tests call this
-    /// helper, and `cargo test` runs them concurrently.
-    fn judged_run() -> RunLog {
-        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let eval = scratch(&format!("judged-report-{n}"));
-        let mut head = head();
-        head.stamp.judge = Some(JudgeStamp {
+    /// Three `function_body` crossings, all skipped for the same off-schema
+    /// reason — no order of either crossing was ever answered.
+    fn all_skipped_verdicts() -> [JudgeFixture<'static>; 3] {
+        ["fb-1", "fb-2", "fb-3"].map(|id| JudgeFixture {
+            id,
+            equivalent: None,
+            gold_first: None,
+            prediction_first: None,
+            decided_by: DecidedBy::Skipped,
+            skipped: Some("reply truncated at 512 tokens"),
+        })
+    }
+
+    fn judge_stamp() -> JudgeStamp {
+        JudgeStamp {
             model: "gpt-oss-20b".into(),
             quant: "F16".into(),
             revision: "1a2b3c4d5e6f".into(),
@@ -2995,9 +2999,24 @@ mod tests {
             max_tokens: 512,
             reasoning_effort: "low".into(),
             min_consistency_pct: 70,
-        });
+        }
+    }
+
+    /// A `function_body` run whose crossings are named by `ids`, judged by
+    /// `verdicts`. Every call gets its own scratch directory — several tests
+    /// build one of these, and `cargo test` runs them concurrently.
+    fn judged_run_with(
+        scratch_name: &str,
+        ids: &[&'static str],
+        verdicts: impl Iterator<Item = JudgeFixture<'static>>,
+    ) -> RunLog {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let eval = scratch(&format!("{scratch_name}-{n}"));
+        let mut head = head();
+        head.stamp.judge = Some(judge_stamp());
         let mut writer = RunWriter::create(&eval, "r-judged-report", &head).expect("create");
-        for id in ["fb-1", "fb-2", "fb-3", "fb-4", "fb-5", "fb-6"] {
+        for &id in ids {
             writer
                 .append(codebase_task(CodebaseFixture {
                     id,
@@ -3007,10 +3026,29 @@ mod tests {
                 }))
                 .expect("append");
         }
-        for fixture in judge_verdicts() {
+        for fixture in verdicts {
             writer.append(judge_verdict(fixture)).expect("append");
         }
         RunLog::load(writer.dir()).expect("load")
+    }
+
+    /// Six `function_body` crossings plus the verdicts `judge_verdicts`
+    /// describes.
+    fn judged_run() -> RunLog {
+        judged_run_with(
+            "judged-report",
+            &["fb-1", "fb-2", "fb-3", "fb-4", "fb-5", "fb-6"],
+            judge_verdicts(),
+        )
+    }
+
+    /// Three `function_body` crossings, every one of them skipped.
+    fn all_skipped_judged_run() -> RunLog {
+        judged_run_with(
+            "all-skipped-report",
+            &["fb-1", "fb-2", "fb-3"],
+            all_skipped_verdicts().into_iter(),
+        )
     }
 
     /// A plain codebase run: no `--judge` given at all.
@@ -3069,6 +3107,26 @@ mod tests {
         assert!(
             out.contains(
                 "             judge: 0 of 6 crossings judged — resume with --judge gpt-oss-20b\n"
+            ),
+            "{out}"
+        );
+    }
+
+    /// A judge that never got an answered order still names a rate — `n/a`,
+    /// not a zero it never measured, and no `(k of n)` for a denominator
+    /// of zero.
+    #[test]
+    fn an_all_skipped_judge_run_renders_n_a_not_a_number() {
+        let out = render_codebase(&all_skipped_judged_run());
+        assert!(
+            out.contains("equiv n/a (0 judged of 3; 0 undecided)"),
+            "{out}"
+        );
+        assert!(out.contains("swap consistency n/a\n"), "{out}");
+        assert!(
+            out.contains(
+                "             judge: 0 identical, 0 called, 0 undecided, 3 skipped; 0.0 s \
+                 median per verdict\n"
             ),
             "{out}"
         );
