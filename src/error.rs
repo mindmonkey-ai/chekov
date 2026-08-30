@@ -547,4 +547,31 @@ mod tests {
             "limits missing in: {msg}"
         );
     }
+
+    #[test]
+    fn the_judge_refusals_name_the_remedy() {
+        let no_role = ChekovError::JudgeNoRole {
+            name: "gemma-3-12b-it".into(),
+        }
+        .to_string();
+        assert!(
+            no_role.contains("add `role = \"judge\"` to its entry"),
+            "{no_role}"
+        );
+        let family = ChekovError::JudgeFamilyConflict {
+            judge: "qwen3.8-27b".into(),
+            candidate: "ornith-1.5-35b-a3b".into(),
+            family: "qwen35".into(),
+        }
+        .to_string();
+        assert!(
+            family.contains("qwen35") && family.contains("ornith-1.5-35b-a3b"),
+            "{family}"
+        );
+        let server = ChekovError::JudgeNeedsTheServer.to_string();
+        assert!(
+            server.contains("bench never stops a server it did not start; stop it or drop --judge"),
+            "{server}"
+        );
+    }
 }
