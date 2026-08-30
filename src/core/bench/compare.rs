@@ -688,17 +688,11 @@ impl LiftTier {
     }
 }
 
-/// A cross-file task's id without its arm suffix — the two arms are one task.
-fn base_id(task_id: &str) -> &str {
-    task_id
-        .strip_suffix(crate::core::bench::codebase::ARM_EXTRA_SUFFIX)
-        .unwrap_or(task_id)
-}
-
 /// The cross-file rows one run answered, keyed by task: the arms it has.
 fn arms_of(
     log: &RunLog,
 ) -> std::collections::BTreeMap<&str, (Option<&CodebaseRow>, Option<&CodebaseRow>)> {
+    use crate::core::bench::codebase::base_id;
     use crate::core::bench::codebase::run::WITH_EXTRA;
     let mut arms: std::collections::BTreeMap<&str, (Option<&CodebaseRow>, Option<&CodebaseRow>)> =
         std::collections::BTreeMap::new();

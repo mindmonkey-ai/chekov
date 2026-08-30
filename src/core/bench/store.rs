@@ -948,12 +948,7 @@ fn is_cross(row: &TaskRow) -> bool {
         .is_some_and(|c| c.tier == TaskTier::CrossFileFirst)
 }
 
-/// A cross-file task's id without its arm suffix — the two arms are one task.
-fn base_id(task_id: &str) -> &str {
-    task_id
-        .strip_suffix(crate::core::bench::codebase::ARM_EXTRA_SUFFIX)
-        .unwrap_or(task_id)
-}
+use crate::core::bench::codebase::base_id;
 
 /// Distinct tasks behind these rows: the header counts tasks, the crossings
 /// count is `rows.len()`.
