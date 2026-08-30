@@ -124,14 +124,23 @@ call sites — are sampled from `HEAD` (`[bench] codebase_tasks` in
 detached worktree, so the benchmark never touches uncommitted changes or the
 branch you're on — with work in progress, bench a clone rather than the copy
 you are editing. Six of the 24 tasks are `cross_file_first`: the mask is the
-first use in a file of a symbol defined in exactly one other file, and each
+first use in a file of a symbol declared in exactly one other file, and each
 is crossed twice — once with nothing but its own file, once with the
 defining file sent as llama.cpp's `input_extra` (capped at 32 KiB, windowed
 on the declaration line when the file is larger, and the row records which).
-The report prints both arms and the `context lift` between them over the
-tasks answered in both, which is the measurement this mode exists for. A
-name declared in two or more files is ambiguous and never masked, and the
-shortfall line says how many were skipped. Only tiers 1–5 are scored; tiers
+The pairing is **textual, not resolved**: chekov is not a compiler, so it
+matches a declaration name against a call shape, and — since 2026-08-30 —
+requires the calling file to name the defining file's module, in a `use`
+statement or before a `::`. Without that second condition a bare `x.next()`
+matched whichever file happened to declare `fn next`. So the `context lift`
+measures what the defining file buys on tasks where the calling file already
+imports it; it is not a claim that the symbol is unrecoverable otherwise.
+Tiers 1–4 score the first `gold_lines` lines of each fill: `n_predict` is
+generous, and a model that answers a one-line span and then keeps writing
+should be graded on the answer, not on the token budget. Tier 5 reads the
+whole prediction. A name declared in two or more files is ambiguous and
+never masked, a name whose defining module the file never mentions is not a
+candidate, and the shortfall line counts both. Only tiers 1–5 are scored; tiers
 6–7 (compile gate, covering test) are deferred to slice B2 behind
 `--allow-exec`. Because the task set now includes the new tier's ids, its
 hash — and so `corpus_id` changed: runs recorded before this are not

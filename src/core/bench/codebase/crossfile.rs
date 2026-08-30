@@ -1,9 +1,13 @@
 //! Cross-file first-use tasks (slice B1 §3).
 //!
 //! One index of every declaration in the repository, then per file the first
-//! call-shaped use of a name declared in exactly one OTHER file. That span is
-//! the mask: a model that has not read the other file cannot recover the
-//! signature, and one that has can.
+//! call-shaped use of a name declared in exactly one OTHER file — a file this
+//! one names, in a `use` statement or before a `::`. That span is the mask.
+//!
+//! The pairing is textual, not resolved: no compiler runs here, so what the
+//! two arms measure is what the defining file buys a model on a call site
+//! whose file already imports it — not that the symbol is unrecoverable
+//! without it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;

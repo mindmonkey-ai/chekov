@@ -54,6 +54,23 @@ All notable changes to chekov are recorded here. The format follows
   ids, any repository that yields cross-file tasks gets a new `corpus_id`:
   runs recorded before this slice are not comparable with runs after it, and
   `compare` refuses them by that field, as it should.
+
+  Two rules were tightened before the slice shipped, and both change numbers.
+  **Precision:** a candidate's defining file is accepted only when the calling
+  file names that file's module — in a `use` statement, or before a `::`. Name
+  alone matched a bare `x.next()` to whichever file declared `fn next`, which
+  is not a file the caller reads; `mod` also left the index, since a module
+  declares a file rather than a callable symbol, and the declaration scans now
+  run over literal-blanked text so `/// the fn build` is prose. The skipped
+  names are counted in the tier's shortfall. **Scoring:** tiers 1–4 grade the
+  prediction trimmed to the gold's line count. `n_predict` is 36 tokens per
+  gold line floored at 64, so a model that answered a one-line span correctly
+  and then wrote on was being graded on the run-on — the token budget, not the
+  answer. Tier 5 still reads the whole prediction. Stored predictions are
+  untouched, so this changes the rendered `in_file`, `function_body` and
+  cross-file numbers of runs **already on disk**: the report recomputes tiers
+  1–4 from stored text, and its header now says
+  `tiers 1-4 score the first gold_lines lines of each fill`.
 - `chekov pull` shows a per-shard progress line while a file is in flight:
   `  shard 2/5  12.3 / 39.9 GB  31%  97 MiB/s  ETA 4m29s`, with the rate
   measured over the last five seconds so a stall shows up as it happens

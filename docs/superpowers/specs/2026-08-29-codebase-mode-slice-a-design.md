@@ -218,6 +218,17 @@ each ≤ 40 lines, each reported separately, never collapsed:
 Tiers 6 and 7 are recorded on every task as `skipped: slice B
 (--allow-exec)` — reported, never Pass.
 
+> Amended 2026-08-30 (slice B1's fix wave, spec
+> `2026-08-29-codebase-mode-slice-b1-design.md` §6): tiers 1–4 score the
+> prediction **trimmed to the gold's line count** — the first
+> `gold.lines().count()` lines of the fill, ending the way the gold ends.
+> `n_predict` is `max(64, 36 × gold_lines)`, so a model that reproduced a
+> one-line gold and then kept writing was graded on the run-on rather than on
+> the answer. Tier 5 keeps the whole prediction. Stored predictions are
+> untouched and the report recomputes, so the `in_file` and `function_body`
+> numbers of runs already on disk are rendered differently from now on; the
+> report header says `tiers 1-4 score the first gold_lines lines of each fill`.
+
 ## 7. Storage and report
 
 New suite `codebase`. One `TaskRow` per task; `Measure` carries the timings;

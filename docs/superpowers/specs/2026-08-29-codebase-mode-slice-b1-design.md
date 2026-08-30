@@ -75,6 +75,24 @@ In file F, walking F's `in_file` spans in byte order, a span S is a candidate fo
    uses `name` in a call shape. The first use is found by scanning F's text once
    per name, literal-aware.
 
+> Amended 2026-08-30: two changes, both narrowing the candidate set.
+>
+> 5. F must **refer to G's module**. G's module stem is its file stem, or the
+>    parent directory name for `mod.rs`, `lib.rs` and `main.rs`
+>    (`src/core/bench/store.rs` → `store`; `src/agents/mod.rs` → `agents`).
+>    F refers to it when the stem appears as an identifier inside one of F's
+>    `use` statements, or immediately before a `::` anywhere else in F's
+>    literal-blanked text. A G that F never names is not a candidate: rule 1
+>    alone matched a bare `x.next()` to whichever file happened to declare
+>    `fn next`, and that file says nothing about the call. The skipped names
+>    are counted, distinct, and reported in the shortfall as
+>    `n names skipped (no import of the defining module)`.
+>
+> `mod` leaves the index (§3.1): a module declaration names a file, not a
+> callable symbol. Tier 5's declaration list is unchanged. Both declaration
+> scans — `Index::build` and the window's `declaration_offset` — run over
+> literal-blanked text, so `/// the fn build …` declares nothing.
+
 A span may first-use several names; it yields **one** task, keyed on the name
 whose first use appears earliest in S, with the others recorded on the task as
 `also_first_uses` (informational, in the row). One candidate per (F, name).
@@ -144,6 +162,17 @@ Tiers 1–5 as in slice A, for every arm. One change: tier 5's `Known.context` f
 exist for it. The **without** arm scores against `prefix + suffix` only. Tiers 6–7
 remain `Skipped("slice B2 (--allow-exec)")`.
 
+> Amended 2026-08-30: tiers 1–4 score the prediction **trimmed to the gold's
+> line count** — the first `gold.lines().count()` lines of the fill, ending
+> the way the gold ends. `n_predict` is `max(64, 36 × gold_lines)`, so a model
+> that reproduced a one-line gold and then wrote the rest of the function was
+> graded on the run-on: the token budget, not the answer. Tier 5 keeps the
+> whole prediction — what it asks is which identifiers the model emitted.
+> The trim lives in `ladder::stored_tier`, so the run and the recompute agree.
+> Stored predictions are untouched, and the report recomputes, so the rendered
+> `in_file`, `function_body` and cross-file numbers of runs already on disk
+> change. The header says so (§7.2).
+
 ## 7. Storage and report
 
 ### 7.1 Row
@@ -163,6 +192,20 @@ pub struct ExtraFile { pub path: String, pub bytes: u64, pub truncated: bool }
 `CrossFileFirst` (serde `cross_file_first`); `deny_unknown_fields` stays on
 `CodebaseRow` — the new fields are additions, and an unknown field is still a
 schema error.
+
+> Amended 2026-08-30: `CodebaseRow` gains two more `#[serde(default)]` fields,
+> and `CodebaseTask` the first of them.
+>
+> ```rust
+> pub name: Option<String>,     // the symbol the crossing is keyed on
+> pub n_predict: Option<u32>,   // the budget this crossing actually sent
+> ```
+>
+> `name` is what makes a crossing auditable — which symbol the model was asked
+> to recover, beside `extra.path`, which file it came from. `n_predict` is set
+> by the run loop from `runner::n_predict_for`, the same function the wire
+> uses, so a short fill can be told from one the budget cut off. Both are
+> `None` on rows written before them, which is what they were: unrecorded.
 
 ### 7.2 Report
 
@@ -186,6 +229,23 @@ codebase     24 tasks, 30 crossings, from 19 files (12 in_file, 6 function_body,
   the header says `0 cross_file_first` with the shortfall reason on its own line.
 - Tier 5 stays labelled `(scored at run time)`. Recompute-on-read for tiers 1–4 is
   unchanged for every arm — the stored prefix/suffix/gold are the same text.
+
+> Amended 2026-08-30: three wording changes.
+>
+> - The `context:` sentence ends `; tiers 1-4 score the first gold_lines lines
+>   of each fill` (§6, amended), before the elision and exclusion clauses.
+> - `none sampled` is decided from the run's **own rows**, not from the rows
+>   that survived the unavailable filter. A lane that was sampled and whose
+>   every crossing failed prints
+>   `cross_file_first        all N crossings unavailable — <reason>`; only a
+>   run with no cross-file row at all says `none sampled`. The old line blamed
+>   the repository for the server.
+> - `excluded.cross_file` is arm-aware, built per row in
+>   `run::record_codebase_task`: the `extra` row keeps
+>   `sent <G> (<KiB>[, truncated]); withheld <k> (contain the answer)`, and
+>   the `no_extra` row reads
+>   `defining file <G> (<KiB>[, truncated]) withheld from this arm; withheld
+>   <k> (contain the answer)`. A row has to be true read on its own.
 
 ## 8. Errors and edge cases
 
