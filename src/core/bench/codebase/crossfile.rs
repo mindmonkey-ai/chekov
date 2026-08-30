@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
-use super::TaskTier;
 use super::ladder;
 use super::masker::{self, Candidate};
+use super::{ExtraFile, TaskTier};
 
 /// Where a name is declared, from the index's point of view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,9 +342,163 @@ fn statement_end(text: &str, from: usize) -> usize {
     text.len()
 }
 
+/// §4.1's cap. One file, never more, and never more than this much of it.
+pub const EXTRA_CAP: usize = 32 * 1024;
+
+/// Everything a cross-file task carries beyond its span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assembled {
+    pub extra: ExtraFile,
+    pub extra_text: String,
+    pub also_first_uses: Vec<String>,
+    pub withheld: u32,
+}
+
+/// The elided corpus, and the same texts whitespace-normalised once so rule
+/// (b) does not re-normalise every file for every task.
+pub struct Corpus<'a> {
+    pub files: &'a [(String, String)],
+    pub normalised: &'a [(String, String)],
+    /// The task's own file. It holds the gold by construction — it IS the
+    /// masked file — so it is context, not a leak, and never counts as
+    /// withheld.
+    pub task_file: &'a str,
+}
+
+/// The normalised twin of every file, in the same order.
+#[must_use]
+pub fn normalised_corpus(files: &[(String, String)]) -> Vec<(String, String)> {
+    files
+        .iter()
+        .map(|(p, t)| (p.clone(), ladder::normalise(t)))
+        .collect()
+}
+
+/// The extra file for one task: G's elided text (windowed at the cap) plus
+/// rule (b)'s count over every OTHER file.
+///
+/// `None` only when G has left the corpus, which cannot happen for a candidate
+/// the index produced — the caller treats it as "no cross-file task here"
+/// rather than sending a task with no definition.
+#[must_use]
+pub fn assemble_extra(meta: &Meta, gold: &str, corpus: &Corpus<'_>) -> Option<Assembled> {
+    let (_, text) = corpus.files.iter().find(|(p, _)| *p == meta.defined_in)?;
+    let extra_text = window(text, &meta.name);
+    Some(Assembled {
+        extra: ExtraFile {
+            path: meta.defined_in.clone(),
+            bytes: extra_text.len() as u64,
+            truncated: extra_text.len() < text.len(),
+        },
+        extra_text,
+        also_first_uses: meta.also_first_uses.clone(),
+        withheld: withheld_count(gold, &meta.defined_in, corpus),
+    })
+}
+
+/// The whole file under the cap; otherwise the 32 KiB window centred on the
+/// declaration line.
+///
+/// The start snaps outward to a line start and the end back to a line end, so
+/// the window holds whole lines only and still fits the cap — a window that
+/// grew past 32 KiB to finish a line would break the promise §4.1 makes to
+/// the context budget.
+fn window(text: &str, name: &str) -> String {
+    if text.len() <= EXTRA_CAP {
+        return text.to_owned();
+    }
+    let at = declaration_offset(text, name).unwrap_or(text.len() / 2);
+    let start = line_start_containing(text, at.saturating_sub(EXTRA_CAP / 2));
+    text[start..last_line_end_within_cap(text, start)].to_owned()
+}
+
+/// The start of the line `at` falls in. A line start is a character boundary
+/// too, so a window cut here can never split a UTF-8 character — which the
+/// raw `at − 16 KiB` offset lands in the middle of whenever the file is not
+/// pure ASCII.
+fn line_start_containing(text: &str, at: usize) -> usize {
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if at < offset + line.len() {
+            return offset;
+        }
+        offset += line.len();
+    }
+    offset
+}
+
+/// The end of the last whole line that fits in the cap, counting from `start`.
+///
+/// A single line longer than the whole cap is the one case where the line has
+/// to give: the window is cut at the last character boundary inside the cap
+/// rather than sending nothing at all.
+fn last_line_end_within_cap(text: &str, start: usize) -> usize {
+    let mut end = start;
+    for line in text[start..].split_inclusive('\n') {
+        if end + line.len() > start + EXTRA_CAP {
+            break;
+        }
+        end += line.len();
+    }
+    if end == start {
+        text.floor_char_boundary(start + EXTRA_CAP)
+    } else {
+        end
+    }
+}
+
+/// The start of the line that declares `name`, so the window is centred on
+/// the definition rather than on the middle of the file.
+fn declaration_offset(text: &str, name: &str) -> Option<usize> {
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let mut names = BTreeSet::new();
+        ladder::declaration_names(line, &mut names);
+        if names.contains(name) {
+            return Some(at);
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// Rule (b), amended for B1: every file OTHER than G and other than the
+/// masked file, whose text contains the gold verbatim (whitespace-normalised),
+/// is a verbatim answer and is withheld. G is never withheld — without the
+/// definition the tier is unanswerable.
+fn withheld_count(gold: &str, defining: &str, corpus: &Corpus<'_>) -> u32 {
+    let needle = ladder::normalise(gold);
+    if needle.is_empty() {
+        return 0;
+    }
+    let n = corpus
+        .normalised
+        .iter()
+        .filter(|(path, text)| {
+            path != defining && path != corpus.task_file && text.contains(&needle)
+        })
+        .count();
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// `excluded.cross_file` for a cross-file task: what was sent and what was
+/// kept back, in words the report can print unchanged.
+#[must_use]
+pub fn cross_file_note(a: &Assembled) -> String {
+    let truncated = if a.extra.truncated { ", truncated" } else { "" };
+    let kib = ladder::as_f64(usize::try_from(a.extra.bytes).unwrap_or(usize::MAX)) / 1024.0;
+    format!(
+        "sent {} ({kib:.1} KiB{truncated}); withheld {} (contain the answer)",
+        a.extra.path, a.withheld
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Defined, FileText, Index, first_uses};
+    use super::{
+        Assembled, Corpus, Defined, FileText, Index, Meta, assemble_extra, cross_file_note,
+        first_uses, ladder, normalised_corpus,
+    };
     use crate::core::bench::codebase::TaskTier;
     use crate::core::bench::codebase::masker::{MaskSource, RustBraceMasker};
 
@@ -510,5 +664,181 @@ mod tests {
         assert_eq!(meta.name, "build");
         assert_eq!(meta.defined_in, "src/defs.rs");
         assert_eq!(meta.also_first_uses, vec!["Widget".to_owned()]);
+    }
+
+    fn owned(files: &[(&str, &str)]) -> Vec<(String, String)> {
+        files
+            .iter()
+            .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
+            .collect()
+    }
+
+    fn assembled(files: &[(&str, &str)], gold: &str) -> Assembled {
+        let owned = owned(files);
+        let normalised = normalised_corpus(&owned);
+        let meta = Meta {
+            name: "build".into(),
+            defined_in: "src/defs.rs".into(),
+            also_first_uses: vec!["Widget".into()],
+        };
+        assemble_extra(
+            &meta,
+            gold,
+            &Corpus {
+                files: &owned,
+                normalised: &normalised,
+                task_file: "src/user.rs",
+            },
+        )
+        .expect("the defining file is in the corpus")
+    }
+
+    /// 59 bytes a line, so the fixtures below can be reasoned about in bytes.
+    fn padding(lines: usize) -> String {
+        "// padding padding padding padding padding padding padding\n".repeat(lines)
+    }
+
+    #[test]
+    fn an_under_cap_file_is_sent_whole() {
+        let a = assembled(&[("src/defs.rs", DEFS)], "let w = build(1);");
+        assert_eq!(a.extra.path, "src/defs.rs");
+        assert_eq!(a.extra.bytes, DEFS.len() as u64);
+        assert!(!a.extra.truncated);
+        assert_eq!(a.extra_text, DEFS);
+        assert_eq!(a.withheld, 0);
+        assert_eq!(
+            cross_file_note(&a),
+            format!(
+                "sent src/defs.rs ({:.1} KiB); withheld 0 (contain the answer)",
+                ladder::as_f64(DEFS.len()) / 1024.0
+            )
+        );
+    }
+
+    #[test]
+    fn an_over_cap_file_is_windowed_on_the_declaration_line() {
+        let filler = padding(1200);
+        let big = format!("{filler}pub fn build(n: u32) -> u32 {{\n    n + 1\n}}\n{filler}");
+        assert!(
+            big.len() > super::EXTRA_CAP * 2,
+            "the fixture must exceed the cap"
+        );
+        let a = assembled(&[("src/defs.rs", &big)], "let w = build(1);");
+        assert!(a.extra.truncated);
+        assert_eq!(a.extra.bytes, a.extra_text.len() as u64);
+        assert!(
+            a.extra_text.len() <= super::EXTRA_CAP,
+            "{}",
+            a.extra_text.len()
+        );
+        assert!(
+            a.extra_text.contains("pub fn build(n: u32) -> u32 {"),
+            "the window is centred on the declaration"
+        );
+        assert!(
+            a.extra_text.starts_with("// padding"),
+            "snapped to a line start"
+        );
+        assert!(a.extra_text.ends_with('\n'), "snapped to a line end");
+        assert!(
+            cross_file_note(&a).contains(", truncated)"),
+            "{}",
+            cross_file_note(&a)
+        );
+    }
+
+    #[test]
+    fn a_window_never_splits_a_character() {
+        // 58 bytes a line, its 3-byte dashes placed so that the centred
+        // window's raw start offset lands on a continuation byte.
+        let filler = format!("//{}!\n", "—".repeat(18)).repeat(600);
+        assert_eq!(filler.len(), 600 * 58);
+        let big = format!("{filler}pub fn build(n: u32) -> u32 {{\n    n + 1\n}}\n{filler}");
+        assert!(!big.is_char_boundary(filler.len() - super::EXTRA_CAP / 2));
+        let a = assembled(&[("src/defs.rs", &big)], "let w = build(1);");
+        assert!(a.extra.truncated);
+        assert!(
+            a.extra_text.len() <= super::EXTRA_CAP,
+            "{}",
+            a.extra_text.len()
+        );
+        assert!(big.contains(&a.extra_text), "the window is a slice of G");
+        assert!(a.extra_text.contains("pub fn build(n: u32) -> u32 {"));
+        assert!(a.extra_text.starts_with("//—"), "snapped to a line start");
+    }
+
+    #[test]
+    fn a_declaration_at_either_end_of_a_big_file_is_still_in_the_window() {
+        let filler = padding(1200);
+        let decl = "pub fn build(n: u32) -> u32 {\n    n + 1\n}\n";
+        let top = assembled(&[("src/defs.rs", &format!("{decl}{filler}"))], "build(1)");
+        assert!(top.extra.truncated);
+        assert!(top.extra_text.len() <= super::EXTRA_CAP);
+        assert!(
+            top.extra_text.starts_with(decl),
+            "a declaration on line 1 has nothing before it to centre on"
+        );
+
+        let last = format!("{filler}pub fn build(n: u32) -> u32 {{ n + 1 }}");
+        let end = assembled(&[("src/defs.rs", &last)], "build(1)");
+        assert!(end.extra.truncated);
+        assert!(end.extra_text.len() <= super::EXTRA_CAP);
+        assert!(
+            end.extra_text
+                .ends_with("pub fn build(n: u32) -> u32 { n + 1 }"),
+            "an unterminated last line is a whole line"
+        );
+    }
+
+    #[test]
+    fn rule_b_withholds_a_verbatim_answer_elsewhere_and_never_the_defining_file() {
+        let gold = "let w = build(1);";
+        let a = assembled(
+            &[
+                ("src/defs.rs", DEFS),
+                (
+                    "src/copy.rs",
+                    "pub fn other() {\n    let  w  =  build(1);\n}\n",
+                ),
+                ("src/unrelated.rs", "pub fn nothing() {}\n"),
+            ],
+            gold,
+        );
+        assert_eq!(a.withheld, 1, "whitespace differences do not hide a copy");
+        assert!(cross_file_note(&a).contains("withheld 1 (contain the answer)"));
+
+        let in_g = format!("{DEFS}pub fn again() {{\n    let w = build(1);\n}}\n");
+        let b = assembled(&[("src/defs.rs", &in_g)], gold);
+        assert_eq!(b.withheld, 0, "G is the definition and is never withheld");
+
+        let both = assembled(
+            &[
+                ("src/defs.rs", &in_g),
+                (
+                    "src/copy.rs",
+                    "pub fn other() {\n    let w = build(1);\n}\n",
+                ),
+            ],
+            gold,
+        );
+        assert_eq!(both.withheld, 1, "G holding the answer too adds nothing");
+
+        let masked = assembled(
+            &[
+                ("src/defs.rs", DEFS),
+                ("src/user.rs", "pub fn r() {\n    let w = build(1);\n}\n"),
+            ],
+            gold,
+        );
+        assert_eq!(
+            masked.withheld, 0,
+            "the task's own file holds the gold by construction"
+        );
+    }
+
+    #[test]
+    fn also_first_uses_ride_along() {
+        let a = assembled(&[("src/defs.rs", DEFS)], "let w = build(1);");
+        assert_eq!(a.also_first_uses, vec!["Widget".to_owned()]);
     }
 }

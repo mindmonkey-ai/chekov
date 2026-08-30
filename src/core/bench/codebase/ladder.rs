@@ -297,7 +297,10 @@ pub fn score_all(s: &Scored) -> Vec<(Tier, Score)> {
         .collect()
 }
 
-fn normalise(s: &str) -> String {
+/// Runs of whitespace collapsed to one space, trimmed. `pub(super)` because
+/// rule (b) asks whether another file contains the gold's text, and "the
+/// same code, differently indented" is the same answer.
+pub(super) fn normalise(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
