@@ -93,10 +93,13 @@ fn footprint_gate(
             Ok(())
         }
         Decision::Unverified => {
+            // The shard exists — preflight refused otherwise — so the only
+            // thing that can be missing is a readable header.
             eprintln!(
-                "warning: could not predict the footprint of '{}' (weights or GGUF header \
-                 unreadable) — proceeding unverified",
-                eff.name
+                "warning: could not predict the footprint of '{}' (GGUF header unreadable \
+                 at {}) — proceeding unverified",
+                eff.name,
+                crate::core::server::shard_path(cfg, eff).display()
             );
             Ok(())
         }

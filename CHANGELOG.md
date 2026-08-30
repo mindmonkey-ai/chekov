@@ -13,9 +13,9 @@ All notable changes to chekov are recorded here. The format follows
   ended incomplete demanding a sysctl the machine could never satisfy, and
   `status` said "need 187000 MB". Absent — the default — the model is the
   requirement: `run` sizes the model (weights on disk + KV cache at its
-  effective context, the same arithmetic `recommend` and `graph` use, now in
-  one `core::footprint`) against the live GPU budget and refuses only a model
-  that does not fit, with `ModelExceedsBudget` naming the levers that exist
+  effective context + the ~3 GiB of compute buffers every `graph` cell
+  reserves) against the live GPU budget and refuses only a model that does
+  not fit, with `ModelExceedsBudget` naming the levers that exist
   (a smaller quant, a lower `ctx_size`, `capability recommend`) and never a
   sysctl; a tight fit proceeds and says so; an unreadable header proceeds and
   says it did not check. `setup` completes on any readable budget and prints
@@ -23,6 +23,15 @@ All notable changes to chekov are recorded here. The format follows
   configured; run checks the model's footprint)`. A configured floor keeps
   every previous behaviour exactly. A test now pins that no production path
   decides anything with this desk's numbers.
+- The parts of that sizing the three commands share now live once, in
+  `core::footprint`: the weights sum, the 3 GiB overhead constant, the total,
+  and the q8 rule. Two consequences for `capability recommend`: its total
+  now includes the same overhead `graph` always reserved (a model within
+  3 GiB of the budget reads as not fitting in both, not just one), and it
+  reads `q8_0` from the flags the model is actually launched with (defaults
+  plus its own `extra_flags`) instead of the defaults alone — before, a
+  model that set `q8_0` per-entry was sized at f16 by `recommend` and at q8
+  by `graph` and `run`.
 - `capability compare`'s codebase section shows a `cross_file_first` task's
   two arms apart — `cross_file_first` and `cross_file_first+extra`, paired by
   full task id as the report does — instead of one line blending both, and

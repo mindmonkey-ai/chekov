@@ -35,10 +35,11 @@ impl Command for SetupCmd {
         let budget = crate::core::machine::live_gpu_budget(&cfg.engine_dir());
         if self.dry_run {
             let against = floor.map_or_else(String::new, |f| format!(" >= {f} MB"));
-            println!(
-                "[dry-run] would verify the GPU budget{against} (now: {:?})",
-                budget.map(|b| b.value)
+            let now = budget.map_or_else(
+                || "unreadable".to_owned(),
+                |b| format!("{} MiB ({})", b.value, b.provenance.label()),
             );
+            println!("[dry-run] would verify the GPU budget{against} (now: {now})");
             return Ok(ExitCode::SUCCESS);
         }
         println!("{}", setup_verdict(floor, budget)?);

@@ -1,8 +1,10 @@
 //! What one model will occupy, and whether this machine can hold it.
 //!
-//! The `run` gate, `recommend` and `graph` all size a model the same way —
-//! weights on disk plus the KV cache at its context — so the arithmetic lives
-//! once, here, and the three can never disagree about what fits.
+//! The `run` gate, `recommend` and `graph` size a model from the same three
+//! parts — weights on disk, the KV cache at a context, and the compute
+//! buffers that load on top — and the parts they share (the weights sum, the
+//! overhead, the q8 rule, the total) live once, here, so a model cannot fit
+//! in one command's arithmetic and exceed in another's.
 
 use std::path::Path;
 
@@ -11,6 +13,23 @@ use crate::core::frontier::{Fit, fit_for};
 use crate::core::registry::{Effective, ModelEntry};
 
 const MIB: u64 = 1024 * 1024;
+
+/// Compute buffers and scratch llama.cpp allocates beyond weights and KV —
+/// the flat reserve every `graph` cell carries, labelled predicted there.
+pub const OVERHEAD_BYTES: u64 = 3 * 1024 * MIB;
+
+/// The whole footprint: weights, KV, and the overhead.
+#[must_use]
+pub const fn sized(weights_bytes: u64, kv_bytes: u64) -> u64 {
+    weights_bytes + kv_bytes + OVERHEAD_BYTES
+}
+
+/// Whether a launch argv puts the KV cache in q8_0 — read from the flags a
+/// model is actually launched with, wherever the value appears in them.
+#[must_use]
+pub fn wants_q8(flags: &[String]) -> bool {
+    flags.iter().any(|f| f == "q8_0")
+}
 
 /// What the gate does with one footprint against one budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,9 +46,14 @@ pub enum Decision {
     Unverified,
 }
 
-/// `fit_for`'s verdict with the numbers the gate has to print.
+/// `fit_for`'s verdict with the numbers the gate has to print. A zero budget
+/// is an unreadable one — the gate says it did not check, rather than
+/// refusing everything.
 #[must_use]
 pub const fn decide(total_bytes: Option<u64>, budget_mib: u64) -> Decision {
+    if budget_mib == 0 {
+        return Decision::Unverified;
+    }
     match (fit_for(total_bytes, budget_mib), total_bytes) {
         (Fit::Fits, _) => Decision::Proceed,
         (Fit::Tight, Some(total)) => Decision::Tight {
@@ -42,16 +66,16 @@ pub const fn decide(total_bytes: Option<u64>, budget_mib: u64) -> Decision {
     }
 }
 
-/// Weights plus KV cache at the model's effective context, or `None` when
-/// either is unknown — an unknown must never be summed as zero.
+/// Weights plus KV cache at the model's effective context plus the overhead,
+/// or `None` when weights or KV are unknown — an unknown must never be
+/// summed as zero.
 #[must_use]
 pub fn predicted_total(cfg: &Config, eff: &Effective) -> Option<u64> {
     let weights = weights_on_disk(&cfg.root, &eff.entry)?;
     let shard = crate::core::server::shard_path(cfg, eff);
     let geometry = crate::core::gguf::read_geometry(&shard).ok()?;
-    let q8 = eff.flags.iter().any(|f| f == "q8_0");
-    let kv = crate::core::gguf::kv_bytes(&geometry, eff.ctx_size, q8)?;
-    Some(weights + kv)
+    let kv = crate::core::gguf::kv_bytes(&geometry, eff.ctx_size, wants_q8(&eff.flags))?;
+    Some(sized(weights, kv))
 }
 
 /// Bytes actually on disk for a model directory, or `None` when it is absent.

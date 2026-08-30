@@ -46,18 +46,13 @@ fn model_facts(reg: &crate::core::registry::Registry, model: &str) -> (String, S
 /// judge against it: a configured floor, or the model's own footprint.
 fn wired_cell(budget: Option<crate::core::machine::Probed<u64>>, floor: Option<u64>) -> String {
     let need = floor.map_or_else(
-        || "no floor configured".to_owned(),
+        || "no floor configured; run checks the model's footprint".to_owned(),
         |required| format!("need {required} MB"),
     );
-    match budget {
-        Some(b) if floor.is_none() => format!(
-            "{} MiB ({}) ({need}; run checks the model's footprint)",
-            b.value,
-            b.provenance.label()
-        ),
-        Some(b) => format!("{} MiB ({}) ({need})", b.value, b.provenance.label()),
-        None => format!("unreadable ({need})"),
-    }
+    budget.map_or_else(
+        || format!("unreadable ({need})"),
+        |b| format!("{} MiB ({}) ({need})", b.value, b.provenance.label()),
+    )
 }
 
 /// The engine commit chekov last built. Never guessed: an unrecorded engine

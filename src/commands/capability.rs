@@ -302,14 +302,17 @@ fn build_frontier(
     for (name, entry) in &reg.models {
         let weights = weights_on_disk(ctx, entry);
         let geometry = geometry_for(ctx, &reg, name);
-        let q8 = entry.extra_flags.iter().any(|f| f == "q8_0")
-            || reg.defaults.flags.iter().any(|f| f == "q8_0");
+        let q8 = crate::core::footprint::wants_q8(&entry.extra_flags)
+            || crate::core::footprint::wants_q8(&reg.defaults.flags);
         let cells = ladder
             .iter()
             .map(|&c| frontier::Cell {
                 weights_bytes: weights,
                 kv_bytes: kv_for(geometry.as_ref(), c, q8),
-                overhead_bytes: Probed::new(Some(3 * 1024 * 1024 * 1024), Provenance::Predicted),
+                overhead_bytes: Probed::new(
+                    Some(crate::core::footprint::OVERHEAD_BYTES),
+                    Provenance::Predicted,
+                ),
                 speed: None,
             })
             .collect();
@@ -553,13 +556,17 @@ fn candidate_for(
 ) -> crate::core::recommend::Candidate {
     let (ctx, reg, ctx_len) = (input.ctx, input.reg, input.ctx_len);
     let weights = weights_on_disk(ctx, entry);
-    let geometry = reg
-        .effective(name)
-        .ok()
-        .map(|eff| crate::core::server::shard_path(&ctx.config, &eff))
+    let eff = reg.effective(name).ok();
+    let geometry = eff
+        .as_ref()
+        .map(|eff| crate::core::server::shard_path(&ctx.config, eff))
         .filter(|p| p.exists())
         .and_then(|p| crate::core::gguf::read_geometry(&p).ok());
-    let q8 = reg.defaults.flags.iter().any(|f| f == "q8_0");
+    // The flags the model is actually launched with — `run` reads the same
+    // ones, so the two cannot disagree about the KV cache's type.
+    let q8 = eff
+        .as_ref()
+        .is_some_and(|eff| crate::core::footprint::wants_q8(&eff.flags));
     let kv = geometry
         .as_ref()
         .and_then(|g| crate::core::gguf::kv_bytes(g, ctx_len, q8));
@@ -574,7 +581,9 @@ fn candidate_for(
     crate::core::recommend::Candidate {
         name: name.to_owned(),
         quant: entry.quant.clone(),
-        total_bytes: weights.zip(kv).map(|(w, k)| w + k),
+        total_bytes: weights
+            .zip(kv)
+            .map(|(w, k)| crate::core::footprint::sized(w, k)),
         parser,
     }
 }
