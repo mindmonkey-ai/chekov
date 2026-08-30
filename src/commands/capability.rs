@@ -1122,13 +1122,25 @@ fn confirm_launches(
     if !crate::core::bench::lifecycle::needs_confirm(steps) {
         return Ok(());
     }
-    super::confirm(
-        &format!(
-            "bench {} candidate(s) with launch + teardown, ~{} min estimated",
-            steps.len(),
-            estimate.div_ceil(60)
-        ),
-        yes,
+    super::confirm(&confirm_text(steps, estimate), yes)
+}
+
+/// What the gate asks about. The judge is a step but never a candidate: it is
+/// counted apart and named, so agreeing to "3 candidate(s)" cannot mean four
+/// loads.
+fn confirm_text(steps: &[crate::core::bench::lifecycle::BenchStep], estimate: u64) -> String {
+    use crate::core::bench::lifecycle::StepAction;
+    let judge = steps
+        .iter()
+        .find(|s| s.action == StepAction::Judge)
+        .map_or_else(String::new, |s| format!(" plus judge '{}'", s.model));
+    let candidates = steps
+        .iter()
+        .filter(|s| s.action != StepAction::Judge)
+        .count();
+    format!(
+        "bench {candidates} candidate(s){judge} with launch + teardown, ~{} min estimated",
+        estimate.div_ceil(60)
     )
 }
 
@@ -1151,16 +1163,20 @@ fn judge_phase(
 }
 
 /// How many stored crossings the judge would be asked about, across every run
-/// — the same eligibility the phase itself applies, read before it launches.
+/// — the same eligibility AND the same resume skip the phase itself applies,
+/// read before it launches. A fully judged run resumed with `--judge` owes
+/// nothing, so nothing is loaded to record nothing.
 fn eligible_crossings(runs: &[std::path::PathBuf]) -> Result<usize, ChekovError> {
     use crate::core::bench::judge::eligibility;
-    use crate::core::bench::store::{self, RunLog};
+    use crate::core::bench::store::{self, JUDGE_SUITE, RunLog, TaskKey};
     let mut total = 0;
     for dir in runs {
-        total += RunLog::load(dir)?
+        let log = RunLog::load(dir)?;
+        total += log
             .rows
             .iter()
             .filter(|r| r.suite == "codebase" && !store::is_unavailable(r))
+            .filter(|r| !log.is_done(&TaskKey::buffered(JUDGE_SUITE, &r.task_id)))
             .filter_map(|r| r.codebase.as_ref())
             .filter(|row| eligibility(row).is_some())
             .count();
@@ -1345,15 +1361,9 @@ fn run_judge_phase(
     runs: &[std::path::PathBuf],
     plan: &crate::core::bench::judge::JudgePlan,
 ) -> Result<(), ChekovError> {
-    use crate::core::bench::runner;
     use crate::core::bench::store::{RunLog, render_codebase};
-    use crate::core::proxy::claude::ClaudeFacade;
-    use crate::core::proxy::serve::Upstream;
     let pid = launch_candidate(ctx, &plan.judge)?;
-    let upstream = Upstream {
-        base_url: ctx.config.base_url(),
-        api_key: ctx.config.file.server.api_key.clone(),
-    };
+    let (upstream, facade) = judge_wire_parts(ctx, plan);
     let ready = ensure_ready(
         ctx,
         &upstream,
@@ -1362,15 +1372,7 @@ fn run_judge_phase(
             pid,
         },
     );
-    let facade = ClaudeFacade::new(&plan.judge.name);
-    let wire = runner::ProbeWire {
-        http: ctx.http.as_ref(),
-        facade: &facade,
-        upstream: &upstream,
-        pins: runner::SamplingPins {
-            seed: ctx.config.file.bench.seed,
-        },
-    };
+    let wire = judge_wire(ctx, &upstream, &facade);
     let outcome = ready.and_then(|_| {
         runs.iter().try_for_each(|dir| {
             let verdicts = judge_run(&wire, dir, plan)?;
@@ -1387,6 +1389,57 @@ fn run_judge_phase(
     outcome
 }
 
+/// The two values the judge's wire borrows from — owned by the caller so the
+/// wire can hold references to them.
+fn judge_wire_parts(
+    ctx: &Ctx,
+    plan: &crate::core::bench::judge::JudgePlan,
+) -> (
+    crate::core::proxy::serve::Upstream,
+    crate::core::proxy::claude::ClaudeFacade,
+) {
+    (
+        crate::core::proxy::serve::Upstream {
+            base_url: ctx.config.base_url(),
+            api_key: ctx.config.file.server.api_key.clone(),
+        },
+        crate::core::proxy::claude::ClaudeFacade::new(&plan.judge.name),
+    )
+}
+
+/// The judge's crossing wire: chekov's own translator, the same sampling pins
+/// every probe carries (spec C §3.0 — one uniform judge wire).
+fn judge_wire<'a>(
+    ctx: &'a Ctx,
+    upstream: &'a crate::core::proxy::serve::Upstream,
+    facade: &'a crate::core::proxy::claude::ClaudeFacade,
+) -> crate::core::bench::runner::ProbeWire<'a> {
+    use crate::core::bench::runner::{ProbeWire, SamplingPins};
+    ProbeWire {
+        http: ctx.http.as_ref(),
+        facade,
+        upstream,
+        pins: SamplingPins {
+            seed: ctx.config.file.bench.seed,
+        },
+    }
+}
+
+/// The eval directory and the run id a run directory decomposes into — what
+/// `RunWriter::resume` is addressed by. Neither half is ever guessed.
+fn run_location(dir: &std::path::Path) -> Result<(&std::path::Path, &str), ChekovError> {
+    let invalid = |reason: &str| ChekovError::BenchRunInvalid {
+        path: dir.to_path_buf(),
+        reason: reason.to_owned(),
+    };
+    let eval = dir.parent().ok_or_else(|| invalid("no parent directory"))?;
+    let run_id = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| invalid("no run id in the path"))?;
+    Ok((eval, run_id))
+}
+
 /// Every eligible `function_body` crossing of one run, appended as it lands.
 fn judge_run(
     wire: &crate::core::bench::runner::ProbeWire,
@@ -1395,11 +1448,7 @@ fn judge_run(
 ) -> Result<usize, ChekovError> {
     use crate::core::bench::store::{self, RunLog, RunWriter, TaskKey};
     let log = RunLog::load(dir)?;
-    let eval = dir.parent().ok_or_else(|| ChekovError::BenchRunInvalid {
-        path: dir.to_path_buf(),
-        reason: "no parent directory".into(),
-    })?;
-    let run_id = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let (eval, run_id) = run_location(dir)?;
     let (mut writer, _) = RunWriter::resume(eval, run_id, &log.head)?;
     let mut count = 0;
     for row in log
@@ -2738,14 +2787,88 @@ mod tests {
     }
 
     /// A judge is never loaded to record nothing: a run with no answered
-    /// `function_body` crossing has nothing for it to be asked about.
+    /// `function_body` crossing has nothing for it to be asked about, and
+    /// neither has one whose crossings are all judged already.
     #[test]
     fn a_run_without_a_function_body_crossing_has_nothing_for_the_judge() {
         use crate::core::bench::codebase::TaskTier;
         let none = run_dir_with("in-file-only", &[TaskTier::InFile, TaskTier::InFile]);
         assert_eq!(super::eligible_crossings(&[none]).expect("load"), 0);
         let some = run_dir_with("one-body", &[TaskTier::InFile, TaskTier::FunctionBody]);
-        assert_eq!(super::eligible_crossings(&[some]).expect("load"), 1);
+        assert_eq!(
+            super::eligible_crossings(std::slice::from_ref(&some)).expect("load"),
+            1
+        );
+        judge_the_crossings(&some);
+        assert_eq!(
+            super::eligible_crossings(&[some]).expect("load"),
+            0,
+            "a resumed run that owes no verdict loads no judge"
+        );
+    }
+
+    /// Append a verdict for every `function_body` crossing the run holds —
+    /// what a completed judge phase leaves behind.
+    fn judge_the_crossings(dir: &std::path::Path) {
+        use crate::core::bench::codebase::TaskTier;
+        use crate::core::bench::store::{
+            DecidedBy, JUDGE_SUITE, JudgeRow, RunLog, RunWriter, Task, Transport,
+        };
+        let log = RunLog::load(dir).expect("load");
+        let eval = dir.parent().expect("eval dir");
+        let run_id = dir.file_name().and_then(|n| n.to_str()).expect("run id");
+        let (mut writer, _) = RunWriter::resume(eval, run_id, &log.head).expect("resume");
+        for row in log.rows.iter().filter(|r| {
+            r.codebase
+                .as_ref()
+                .is_some_and(|c| c.tier == TaskTier::FunctionBody)
+        }) {
+            writer
+                .append(Task {
+                    suite: JUDGE_SUITE.into(),
+                    task_id: row.task_id.clone(),
+                    measure: crate::core::bench::codebase::run::empty_measure(),
+                    grade: None,
+                    transport: Transport::Buffered,
+                    codebase: None,
+                    judge: Some(JudgeRow {
+                        equivalent: Some(true),
+                        gold_first: Some(true),
+                        prediction_first: Some(true),
+                        decided_by: DecidedBy::SwapAgreement,
+                        skipped: None,
+                        judge_secs: 2.0,
+                    }),
+                })
+                .expect("append");
+        }
+    }
+
+    /// The judge is a step but never a candidate: agreeing to "1 candidate(s)"
+    /// must not quietly mean two model loads.
+    #[test]
+    fn the_confirm_prompt_names_the_judge_instead_of_counting_it_as_a_candidate() {
+        use crate::core::bench::lifecycle::{BenchStep, StepAction};
+        let step = |model: &str, action| BenchStep {
+            model: model.to_owned(),
+            action,
+            weights_bytes: None,
+        };
+        let candidates = [step("ornith", StepAction::Launch)];
+        assert_eq!(
+            super::confirm_text(&candidates, 300),
+            "bench 1 candidate(s) with launch + teardown, ~5 min estimated"
+        );
+        let with_judge = [
+            step("ornith", StepAction::Launch),
+            step("minimax", StepAction::Launch),
+            step("gpt-oss-20b", StepAction::Judge),
+        ];
+        assert_eq!(
+            super::confirm_text(&with_judge, 300),
+            "bench 2 candidate(s) plus judge 'gpt-oss-20b' with launch + teardown, \
+             ~5 min estimated"
+        );
     }
 
     #[test]
