@@ -2468,6 +2468,46 @@ mod tests {
     }
 
     #[test]
+    fn compare_cross_runtime_flag_is_a_bare_switch_defaulting_off() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "chekov",
+            "capability",
+            "compare",
+            "a.json",
+            "b.json",
+        ])
+        .expect("compare parses");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Compare { cross_runtime, .. }) => {
+                    assert!(!cross_runtime);
+                }
+                other => panic!("expected Compare, got {other:?}"),
+            },
+            _ => panic!("expected capability"),
+        }
+        let cli = crate::cli::Cli::try_parse_from([
+            "chekov",
+            "capability",
+            "compare",
+            "a.json",
+            "b.json",
+            "--cross-runtime",
+        ])
+        .expect("compare parses with the flag");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Compare { cross_runtime, .. }) => {
+                    assert!(cross_runtime);
+                }
+                other => panic!("expected Compare, got {other:?}"),
+            },
+            _ => panic!("expected capability"),
+        }
+    }
+
+    #[test]
     fn models_flag_parses_a_comma_list() {
         use clap::Parser;
         let cli = crate::cli::Cli::try_parse_from([
