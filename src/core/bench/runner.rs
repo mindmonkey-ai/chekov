@@ -1085,6 +1085,53 @@ mod tests {
     }
 
     #[test]
+    fn the_chat_fim_prompt_carries_the_instruction_the_extra_and_the_three_sections() {
+        let task = super::InfillTask {
+            prefix: "fn a() {",
+            suffix: "}",
+            gold_lines: 1,
+            extra: Some(super::ExtraChunk {
+                filename: "lib.rs",
+                text: "pub fn b() {}",
+            }),
+        };
+        let prompt = super::chat_fim_prompt(&task);
+        assert!(prompt.starts_with(super::FIM_CHAT_INSTRUCTION));
+        for needle in [
+            "FILE lib.rs:",
+            "pub fn b() {}",
+            "PREFIX:\nfn a() {",
+            "SUFFIX:\n}",
+            "MIDDLE:\n",
+        ] {
+            assert!(prompt.contains(needle), "missing {needle}");
+        }
+        let suffix_at = prompt.find("SUFFIX:").unwrap();
+        assert!(prompt.find("PREFIX:").unwrap() < suffix_at);
+        assert!(suffix_at < prompt.find("MIDDLE:").unwrap());
+    }
+
+    #[test]
+    fn a_fenced_reply_is_unwrapped_and_one_trailing_newline_trimmed() {
+        assert_eq!(
+            super::normalize_chat_fill("```rust\nlet x = 1;\n```\n"),
+            "let x = 1;"
+        );
+        assert_eq!(super::normalize_chat_fill("let x = 1;\n"), "let x = 1;");
+        // A fence in the middle is content, not wrapping:
+        assert_eq!(super::normalize_chat_fill("a\n```\nb"), "a\n```\nb");
+    }
+
+    #[test]
+    fn the_chat_fim_hash_diverges_from_its_base_and_is_stable() {
+        let a = super::chat_fim_hash("codebase-only");
+        assert_ne!(a, "codebase-only");
+        assert_eq!(a, super::chat_fim_hash("codebase-only"));
+        assert_ne!(a, super::chat_fim_hash("other"));
+        assert_eq!(a.len(), 12);
+    }
+
+    #[test]
     fn only_the_forced_wire_asks_the_engine_to_extract_reasoning() {
         // A thinking-prefill template (ornith) 400s on a forced grammar unless
         // the engine extracts reasoning: the specialized chat handler builds
