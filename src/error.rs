@@ -214,6 +214,16 @@ pub enum ChekovError {
     )]
     BenchStampMismatch { field: String, a: String, b: String },
 
+    #[error("--runtime '{value}' is not <name>@<version> — {reason}")]
+    RuntimeFlagInvalid { value: String, reason: String },
+
+    #[error(
+        "--runtime {runtime} benches a server you started — chekov cannot \
+         launch a {runtime} server; start it, then re-run (the subject must \
+         already be serving)"
+    )]
+    RuntimeNeedsRunningServer { runtime: String },
+
     #[error(
         "the server is running '{running}' but bench was asked for '{resolved}' \
          — bench never stops a server it did not start, and never records one \
