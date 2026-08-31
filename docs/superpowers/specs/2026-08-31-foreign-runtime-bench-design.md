@@ -85,7 +85,9 @@ where it remains true, instead of being printed for a `corpus_id` mismatch.
 
 For a foreign runtime the llama-server checks do not exist, so readiness is:
 
-- One `GET <upstream>/v1/models` (bearer attached when configured). Success is
+- One plain `GET <upstream>/v1/models` (chekov's `HttpClient` GET seam carries
+  no bearer, and `/v1/models` is unauthenticated on the servers this targets;
+  a server that requires auth fails loudly here, which is correct). Success is
   HTTP 200 with a JSON body containing a `data` array. Anything else fails as
   the existing `EndpointDown` with the URL.
 - The served model ids from `data[].id` are PRINTED, never asserted:
@@ -104,12 +106,15 @@ invented:
 
 | field | foreign value |
 |---|---|
-| `ctx` | `0` |
-| `n_parallel` | `0` |
-| `kv_unified` | `false` |
-| `n_batch`, `n_ubatch` | `0` |
-| `type_k`, `type_v` | `"unmanaged"` |
-| `flash_attn` | `"unmanaged"` |
+| `ctx` (u32) | `0` |
+| `n_parallel` (u32) | `0` |
+| `kv_unified`, `n_batch`, `n_ubatch` (flag strings) | `"unmanaged"` |
+| `type_k`, `type_v`, `flash_attn` (flag strings) | `"unmanaged"` |
+
+(The six flag fields are the stamp's argv-sourced strings whose absent-flag
+value is `"engine-default"`; `"unmanaged"` is a third, distinct spelling —
+"chekov did not launch this server", never "the engine's default".) The
+run head's `launch_args` records the empty list — chekov passed none.
 
 Everything chekov does control or know stays real: `machine_id`, weights
 identity (`weights_revision`, `quant` from the registry entry — an MTPLX
@@ -178,11 +183,13 @@ Plain `compare` (no flag) refuses on `runtime` like any first-differing field.
 - `prompt_set_hash` (the transports' prompts genuinely differ — that IS part
   of what a runtime is)
 
-Everything else — `machine_id`, `weights_revision`, `quant`, `allow_exec`,
-`cargo_version`, `exec_target`, `seed`, `temperature_milli`,
-`chekov_version`, `corpus_id`, `judge` — must still match; a mismatch outside
-the allow-list refuses with the same `BenchStampMismatch`, so `--cross-runtime`
-never becomes "compare anything".
+Everything else — `machine_id`, `allow_exec`, `cargo_version`, `exec_target`,
+`seed`, `temperature_milli`, `chekov_version`, `corpus_id` — must still
+match; a mismatch outside the allow-list refuses with the same
+`BenchStampMismatch`, so `--cross-runtime` never becomes "compare anything".
+(`weights_revision`, `quant` and `judge` are already masked by plain
+`compare` as the comparison's subject, not its precondition — that stays
+exactly as it is.)
 
 Output opens with a banner, before any section:
 
