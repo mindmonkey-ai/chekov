@@ -524,6 +524,7 @@ pub fn foreign_timings_error(err: ChekovError, runtime: Option<&str>) -> ChekovE
     match (err, runtime) {
         (ChekovError::BenchNoTimings, Some(runtime)) => ChekovError::ForeignTimingsUnsupported {
             runtime: runtime.to_owned(),
+            reason: "the reply carried no llama.cpp timings object".to_owned(),
         },
         (err, _) => err,
     }
@@ -1592,7 +1593,7 @@ mod tests {
     fn foreign_timings_error_names_the_runtime_and_leaves_everything_else_alone() {
         let recast = super::foreign_timings_error(ChekovError::BenchNoTimings, Some("mtplx 0.4.1"));
         assert!(
-            matches!(&recast, ChekovError::ForeignTimingsUnsupported { runtime } if runtime == "mtplx 0.4.1"),
+            matches!(&recast, ChekovError::ForeignTimingsUnsupported { runtime, .. } if runtime == "mtplx 0.4.1"),
             "{recast}"
         );
         assert!(recast.to_string().contains("mtplx 0.4.1"), "{recast}");

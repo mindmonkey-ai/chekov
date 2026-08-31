@@ -18,11 +18,34 @@ pub struct JsonRequest {
     pub bearer: Option<String>,
 }
 
+/// Client-measured stream timing: request-written → first SSE data frame,
+/// and first data frame → stream end. Durations, not instants — the math
+/// needs only the two windows.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamMarks {
+    pub to_first_data: std::time::Duration,
+    pub first_to_done: std::time::Duration,
+}
+
 /// The HTTP boundary (§C.6). Implemented by `UreqClient` for real use and by
 /// canned fakes in tests — no test ever touches the network.
 pub trait HttpClient {
     fn get(&self, url: &str) -> Result<String, ChekovError>;
     fn post_json(&self, req: &JsonRequest) -> Result<String, ChekovError>;
+
+    /// POST and read the response as a stream, timing it. Returns the full
+    /// body plus the two durations the timing math needs. The default
+    /// refuses: a client that cannot stream-time must say so, never fake
+    /// marks around a buffered read.
+    fn post_json_stream_timed(
+        &self,
+        _req: &JsonRequest,
+    ) -> Result<(String, StreamMarks), ChekovError> {
+        Err(ChekovError::ForeignTimingsUnsupported {
+            runtime: "unknown".to_owned(),
+            reason: "this HTTP client cannot stream-time responses".to_owned(),
+        })
+    }
 }
 
 /// Production client: blocking `ureq` (no async runtime, prompt §2.1).
@@ -75,6 +98,105 @@ impl HttpClient for UreqClient {
             })?;
         crate::core::proxy::serve::answered(&req.url, status, text)
     }
+
+    fn post_json_stream_timed(
+        &self,
+        req: &JsonRequest,
+    ) -> Result<(String, StreamMarks), ChekovError> {
+        // Same request shape as post_json; the read is incremental so the
+        // first data frame can be timestamped. Thin network I/O — untested
+        // by design, like the hub's shard download; the pure parts
+        // (saw_first_data, the timing math) carry the tests.
+        let started = std::time::Instant::now();
+        let mut builder = ureq::post(&req.url)
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .header("Content-Type", "application/json");
+        if let Some(token) = &req.bearer {
+            builder = builder.header("Authorization", &format!("Bearer {token}"));
+        }
+        let response = builder
+            .send(&req.body)
+            .map_err(|e| ChekovError::EndpointDown {
+                url: req.url.clone(),
+                reason: e.to_string(),
+            })?;
+        let status = response.status().as_u16();
+        let mut body = response.into_body();
+        if !(200..300).contains(&status) {
+            let text = body
+                .read_to_string()
+                .map_err(|e| ChekovError::EndpointDown {
+                    url: req.url.clone(),
+                    reason: e.to_string(),
+                })?;
+            return Err(status_error(&req.url, status, text));
+        }
+        read_stream_timed(body.into_reader(), started, &req.url)
+    }
+}
+
+/// The error `answered` reports for a non-2xx status — it always errors
+/// when `status` is outside 200..300, so the fallback stays panic-free
+/// without assuming that invariant holds forever.
+fn status_error(url: &str, status: u16, text: String) -> ChekovError {
+    let fallback = ChekovError::EndpointDown {
+        url: url.to_owned(),
+        reason: format!("unexpected status {status}"),
+    };
+    crate::core::proxy::serve::answered(url, status, text)
+        .err()
+        .unwrap_or(fallback)
+}
+
+/// Reads the streamed body incrementally, marking the first SSE data frame
+/// and the point the stream ends. Thin network I/O — untested by design,
+/// like the hub's shard download; `saw_first_data` and the timing math
+/// carry the tests.
+fn read_stream_timed(
+    mut reader: impl std::io::Read,
+    started: std::time::Instant,
+    url: &str,
+) -> Result<(String, StreamMarks), ChekovError> {
+    let mut buffer = String::new();
+    let mut first_data: Option<std::time::Duration> = None;
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let n = reader
+            .read(&mut chunk)
+            .map_err(|e| ChekovError::EndpointDown {
+                url: url.to_owned(),
+                reason: e.to_string(),
+            })?;
+        if n == 0 {
+            break;
+        }
+        buffer.push_str(&String::from_utf8_lossy(&chunk[..n]));
+        if first_data.is_none() && saw_first_data(&buffer) {
+            first_data = Some(started.elapsed());
+        }
+    }
+    let to_first_data = first_data.ok_or_else(|| ChekovError::EndpointDown {
+        url: url.to_owned(),
+        reason: "stream ended with no data frame".to_owned(),
+    })?;
+    Ok((
+        buffer,
+        StreamMarks {
+            to_first_data,
+            first_to_done: started.elapsed().saturating_sub(to_first_data),
+        },
+    ))
+}
+
+/// True once `buffer` holds a `data:` line with at least one non-whitespace
+/// payload byte — the first real SSE data frame, not just the marker.
+fn saw_first_data(buffer: &str) -> bool {
+    buffer
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .any(|payload| !payload.trim().is_empty())
 }
 
 /// HF model-info API response — only the fields chekov reads.
