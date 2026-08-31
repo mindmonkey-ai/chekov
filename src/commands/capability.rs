@@ -2160,6 +2160,8 @@ fn assemble_stamp(
     stamp::Stamp {
         machine_id: parts.machine_id,
         runtime: parts.runtime,
+        // Task 4 stamps the real value; every run today is server-timed.
+        timing_source: stamp::TIMING_SERVER.to_owned(),
         engine_build_commit: parts.engine,
         weights_revision: format!(
             "{}/{}",
@@ -3151,6 +3153,7 @@ mod tests {
         crate::core::bench::stamp::Stamp {
             machine_id: "8d41f0c2a917".into(),
             runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
+            timing_source: crate::core::bench::stamp::TIMING_SERVER.to_owned(),
             engine_build_commit: "dda1b0d67".into(),
             weights_revision: "fbbaed45c2f0/model-00001.gguf".into(),
             quant: "Q8_0".into(),

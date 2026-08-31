@@ -1,4 +1,4 @@
-//! The 22-field configuration stamp (spec §7.4).
+//! The 23-field configuration stamp (spec §7.4).
 //!
 //! llama.cpp does not guarantee bit-identical results across configurations:
 //! GPU reduction kernels pick different accumulation orders and float
@@ -20,6 +20,10 @@ pub struct Stamp {
     /// which is what the serde default says.
     #[serde(default = "default_runtime")]
     pub runtime: String,
+    /// Where the timing numbers came from: the server's own `timings`
+    /// object, or chekov's wall clock over a streamed reply (foreign runs).
+    #[serde(default = "default_timing_source")]
+    pub timing_source: String,
     pub engine_build_commit: String,
     /// `<revision>/<first_shard>` — the pinned HF revision is content-addressed
     /// upstream; hashing 35-180 GiB of weights per run would cost minutes for
@@ -101,12 +105,26 @@ fn default_runtime() -> String {
 /// `Stamp.runtime` for every run chekov launches itself.
 pub const RUNTIME_LLAMA_CPP: &str = "llama.cpp";
 
+/// A stamp written before the `timing_source` field existed was always
+/// server-timed — chekov had no other way to measure a run.
+fn default_timing_source() -> String {
+    TIMING_SERVER.to_owned()
+}
+
+/// `Stamp.timing_source` for a run timed off the server's own `timings`
+/// object — every run chekov launches itself.
+pub const TIMING_SERVER: &str = "server-reported";
+/// `Stamp.timing_source` for a run chekov timed itself, over a streamed
+/// reply from a foreign runtime that reports no `timings` object.
+pub const TIMING_CHEKOV_STREAMED: &str = "chekov-streamed";
+
 /// The FIRST differing field name, in declaration order — or `None` if equal.
 #[must_use]
 pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
-    let pairs: [(&'static str, bool); 22] = [
+    let pairs: [(&'static str, bool); 23] = [
         ("machine_id", a.machine_id != b.machine_id),
         ("runtime", a.runtime != b.runtime),
+        ("timing_source", a.timing_source != b.timing_source),
         (
             "engine_build_commit",
             a.engine_build_commit != b.engine_build_commit,
@@ -191,6 +209,7 @@ mod tests {
         Stamp {
             machine_id: "8d41f0c2a917".into(),
             runtime: RUNTIME_LLAMA_CPP.to_owned(),
+            timing_source: TIMING_SERVER.to_owned(),
             engine_build_commit: "dda1b0d67".into(),
             weights_revision: "fbbaed45c2f0/model-00001.gguf".into(),
             quant: "Q8_0".into(),

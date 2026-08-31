@@ -145,8 +145,9 @@ pub struct CompareOpts {
 }
 
 /// The fields `--cross-runtime` permits to differ, and no others.
-const CROSS_RUNTIME_ALLOWED: [&str; 11] = [
+const CROSS_RUNTIME_ALLOWED: [&str; 12] = [
     "runtime",
+    "timing_source",
     "engine_build_commit",
     "ctx",
     "n_parallel",
@@ -227,6 +228,7 @@ fn assert_same_environment(pair: &RunPair, opts: &CompareOpts) -> Result<(), Che
 /// the fields a foreign runtime is permitted to differ on, and no others.
 fn mask_cross_runtime(b_env: &mut Stamp, a: &Stamp) {
     b_env.runtime.clone_from(&a.runtime);
+    b_env.timing_source.clone_from(&a.timing_source);
     b_env.engine_build_commit.clone_from(&a.engine_build_commit);
     b_env.ctx = a.ctx;
     b_env.n_parallel = a.n_parallel;
@@ -1138,6 +1140,7 @@ mod tests {
         Stamp {
             machine_id: "8d41f0c2a917".into(),
             runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
+            timing_source: crate::core::bench::stamp::TIMING_SERVER.to_owned(),
             engine_build_commit: engine.into(),
             weights_revision: weights.into(),
             quant: "Q8_0".into(),
