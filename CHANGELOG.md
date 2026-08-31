@@ -74,6 +74,43 @@ All notable changes to chekov are recorded here. The format follows
   only on a real refusal now, never on a dead socket.
 
 ### Added
+- `chekov tune [NAME] [--dry-run] [--yes] [--apply] [--stages fa,kv,batch,ubatch]`
+  measures, on this machine, whether any of a small set of launch flags beats
+  what the model launches with today, and says **`defaults won`** when
+  nothing does — the honest-verdict pattern `mtplx tune` uses. A four-stage
+  descent starts from the model's own current flags as the baseline and, one
+  stage at a time, rewrites `--flash-attn` (`fa`, judged on **decode**), then
+  `--cache-type-k`/`--cache-type-v` together (`kv`, judged on **decode**; a
+  `q8_0` candidate under an FA-off incumbent is skipped), then `--batch-size`
+  (`batch`, judged on **prefill**), then `--ubatch-size` (`ubatch`, judged on
+  **prefill**, candidates capped at the incumbent batch). A candidate wins its
+  stage only when `stats::compare` at `[bench] significance_pct` says `Faster`
+  on the stage's own metric **and** not `Slower` on the other; a degenerate
+  trial (the server never came up, the probe returned no timings, too few
+  samples survived warmup, or the measured prompt was truncated) is recorded
+  with its reason and can never win or be saved, and a degenerate baseline
+  stops the run as `TuneBaselineDegenerate` rather than comparing against
+  nothing. `--dry-run` prints the stage plan, an upper bound on launches
+  (`≤ N launches`, counted against the widest batch the descent can actually
+  reach so the bound holds even when a stage's winner grows the next one) and
+  a wall-clock estimate; a run without `--yes` confirms once against that
+  same estimate. Every run writes `tune/<utc>-<model>.json` — every trial's
+  argv, flag stamp, decode/prefill summaries, thermal readings (`pmset -g
+  therm`'s `CPU_Speed_Limit`, honestly `None` where macOS reports nothing
+  without root) and the `significance_pct` its verdicts were reached under —
+  so the record and the printed report always agree on the threshold even
+  when `[bench] significance_pct` is not 5, and the `defaults won` line names
+  it. `--apply` prints the exact `extra_flags` diff for the winner's
+  `models.toml` entry and, after a confirm (`--yes` covers it), writes it
+  through `Registry::save`; a `defaults won` run has nothing to apply and
+  refuses (`TuneNothingToApply`) rather than silently doing nothing.
+  Configured under a new `[tune]` section (`depth`, `flash_attn`,
+  `cache_types`, `batch_sizes`, `ubatch_sizes`); `repetitions`, `max_tokens`
+  and `significance_pct` are shared with `[bench]` — one definition of "how
+  many samples" and "what is significant" for every measurement chekov makes.
+  The launch/ready/teardown lifecycle `bench` already used moves into
+  `core::bench::candidate` (`launch`, `ensure_ready`, `teardown`, unchanged in
+  behaviour) so `bench` and `tune` share one implementation and cannot drift.
 - `capability bench` gains `--judge <NAME>`, a registered `role = "judge"`
   model (set by hand on its `models.toml` entry — `pull` never writes the
   field; any other value is refused at registry load, naming the one accepted

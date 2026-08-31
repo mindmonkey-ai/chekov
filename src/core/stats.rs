@@ -5,8 +5,10 @@
 //! repetition is dropped as warmup and the drop is recorded rather than
 //! quietly absorbed.
 
+use serde::{Deserialize, Serialize};
+
 /// A summarised measurement series.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Summary {
     pub median: f64,
     pub p10: f64,
@@ -17,7 +19,7 @@ pub struct Summary {
 }
 
 /// The verdict when two configurations are compared.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Comparison {
     /// Distinguishable: the first is faster.
     Faster,

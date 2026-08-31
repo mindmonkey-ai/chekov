@@ -53,6 +53,8 @@ pub enum Cmd {
     Integrate(commands::integrate::IntegrateCmd),
     /// Start an agent wired to the local model (proxy + settings; --proxy-only for the translator alone)
     Launch(commands::launch::LaunchCmd),
+    /// Measure which launch flags beat the current ones on this machine, and say so honestly
+    Tune(commands::tune::TuneCmd),
     /// Emit shell completions (used by `make install`).
     #[command(hide = true)]
     Completions {
@@ -92,6 +94,7 @@ pub fn dispatch(cmd: &Cmd, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
         Cmd::Env(c) => c.run(ctx),
         Cmd::Integrate(c) => c.run(ctx),
         Cmd::Launch(c) => c.run(ctx),
+        Cmd::Tune(c) => c.run(ctx),
         Cmd::Completions { .. } => Ok(ExitCode::SUCCESS),
     }
 }
@@ -145,6 +148,20 @@ mod tests {
         let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "stop", "--if-running"])
             .expect("parse");
         assert!(matches!(cli.cmd, Cmd::Stop(ref c) if c.if_running));
+    }
+
+    #[test]
+    fn tune_flags_parse() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "chekov", "tune", "m", "--stages", "fa,kv", "--yes", "--apply",
+        ])
+        .expect("parse");
+        assert!(matches!(cli.cmd, Cmd::Tune(ref c)
+            if c.name.as_deref() == Some("m")
+                && c.stages == ["fa", "kv"]
+                && c.yes
+                && c.apply
+                && !c.dry_run));
     }
 
     #[test]

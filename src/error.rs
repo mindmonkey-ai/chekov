@@ -399,6 +399,22 @@ pub enum ChekovError {
     )]
     JudgeNeedsTheServer,
 
+    #[error(
+        "tune: the baseline for '{name}' could not be measured ({reason}) — there is nothing \
+         to compare candidates against; check that `chekov run {name}` starts and `chekov \
+         doctor` passes, then retry"
+    )]
+    TuneBaselineDegenerate { name: String, reason: String },
+
+    #[error(
+        "tune: '{name}' — defaults won, so there is nothing to apply; the current flags are \
+         already the best this run measured"
+    )]
+    TuneNothingToApply { name: String },
+
+    #[error("tune: unknown stage '{stage}' — the stages are fa, kv, batch, ubatch (in that order)")]
+    TuneUnknownStage { stage: String },
+
     #[error("{context}: {source} — check the path exists and is writable, then retry")]
     Io {
         context: String,
@@ -635,6 +651,34 @@ mod tests {
         assert!(
             server.contains("bench never stops a server it did not start; stop it or drop --judge"),
             "{server}"
+        );
+    }
+
+    #[test]
+    fn the_tune_refusals_name_the_remedy() {
+        let base = ChekovError::TuneBaselineDegenerate {
+            name: "m".into(),
+            reason: "fewer than 2 samples after the warmup drop".into(),
+        }
+        .to_string();
+        assert!(
+            base.contains("chekov run m")
+                && base.contains("chekov doctor")
+                && base.contains("fewer than 2 samples"),
+            "{base}"
+        );
+        let apply = ChekovError::TuneNothingToApply { name: "m".into() }.to_string();
+        assert!(
+            apply.contains("defaults won") && apply.contains("nothing to apply"),
+            "{apply}"
+        );
+        let stage = ChekovError::TuneUnknownStage {
+            stage: "threads".into(),
+        }
+        .to_string();
+        assert!(
+            stage.contains("threads") && stage.contains("fa, kv, batch, ubatch"),
+            "{stage}"
         );
     }
 }

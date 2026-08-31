@@ -46,3 +46,10 @@ codebase_tasks = 24            # `--codebase` tasks per run (2/3 in_file, 1/3 fu
 judge_max_tokens = 512         # --judge reply budget; 2x the largest reply in the 2026-08-30 probe
 judge_min_consistency_pct = 70 # swap-agreement floor below which the equiv column is voided
 judge_reasoning_effort = "low" # none|low|medium|high, forwarded to the judge's wire only
+
+[tune]                         # `chekov tune` sweep
+depth = 4096                   # probe prompt depth in tokens
+flash_attn = ["on", "off"]                # stage fa: --flash-attn candidates
+cache_types = ["q8_0", "f16"]             # stage kv: --cache-type-k/-v candidates
+batch_sizes = [512, 1024, 2048, 4096]     # stage batch: --batch-size candidates
+ubatch_sizes = [256, 512, 1024, 2048]     # stage ubatch: --ubatch-size candidates (<= incumbent batch)

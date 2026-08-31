@@ -17,6 +17,7 @@ pub struct FileConfig {
     pub doctor: DoctorSection,
     pub bench: BenchSection,
     pub engine: EngineSection,
+    pub tune: TuneSection,
 }
 
 /// Which llama.cpp the engine is built from.
@@ -194,6 +195,37 @@ impl Default for BenchSection {
     }
 }
 
+/// `chekov tune` sweep parameters (spec §10): a probe depth plus the four
+/// candidate lists staged one dimension at a time (fa, then kv, then batch,
+/// then ubatch).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TuneSection {
+    /// Probe prompt depth, in tokens, used to measure every candidate.
+    pub depth: u32,
+    /// Stage fa: `--flash-attn` candidates, tried in order.
+    pub flash_attn: Vec<String>,
+    /// Stage kv: `--cache-type-k`/`--cache-type-v` candidates, applied to K
+    /// and V together.
+    pub cache_types: Vec<String>,
+    /// Stage batch: `--batch-size` candidates.
+    pub batch_sizes: Vec<u32>,
+    /// Stage ubatch: `--ubatch-size` candidates, each ≤ the incumbent batch.
+    pub ubatch_sizes: Vec<u32>,
+}
+
+impl Default for TuneSection {
+    fn default() -> Self {
+        Self {
+            depth: 4096,
+            flash_attn: vec!["on".to_string(), "off".to_string()],
+            cache_types: vec!["q8_0".to_string(), "f16".to_string()],
+            batch_sizes: vec![512, 1024, 2048, 4096],
+            ubatch_sizes: vec![256, 512, 1024, 2048],
+        }
+    }
+}
+
 /// Resolved runtime configuration: root directory + file settings.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -268,6 +300,12 @@ impl Config {
     #[must_use]
     pub fn reports_dir(&self) -> PathBuf {
         self.root.join("reports")
+    }
+
+    /// Tune run records (`chekov tune`): `tune/<utc>-<model>.json`.
+    #[must_use]
+    pub fn tune_dir(&self) -> PathBuf {
+        self.root.join("tune")
     }
 
     /// `http://host:port` — the base every probe and integration derives from.
@@ -506,6 +544,32 @@ mod tests {
         assert_eq!(
             resolve_root(None, home),
             PathBuf::from("/Users/nobody/.chekov")
+        );
+    }
+
+    #[test]
+    fn the_tune_section_defaults_and_parses() {
+        let cfg: super::FileConfig = toml::from_str("").expect("defaults");
+        assert_eq!(cfg.tune.depth, 4096);
+        assert_eq!(cfg.tune.flash_attn, vec!["on", "off"]);
+        assert_eq!(cfg.tune.cache_types, vec!["q8_0", "f16"]);
+        assert_eq!(cfg.tune.batch_sizes, vec![512, 1024, 2048, 4096]);
+        assert_eq!(cfg.tune.ubatch_sizes, vec![256, 512, 1024, 2048]);
+        let cfg: super::FileConfig = toml::from_str("[tune]\ndepth = 2048\nbatch_sizes = [1024]\n")
+            .expect("overrides parse");
+        assert_eq!((cfg.tune.depth, cfg.tune.batch_sizes.len()), (2048, 1));
+        assert!(
+            toml::from_str::<super::FileConfig>("[tune]\ndepths = [1]\n").is_err(),
+            "unknown keys are refused"
+        );
+        let root = std::path::Path::new("/r");
+        assert_eq!(
+            super::Config {
+                root: root.to_path_buf(),
+                file: super::FileConfig::default()
+            }
+            .tune_dir(),
+            root.join("tune")
         );
     }
 }

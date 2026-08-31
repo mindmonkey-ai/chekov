@@ -25,6 +25,7 @@ impl From<&BenchSection> for SweepPlan {
 }
 
 /// One depth's measurements: raw samples plus their summaries.
+#[derive(Clone)]
 pub struct DepthResult {
     pub depth: u32,
     /// Measured prompt depth (`timings.prompt_n`) — the honest x-axis.

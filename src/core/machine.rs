@@ -129,6 +129,14 @@ pub fn sysctl_one(key: &str) -> Option<String> {
     capture("sysctl", &["-n", key]).map(|v| v.trim().to_owned())
 }
 
+/// The one thermal signal macOS gives without root: `powermetrics` needs
+/// sudo, and the real pressure level is a C notification API this crate
+/// does not link under `forbid(unsafe_code)`.
+#[must_use]
+pub fn pmset_therm() -> Option<String> {
+    capture("pmset", &["-g", "therm"])
+}
+
 /// Free MiB the engine reports right now — the teardown check that the last
 /// model's memory was actually released before the next one loads.
 #[must_use]
