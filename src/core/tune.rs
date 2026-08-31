@@ -332,7 +332,7 @@ fn phrase(
             false,
             format!("faster on {primary_label} but slower on {other_label} — incumbent kept"),
         ),
-        Comparison::Slower => (false, format!("slower on {primary_label}")),
+        Comparison::Slower => (false, format!("slower on {primary_label} — incumbent kept")),
         Comparison::NoSignificantDifference => (
             false,
             format!("no significant difference vs {incumbent_median:.1} — incumbent kept"),
