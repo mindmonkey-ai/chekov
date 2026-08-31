@@ -100,12 +100,16 @@ fn defaults_won_line(significance_pct: f64) -> String {
 /// llama-server's own value for each stage's flag when the flag is absent
 /// (`llama-server --help`). An absent flag still names a configuration, so a
 /// candidate carrying that value IS the incumbent, not another launch.
-const fn engine_default(stage: Stage) -> &'static str {
+///
+/// `Batch` defers to `tune::ENGINE_DEFAULT_BATCH` — the same fact
+/// `incumbent_batch` filters the ubatch list against — so the two modules
+/// cannot drift apart on what llama-server actually defaults to.
+fn engine_default(stage: Stage) -> String {
     match stage {
-        Stage::Fa => "auto",
-        Stage::Kv => "f16",
-        Stage::Batch => "2048",
-        Stage::Ubatch => "512",
+        Stage::Fa => "auto".to_owned(),
+        Stage::Kv => "f16".to_owned(),
+        Stage::Batch => tune::ENGINE_DEFAULT_BATCH.to_string(),
+        Stage::Ubatch => "512".to_owned(),
     }
 }
 
@@ -122,7 +126,7 @@ const fn flag_of(stage: Stage) -> tune::Flag {
 
 /// The value the incumbent already runs for `stage`'s flag.
 fn incumbent_value(stage: Stage, incumbent: &[String]) -> String {
-    tune::value_of(incumbent, flag_of(stage)).unwrap_or_else(|| engine_default(stage).to_owned())
+    tune::value_of(incumbent, flag_of(stage)).unwrap_or_else(|| engine_default(stage))
 }
 
 /// The candidates a stage actually launches: its value list minus the one the

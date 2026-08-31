@@ -18,7 +18,7 @@ use crate::error::ChekovError;
 
 /// llama-server's default `--batch-size` when the flag is absent, per
 /// `llama-server --help` on this machine.
-const ENGINE_DEFAULT_BATCH: u32 = 2048;
+pub(crate) const ENGINE_DEFAULT_BATCH: u32 = 2048;
 
 /// One dimension `chekov tune` sweeps, in the fixed order they run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
