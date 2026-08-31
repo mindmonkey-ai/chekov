@@ -581,6 +581,50 @@ mod tests {
     }
 
     #[test]
+    fn apply_rewrites_only_the_flags_the_winner_carries_and_shows_the_diff() {
+        let current = argv(&["--reasoning-format", "none", "--batch-size", "2048"]);
+        let winner = argv(&[
+            "--flash-attn",
+            "on",
+            "--cache-type-k",
+            "q8_0",
+            "--cache-type-v",
+            "q8_0",
+            "--batch-size",
+            "4096",
+            "--ubatch-size",
+            "1024",
+        ]);
+        let after = super::applied_extra_flags(&current, &winner);
+        assert_eq!(
+            after,
+            argv(&[
+                "--reasoning-format",
+                "none",
+                "--batch-size",
+                "4096",
+                "--flash-attn",
+                "on",
+                "--cache-type-k",
+                "q8_0",
+                "--cache-type-v",
+                "q8_0",
+                "--ubatch-size",
+                "1024",
+            ])
+        );
+        let diff = super::apply_diff("m", &current, &after);
+        assert!(
+            diff.starts_with(
+                "models.toml [models.m]\n\
+                 - extra_flags = [\"--reasoning-format\", \"none\", \"--batch-size\", \"2048\"]\n\
+                 + extra_flags = ["
+            ),
+            "{diff}"
+        );
+    }
+
+    #[test]
     fn stages_run_in_the_fixed_order_and_name_their_metric() {
         assert_eq!(stages(None).expect("all"), Stage::ORDER.to_vec());
         let picked = stages(Some(&argv(&["ubatch", "fa"]))).expect("subset");

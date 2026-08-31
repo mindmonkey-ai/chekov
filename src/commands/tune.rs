@@ -1056,6 +1056,16 @@ mod tests {
     }
 
     #[test]
+    fn apply_on_defaults_won_is_the_named_refusal() {
+        let err = super::nothing_to_apply("m", None).unwrap_err();
+        assert!(
+            matches!(&err, ChekovError::TuneNothingToApply { name } if name == "m"),
+            "{err}"
+        );
+        assert!(super::nothing_to_apply("m", Some(&baseline_argv())).is_ok());
+    }
+
+    #[test]
     fn a_launch_refusal_over_the_budget_is_a_skipped_trial_not_an_error() {
         let skipped = super::skip_reason(&ChekovError::ModelExceedsBudget {
             name: "m".into(),
