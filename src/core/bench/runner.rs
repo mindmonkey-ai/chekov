@@ -737,7 +737,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{ReadyPolicy, ReadyTarget, assert_props_ctx, wait_ready};
-    use crate::core::hub::{HttpClient, JsonRequest};
+    use crate::core::hub::{HttpClient, JsonRequest, StreamMarks};
     use crate::error::ChekovError;
 
     /// /health that answers 503-as-error `failures_left` times, then 200.
@@ -821,9 +821,12 @@ mod tests {
     use crate::core::proxy::http::HttpRequest;
     use crate::core::proxy::serve::Upstream;
 
-    /// Upstream answering every POST with one canned `OpenAI` body.
+    /// Upstream answering every POST with one canned `OpenAI` body, or — via
+    /// `new_streamed` — one canned SSE body plus canned `StreamMarks` for the
+    /// timed door.
     struct CannedUpstream {
         body: String,
+        marks: Option<StreamMarks>,
         bearer_seen: RefCell<Option<String>>,
         sent_body: RefCell<Option<String>>,
         url_seen: RefCell<Option<String>>,
@@ -833,9 +836,17 @@ mod tests {
         fn new(body: String) -> Self {
             Self {
                 body,
+                marks: None,
                 bearer_seen: RefCell::new(None),
                 sent_body: RefCell::new(None),
                 url_seen: RefCell::new(None),
+            }
+        }
+
+        fn new_streamed(body: String, marks: StreamMarks) -> Self {
+            Self {
+                marks: Some(marks),
+                ..Self::new(body)
             }
         }
     }
@@ -850,6 +861,19 @@ mod tests {
             *self.sent_body.borrow_mut() = Some(req.body.clone());
             *self.url_seen.borrow_mut() = Some(req.url.clone());
             Ok(self.body.clone())
+        }
+
+        fn post_json_stream_timed(
+            &self,
+            req: &JsonRequest,
+        ) -> Result<(String, StreamMarks), ChekovError> {
+            *self.bearer_seen.borrow_mut() = req.bearer.clone();
+            *self.sent_body.borrow_mut() = Some(req.body.clone());
+            *self.url_seen.borrow_mut() = Some(req.url.clone());
+            Ok((
+                self.body.clone(),
+                self.marks.expect("test wires marks before streaming"),
+            ))
         }
     }
 
@@ -883,6 +907,15 @@ mod tests {
         Upstream {
             base_url: "http://fake".into(),
             api_key: "sekrit".into(),
+        }
+    }
+
+    /// Canned `StreamMarks` for tests that don't care about the exact
+    /// numbers, only that a derivation is possible.
+    fn some_marks() -> StreamMarks {
+        StreamMarks {
+            to_first_data: Duration::from_millis(100),
+            first_to_done: Duration::from_secs(1),
         }
     }
 
@@ -1036,6 +1069,128 @@ mod tests {
         let err = super::cross_streaming(&wire(&http, &facade, &up), &anthropic_request("hi"))
             .expect_err("no timings, no measurement");
         assert!(matches!(err, ChekovError::BenchNoTimings), "{err}");
+    }
+
+    #[test]
+    fn stream_timings_derive_from_usage_counts_and_the_two_windows() {
+        let usage = super::StreamUsage {
+            prompt_tokens: 100,
+            completion_tokens: 51,
+        };
+        let marks = StreamMarks {
+            to_first_data: Duration::from_millis(500),
+            first_to_done: Duration::from_secs(2),
+        };
+        let t = super::timings_from_stream(&usage, &marks).unwrap();
+        assert_eq!(t.prompt_n, 100);
+        assert!((t.prompt_per_second - 200.0).abs() < 1e-9);
+        assert_eq!(t.predicted_n, 51);
+        assert!((t.predicted_per_second - 25.0).abs() < 1e-9);
+        assert_eq!(t.cache_n, 0);
+    }
+
+    /// Each undervivable stream is refused with its own reason (spec §3):
+    /// zero prompt tokens, too few completion tokens to time a decode
+    /// window, and a zero-length measurement window.
+    #[test]
+    fn each_underivable_stream_is_refused_with_its_reason() {
+        let marks = some_marks();
+
+        let zero_prompt = super::StreamUsage {
+            prompt_tokens: 0,
+            completion_tokens: 10,
+        };
+        let err = super::timings_from_stream(&zero_prompt, &marks).unwrap_err();
+        assert!(err.to_string().contains("usage.prompt_tokens is 0"), "{err}");
+
+        let one_completion = super::StreamUsage {
+            prompt_tokens: 10,
+            completion_tokens: 1,
+        };
+        let err = super::timings_from_stream(&one_completion, &marks).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("fewer than 2 completion tokens — no decode window to time"),
+            "{err}"
+        );
+
+        let zero_window = super::StreamUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+        };
+        let stalled = StreamMarks {
+            to_first_data: Duration::ZERO,
+            first_to_done: Duration::from_secs(1),
+        };
+        let err = super::timings_from_stream(&zero_window, &stalled).unwrap_err();
+        assert!(err.to_string().contains("zero-length timing window"), "{err}");
+    }
+
+    #[test]
+    fn the_usage_frame_is_the_last_one_and_absence_is_none() {
+        let sse = "data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\
+                   data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":8}}\n\
+                   data: [DONE]\n";
+        let u = super::stream_usage(sse).unwrap();
+        assert_eq!((u.prompt_tokens, u.completion_tokens), (9, 8));
+        assert!(super::stream_usage("data: {\"x\":1}\n").is_none());
+    }
+
+    /// `cross_stream_timed` runs the same SSE machinery as `cross_streaming`
+    /// but times it with chekov's own clock instead of reading a llama.cpp
+    /// `timings` object.
+    #[test]
+    fn cross_stream_timed_assembles_the_body_and_times_it_with_chekovs_clock() {
+        let marks = some_marks();
+        let http = CannedUpstream::new_streamed(
+            sse(&[
+                text_frame("hi there"),
+                serde_json::json!({
+                    "id": "c1",
+                    "choices": [{ "delta": {}, "finish_reason": "stop" }],
+                    "usage": { "prompt_tokens": 10, "completion_tokens": 3 }
+                }),
+            ]),
+            marks,
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let artifact =
+            super::cross_stream_timed(&wire(&http, &facade, &up), &anthropic_request("hi"))
+                .expect("a well-formed timed stream crosses");
+
+        let sent: serde_json::Value =
+            serde_json::from_str(&http.sent_body.borrow().clone().expect("posted")).expect("json");
+        assert_eq!(sent["stream"], true, "{sent}");
+
+        let body = parsed(&artifact);
+        assert_eq!(body["content"][0]["text"], "hi there", "{body}");
+
+        let usage = super::StreamUsage {
+            prompt_tokens: 10,
+            completion_tokens: 3,
+        };
+        let expected = super::timings_from_stream(&usage, &marks).expect("derivable");
+        assert_eq!(artifact.timings.prompt_n, expected.prompt_n);
+        assert!((artifact.timings.predicted_per_second - 2.0).abs() < 1e-9);
+        assert!(
+            (artifact.timings.predicted_per_second - expected.predicted_per_second).abs() < 1e-9
+        );
+
+        let no_usage = CannedUpstream::new_streamed(
+            sse(&[
+                text_frame("hi there"),
+                serde_json::json!({ "id": "c1", "choices": [{ "delta": {}, "finish_reason": "stop" }] }),
+            ]),
+            marks,
+        );
+        let err =
+            super::cross_stream_timed(&wire(&no_usage, &facade, &up), &anthropic_request("hi"))
+                .expect_err("no usage frame, no measurement");
+        assert!(
+            matches!(&err, ChekovError::ForeignTimingsUnsupported { reason, .. } if reason == "no usage object in the stream"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1270,15 +1425,16 @@ mod tests {
     /// template prompt, and returns the normalized fill (spec §6, I3a).
     #[test]
     fn cross_fim_chat_sends_the_pins_and_the_prompt_and_returns_the_normalized_fill() {
-        let http = CannedUpstream::new(
-            serde_json::json!({
-                "choices": [{
-                    "message": { "content": "```rust\nlet a = 1;\n```\n" },
-                    "finish_reason": "stop"
-                }],
-                "timings": final_frame()["timings"]
-            })
-            .to_string(),
+        let http = CannedUpstream::new_streamed(
+            sse(&[
+                text_frame("```rust\nlet a = 1;\n```\n"),
+                serde_json::json!({
+                    "id": "c1",
+                    "choices": [{ "delta": {}, "finish_reason": "stop" }],
+                    "usage": { "prompt_tokens": 900, "completion_tokens": 100 }
+                }),
+            ]),
+            some_marks(),
         );
         let facade = ClaudeFacade::new("local-model");
         let up = fake_upstream();
@@ -1306,6 +1462,7 @@ mod tests {
         assert_eq!(sent["top_k"], 1);
         assert_eq!(sent["seed"], 42);
         assert_eq!(sent["max_tokens"], super::n_predict_for(task.gold_lines));
+        assert_eq!(sent["stream"], true, "{sent}");
     }
 
     /// `cross_fim(.., Infill, ..)` still rides `/infill` — the chat wire never
@@ -1347,18 +1504,19 @@ mod tests {
     /// follows it — I1, locked here against a wire-level canned reply.
     #[test]
     fn a_leading_thinking_block_does_not_hide_the_chat_fill_text() {
-        let http = CannedUpstream::new(
-            serde_json::json!({
-                "choices": [{
-                    "message": {
-                        "content": "let a = 1;",
-                        "reasoning_content": "considering the prefix and suffix"
-                    },
-                    "finish_reason": "stop"
-                }],
-                "timings": final_frame()["timings"]
-            })
-            .to_string(),
+        let http = CannedUpstream::new_streamed(
+            sse(&[
+                serde_json::json!({ "id": "c1", "choices": [{ "delta": {
+                    "reasoning_content": "considering the prefix and suffix",
+                    "content": "let a = 1;"
+                } }] }),
+                serde_json::json!({
+                    "id": "c1",
+                    "choices": [{ "delta": {}, "finish_reason": "stop" }],
+                    "usage": { "prompt_tokens": 900, "completion_tokens": 100 }
+                }),
+            ]),
+            some_marks(),
         );
         let facade = ClaudeFacade::new("local-model");
         let up = fake_upstream();
@@ -1381,12 +1539,13 @@ mod tests {
     /// content) fails loudly rather than grading an empty string (I3c).
     #[test]
     fn a_chat_reply_with_no_text_block_fails_as_a_bad_request() {
-        let http = CannedUpstream::new(
-            serde_json::json!({
-                "choices": [{ "message": { "content": "" }, "finish_reason": "stop" }],
-                "timings": final_frame()["timings"]
-            })
-            .to_string(),
+        let http = CannedUpstream::new_streamed(
+            sse(&[serde_json::json!({
+                "id": "c1",
+                "choices": [{ "delta": {}, "finish_reason": "stop" }],
+                "usage": { "prompt_tokens": 900, "completion_tokens": 100 }
+            })]),
+            some_marks(),
         );
         let facade = ClaudeFacade::new("local-model");
         let up = fake_upstream();
@@ -1610,6 +1769,21 @@ mod tests {
         };
         let passthrough = super::foreign_timings_error(other, Some("mtplx 0.4.1"));
         assert!(matches!(passthrough, ChekovError::ProxyBadRequest { .. }));
+
+        // A guard inside `timings_from_stream`/`cross_stream_timed` has no
+        // declared runtime to hand, so it raises with the placeholder
+        // "unknown" — the recast must replace it with the caller's runtime,
+        // not merely pass an already-`ForeignTimingsUnsupported` error through.
+        let placeholder = ChekovError::ForeignTimingsUnsupported {
+            runtime: "unknown".to_owned(),
+            reason: "no usage object in the stream".to_owned(),
+        };
+        let recast_again = super::foreign_timings_error(placeholder, Some("mtplx 0.4.1"));
+        assert!(
+            matches!(&recast_again, ChekovError::ForeignTimingsUnsupported { runtime, reason }
+                if runtime == "mtplx 0.4.1" && reason == "no usage object in the stream"),
+            "the declared runtime overwrites the guard's placeholder: {recast_again}"
+        );
     }
 
     #[test]
