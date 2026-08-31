@@ -455,19 +455,33 @@ Codebase mode gained a chat-completions FIM fallback for runtimes with no
 `/infill` (the report names the transport), and `capability compare
 --cross-runtime` permits exactly the runtime/build/unmanaged/prompt-hash
 fields to differ, behind a loud banner ("this measures the runtimes, not the
-model."). Measuring throughput or timing still requires the server to report
-llama.cpp's non-standard `timings` object on every response; a server that
-does not fails loudly, per probe, as `ForeignTimingsUnsupported` naming the
-declared runtime rather than prescribing an engine rebuild that does not
-apply to it — a chekov-timed fallback for a timing-less foreign server is a
-recorded follow-up, not built in this pass. Cut from this pass: `--runtime`
-together with `--judge` is refused by the existing memory-budget gate — a
+model."). Cut from this pass: `--runtime` together with `--judge` is refused
+by the existing memory-budget gate — a
 foreign server chekov did not launch never comes down, so the judge has
 nowhere to load beside it — and live verification against a real MLX/MTPLX
 server is approval-gated and still owed; the plumbing ships unit-tested
 against fakes on the existing `HttpClient` seam.
-Proposed 2026-08-30 — status: SHIPPED (live foreign verification OPEN —
-approval-gated)
+SHIPPED 2026-08-31 (timing design): foreign runs no longer need llama.cpp's
+`timings` object at all — a foreign run is stream-timed by chekov's own wall
+clock over the SSE response instead (OpenAI `usage` token counts plus two
+measured windows, request-to-first-frame and first-frame-to-stream-end;
+decode divides by n-1 tokens; `cache_n` recorded `0`), and it is honest
+about its own limit: client-side timestamps include wire and translator
+overhead, and the first-frame mark only approximates end-of-prefill because
+these servers stream tokens as they are generated. That two-window split is
+the honesty limit of a buffered SSE read. A reply chekov cannot derive a
+timing from (no `usage`, fewer than 2 completion tokens, a zero-length
+window) still fails loudly per probe, naming the runtime and the exact
+reason. `Stamp` gains `timing_source` (`server-reported` default; every run
+already on disk reads unaffected), the report prints a `timing source:` line
+only when it isn't the default, and `--cross-runtime` permits it to differ.
+Remaining: agentic and fixture suites are still not on the timed path
+(recorded follow-up riding the same streamed mechanism), and live
+verification against a real MLX/MTPLX server is still approval-gated and
+owed.
+Proposed 2026-08-30 — status: SHIPPED; foreign-timing measurement SHIPPED
+2026-08-31 — remaining: foreign agentic/fixture timing, live MLX
+verification (approval-gated)
 
 ## MTP-head awareness: `explain` reports it, bench measures it (2026-08-30)
 Qwen 3.5+/3.8, Gemma 4 and GLM-5.x ship native MTP heads in their weights

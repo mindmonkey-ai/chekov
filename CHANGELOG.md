@@ -41,15 +41,34 @@ All notable changes to chekov are recorded here. The format follows
   (`cross-runtime comparison: <a> vs <b>` … `this measures the runtimes, not
   the model.`) naming every differing allow-listed field, and still refuses
   on anything else — plain `compare` (no flag) refuses a cross-runtime pair
-  on `runtime` like any other first-differing field. Measuring throughput or
-  timing still requires the server to report llama.cpp's non-standard
-  `timings` object on every response; a server that does not fails loudly,
-  per probe, as `ForeignTimingsUnsupported` naming the declared runtime
-  rather than prescribing an engine rebuild that does not apply to it — a
-  chekov-timed fallback for a timing-less foreign server is a recorded
-  follow-up, not built here. Live verification against a real MLX/MTPLX
-  server is approval-gated and has not run yet; the plumbing is unit-tested
-  against fakes on the existing `HttpClient` seam.
+  on `runtime` like any other first-differing field. Foreign throughput and
+  codebase chat-FIM crossings are now timed by chekov's own wall clock over
+  the streamed response instead of requiring llama.cpp's `timings` object: a
+  new `HttpClient::post_json_stream_timed` (default implementation refuses
+  with `ForeignTimingsUnsupported`; `UreqClient` overrides it) captures two
+  windows — request written → first SSE data frame, first data frame →
+  stream end — and a new `timings_from_stream` derives
+  `prompt_per_second`/`predicted_per_second` from the OpenAI `usage`
+  object's token counts (decode divides by n−1 tokens, since the first
+  token lands at the first-data mark; `cache_n` is recorded `0`, unknowable
+  through a foreign server). This is honest client-side timing — it includes
+  wire and translator overhead (negligible on localhost) and the first-data
+  mark only approximates end-of-prefill because these servers stream tokens
+  as they are generated — and it fails loudly per probe
+  (`ForeignTimingsUnsupported { runtime, reason }`) when a reply gives it
+  nothing to time: no `usage` frame, fewer than 2 completion tokens, or a
+  zero-length window. `Stamp` gains `timing_source` (`#[serde(default)]` to
+  `server-reported`, so every stored run reads unaffected; a foreign run
+  stamps `chekov-streamed`), and the report prints `timing source:
+  chekov-streamed (client wall-clock over SSE; includes wire overhead)` only
+  when it isn't `server-reported`. `capability compare --cross-runtime` now
+  also permits `timing_source` to differ (the allow-list grows to 12).
+  Agentic and fixture suites are not yet on the timed path — their
+  foreign-run row failures name the runtime and the exact reason instead of
+  `BenchNoTimings`'s engine-rebuild advice, but extending them onto the same
+  streamed mechanism is a recorded follow-up. Live verification against a
+  real MLX/MTPLX server is approval-gated and has not run yet; the plumbing
+  is unit-tested against fakes on the existing `HttpClient` seam.
 
 ### Changed
 - `[limits] wired_limit_mb` no longer has a built-in value. The old default,

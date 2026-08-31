@@ -216,14 +216,34 @@ a runtime with none; the report names which (`fim transport: /infill` or
 `prompt_set_hash` to differ, opens with a loud banner ending "this measures
 the runtimes, not the model.", and still refuses on everything else — plain
 `compare` refuses a cross-runtime pair on `runtime` like any other mismatch.
-Measuring throughput or timing still needs the server to report llama.cpp's
-non-standard `timings` object on every response; a server that does not
-(a stock OpenAI-compatible server has no reason to) fails loudly, per probe,
-naming the declared runtime rather than prescribing an engine rebuild that
-does not apply to it. A chekov-timed fallback for a timing-less foreign
-server is a recorded follow-up, not built here. No live foreign server has
-been benched yet; the plumbing ships unit-tested against fakes on the
-existing `HttpClient` seam.
+Throughput and codebase chat-FIM crossings on a foreign run no longer need
+llama.cpp's non-standard `timings` object: they are timed by chekov's own
+wall clock over the streamed response instead. OpenAI-shaped `usage` token
+counts (`prompt_tokens`, `completion_tokens`) combine with two measured
+windows — request written → first SSE data frame, first data frame → stream
+end — to derive the same `prompt_per_second`/`predicted_per_second` shape
+the report already prints (decode divides by n−1 tokens, since the first
+token lands at the first-data mark; `cache_n` is recorded `0`, unknowable
+through a foreign server). This is honest client-wall-clock timing: it
+includes wire and translator overhead (microseconds on localhost, negligible
+against token times), and the first-data mark only approximates end-of-prefill
+because these servers stream tokens as they are generated — the report says
+so. A reply chekov cannot derive a timing from (no `usage` frame, fewer than
+2 completion tokens, a zero-length window) fails loudly per probe, naming the
+declared runtime and exactly what was missing. The stamp's `timing_source`
+field (`server-reported` by default — every run already on disk reads
+unaffected; `chekov-streamed` on a foreign run) drives one report line,
+`timing source: chekov-streamed (client wall-clock over SSE; includes wire
+overhead)`, printed only when it isn't `server-reported`; `--cross-runtime`
+now also permits `timing_source` to differ. The codebase mode's
+chat-completions FIM fallback rides the same timed crossing, so foreign
+codebase rows carry real timings too; the llama.cpp `/infill` arm and its
+timing path are untouched. Agentic and fixture suites are not yet on the
+timed path — their foreign-run row failures name the runtime and the exact
+reason instead of prescribing an engine rebuild, but riding the same timed
+mechanism is a recorded follow-up. No live foreign server has been benched
+yet; the plumbing ships unit-tested against fakes on the existing
+`HttpClient` seam.
 
 ### The six doctor checks
 
