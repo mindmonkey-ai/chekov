@@ -505,6 +505,7 @@ pub fn render_run(log: &RunLog) -> String {
         "bench {}  ctx {}  engine {}  machine {}\n",
         log.head.model, stamp.ctx, stamp.engine_build_commit, stamp.machine_id
     );
+    out.push_str(&timing_source_line(stamp));
     out.push_str(&throughput_table(log));
     let probes: String = log
         .rows
@@ -910,6 +911,22 @@ fn fim_transport_line(stamp: &crate::core::bench::stamp::Stamp) -> String {
         "chat"
     };
     format!("fim transport: {transport}\n")
+}
+
+/// Whose clock produced the run's numbers, said out loud exactly when it was
+/// not the server's own (spec §6).
+///
+/// A llama.cpp run reads its timings off the server and prints nothing here —
+/// its render is what it always was. A run chekov timed itself carries the
+/// caveat with the claim: the windows include wire overhead.
+fn timing_source_line(stamp: &crate::core::bench::stamp::Stamp) -> String {
+    if stamp.timing_source == crate::core::bench::stamp::TIMING_SERVER {
+        return String::new();
+    }
+    format!(
+        "timing source: {} (client wall-clock over SSE; includes wire overhead)\n",
+        stamp.timing_source
+    )
 }
 
 /// `; exec: cargo 1.95.0 (…), offline, scratch target` — what the exec tiers
@@ -2746,13 +2763,13 @@ mod tests {
     #[test]
     fn the_header_names_chekovs_clock_only_when_it_measured() {
         let eval = scratch("timing-source");
-        let served = rendered_with(&eval, "r-server", head());
+        let served = rendered_with(&eval, "r-server", &head());
         assert!(!served.contains("timing source:"), "{served}");
 
         let mut foreign = head();
         foreign.stamp.runtime = "mtplx 0.4.1".into();
         foreign.stamp.timing_source = crate::core::bench::stamp::TIMING_CHEKOV_STREAMED.to_owned();
-        let timed = rendered_with(&eval, "r-foreign", foreign);
+        let timed = rendered_with(&eval, "r-foreign", &foreign);
         assert!(
             timed.contains(
                 "timing source: chekov-streamed (client wall-clock over SSE; includes wire \
@@ -2763,8 +2780,8 @@ mod tests {
     }
 
     /// One depth recorded under the given head, rendered.
-    fn rendered_with(eval: &std::path::Path, run_id: &str, head: RunHead) -> String {
-        let mut writer = RunWriter::create(eval, run_id, &head).expect("create");
+    fn rendered_with(eval: &std::path::Path, run_id: &str, head: &RunHead) -> String {
+        let mut writer = RunWriter::create(eval, run_id, head).expect("create");
         writer
             .append(Task {
                 suite: "throughput".into(),

@@ -1345,6 +1345,61 @@ const fn fim_for(runtime: Option<&RuntimeSpec>) -> crate::core::bench::runner::F
     }
 }
 
+/// Whose clock times a run — and so which door its throughput rows record and
+/// what the stamp claims (spec §5, §6).
+///
+/// llama.cpp reports a `timings` object chekov reads back; a foreign runtime
+/// reports none, so chekov times the streamed reply itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimingClock {
+    /// The server's own `timings` object, read off the buffered reply.
+    Server,
+    /// chekov's wall clock over the SSE stream.
+    ChekovStreamed,
+}
+
+impl TimingClock {
+    /// Selection is by runtime, and only by runtime — exactly like `fim_for`.
+    const fn of(runtime: Option<&RuntimeSpec>) -> Self {
+        match runtime {
+            Some(_) => Self::ChekovStreamed,
+            None => Self::Server,
+        }
+    }
+
+    /// The door a throughput row is recorded under. A resumed run looks its
+    /// recorded depths up by this key, so it must match what wrote them.
+    const fn transport(self) -> crate::core::bench::store::Transport {
+        use crate::core::bench::store::Transport;
+        match self {
+            Self::Server => Transport::Buffered,
+            Self::ChekovStreamed => Transport::Streamed,
+        }
+    }
+
+    /// What the stamp records as having measured the run.
+    const fn source(self) -> &'static str {
+        use crate::core::bench::stamp;
+        match self {
+            Self::Server => stamp::TIMING_SERVER,
+            Self::ChekovStreamed => stamp::TIMING_CHEKOV_STREAMED,
+        }
+    }
+
+    /// The crossing that measures one throughput probe under this clock.
+    fn cross(
+        self,
+        wire: &crate::core::bench::runner::ProbeWire,
+        req: &crate::core::proxy::http::HttpRequest,
+    ) -> Result<crate::core::bench::runner::ProbeArtifact, ChekovError> {
+        use crate::core::bench::runner;
+        match self {
+            Self::Server => runner::cross(wire, req),
+            Self::ChekovStreamed => runner::cross_stream_timed(wire, req),
+        }
+    }
+}
+
 /// Readiness through rendering for one already-up server.
 fn measure_candidate(
     ctx: &Ctx,
@@ -1380,6 +1435,7 @@ fn measure_candidate(
             suite: args.suite,
             prepared: inputs.prepared,
             fim: fim_for(args.runtime.as_ref()),
+            clock: TimingClock::of(args.runtime.as_ref()),
             runtime: args.runtime.as_ref().map(RuntimeSpec::stored),
         },
     )?;
@@ -1612,6 +1668,9 @@ struct SuiteInputs<'a> {
     /// Which wire the codebase suite fills its rows over — selected by
     /// runtime, and threaded down to the one crossing that sends it (§6).
     fim: crate::core::bench::runner::FimTransport,
+    /// Whose clock times the throughput sweep — selected by runtime, and
+    /// threaded down to the crossing and the row key it decides (§5).
+    clock: TimingClock,
     /// The declared foreign runtime's stored spelling, when there is one —
     /// so a missing-timings failure names it instead of prescribing an
     /// engine rebuild that does not apply (C1).
@@ -1633,28 +1692,67 @@ fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<()
     };
     let runtime = inputs.runtime.as_deref();
     let recast = |e| runner::foreign_timings_error(e, runtime);
+    let pass = SuitePass {
+        wire: &wire,
+        clock: inputs.clock,
+        runtime,
+    };
     if inputs.suite.is_some_and(Suite::runs_throughput) {
-        run_throughput(sink, inputs.plan, &wire).map_err(recast)?;
+        run_throughput(sink, &pass, inputs.plan).map_err(recast)?;
     }
     if inputs.suite.is_some_and(Suite::runs_agentic) {
-        run_agentic(sink, &wire).map_err(recast)?;
+        run_agentic(sink, &pass).map_err(recast)?;
     }
     if let Some(path) = inputs.fixture {
-        run_fixture(sink, &wire, path).map_err(recast)?;
+        run_fixture(sink, &pass, path).map_err(recast)?;
     }
-    if let Some(prepared) = inputs.prepared {
-        crate::core::bench::codebase::run::run_codebase(
-            &mut crate::core::bench::codebase::run::Sink {
-                writer: sink.writer,
-                done: sink.done,
-                fim: inputs.fim,
-                runtime: inputs.runtime.clone(),
-            },
-            &wire,
-            prepared,
-        )?;
-    }
-    Ok(())
+    run_codebase_suite(sink, inputs, &wire)
+}
+
+/// The codebase suite over its own sink — the wire it fills rows on is the
+/// run's, the transport its own (§6). Nothing prepared, nothing to run.
+fn run_codebase_suite(
+    sink: &mut TaskSink,
+    inputs: &SuiteInputs,
+    wire: &crate::core::bench::runner::ProbeWire,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::codebase::run;
+    let Some(prepared) = inputs.prepared else {
+        return Ok(());
+    };
+    run::run_codebase(
+        &mut run::Sink {
+            writer: sink.writer,
+            done: sink.done,
+            fim: inputs.fim,
+            runtime: inputs.runtime.clone(),
+        },
+        wire,
+        prepared,
+    )
+}
+
+/// What every suite crossing needs beyond the sink: the wire it rides, whose
+/// clock times it, and the declared foreign runtime whose name a
+/// missing-timings row failure must carry (§5, §7). Bundled so each suite
+/// runner stays inside the 3-argument limit (§4).
+struct SuitePass<'a> {
+    wire: &'a crate::core::bench::runner::ProbeWire<'a>,
+    clock: TimingClock,
+    runtime: Option<&'a str>,
+}
+
+/// A crossing outcome as its own row will read it.
+///
+/// `append_probe` swallows a failure into row text, so the recast has to
+/// happen here rather than at the suite boundary: on a foreign run a
+/// missing-timings failure names the declared runtime, and llama.cpp
+/// outcomes pass through byte-for-byte unchanged (§7).
+fn row_outcome<T>(
+    outcome: Result<T, ChekovError>,
+    runtime: Option<&str>,
+) -> Result<T, ChekovError> {
+    outcome.map_err(|e| crate::core::bench::runner::foreign_timings_error(e, runtime))
 }
 
 /// Rough extra seconds for the agentic suites (8s per crossing), from the
@@ -1685,10 +1783,7 @@ fn agentic_estimate_secs(
 /// exists in only one of them shows up as the same case disagreeing with
 /// itself. The grammar-forced pass stays buffered: its axis is the grammar
 /// gap, not the transport.
-fn run_agentic(
-    sink: &mut TaskSink,
-    wire: &crate::core::bench::runner::ProbeWire,
-) -> Result<(), ChekovError> {
+fn run_agentic(sink: &mut TaskSink, suite: &SuitePass) -> Result<(), ChekovError> {
     use crate::core::bench::store::Transport;
     let set = crate::core::bench::probeset::agentic_v0()?;
     // Once the engine has refused a forced grammar, it will refuse every
@@ -1697,7 +1792,7 @@ fn run_agentic(
     let mut refusal = None;
     for transport in [Transport::Buffered, Transport::Streamed] {
         let mut pass = AgenticPass {
-            wire,
+            suite,
             transport,
             refusal: refusal.take(),
         };
@@ -1712,10 +1807,11 @@ fn run_agentic(
     Ok(())
 }
 
-/// One door's pass over the agentic set: the wire, which door, and the
-/// engine's refusal of forced grammars once it has refused.
+/// One door's pass over the agentic set: what every suite crossing rides,
+/// which door, and the engine's refusal of forced grammars once it has
+/// refused.
 struct AgenticPass<'a> {
-    wire: &'a crate::core::bench::runner::ProbeWire<'a>,
+    suite: &'a SuitePass<'a>,
     transport: crate::core::bench::store::Transport,
     refusal: Option<String>,
 }
@@ -1736,15 +1832,14 @@ fn run_tool_case(
         transport: pass.transport,
     };
     if !sink.is_done(&key) {
-        let outcome = runner::cross_via(pass.wire, &probes::tool_probe(case), pass.transport).map(
-            |artifact| {
+        let outcome = runner::cross_via(pass.suite.wire, &probes::tool_probe(case), pass.transport)
+            .map(|artifact| {
                 (
                     artifact.timings,
                     grade_row(grade::grade_tool_emit(&artifact.anthropic_body, case)),
                 )
-            },
-        );
-        append_probe(sink, key, outcome)?;
+            });
+        append_probe(sink, key, row_outcome(outcome, pass.suite.runtime))?;
     }
     if case.expect != probeset::Expect::Call || pass.transport != Transport::Buffered {
         return Ok(());
@@ -1767,12 +1862,16 @@ fn run_instruction_case(
     if sink.is_done(&key) {
         return Ok(());
     }
-    let outcome = runner::cross_via(pass.wire, &probes::instruction_probe(case), pass.transport)
-        .map(|artifact| {
-            let (strict, loose) = grade::grade_instruction(&artifact.anthropic_body, case);
-            (artifact.timings, instruction_row(strict, &loose))
-        });
-    append_probe(sink, key, outcome)
+    let outcome = runner::cross_via(
+        pass.suite.wire,
+        &probes::instruction_probe(case),
+        pass.transport,
+    )
+    .map(|artifact| {
+        let (strict, loose) = grade::grade_instruction(&artifact.anthropic_body, case);
+        (artifact.timings, instruction_row(strict, &loose))
+    });
+    append_probe(sink, key, row_outcome(outcome, pass.suite.runtime))
 }
 
 /// The forced half of one call case.
@@ -1796,7 +1895,8 @@ fn run_forced_case(
         return append_unavailable(sink, &forced_id, reason);
     }
     let schema = probeset::forced_schema(case);
-    match runner::cross_forced(forced.wire, &probes::forced_probe(case), &schema) {
+    let crossed = runner::cross_forced(forced.suite.wire, &probes::forced_probe(case), &schema);
+    match row_outcome(crossed, forced.suite.runtime) {
         Ok(artifact) => {
             let verdict = grade_row(grade::grade_forced(&artifact.anthropic_body, case));
             append_probe(
@@ -1948,17 +2048,23 @@ fn already_done(done: &[Done], key: &crate::core::bench::store::TaskKey) -> bool
 /// or ctrl-C loses at most the depth in flight.
 fn run_throughput(
     sink: &mut TaskSink,
+    pass: &SuitePass,
     plan: &crate::core::bench::sweep::SweepPlan,
-    wire: &crate::core::bench::runner::ProbeWire,
 ) -> Result<(), ChekovError> {
-    use crate::core::bench::{runner, store, sweep};
+    use crate::core::bench::{store, sweep};
+    let transport = pass.clock.transport();
     for &depth in &plan.depths {
         let task_id = format!("depth-{depth}");
-        if sink.is_done(&store::TaskKey::buffered("throughput", &task_id)) {
+        if sink.is_done(&store::TaskKey {
+            suite: "throughput",
+            task_id: &task_id,
+            transport,
+        }) {
             eprintln!("chekov: {task_id} already recorded — skipped (--resume)");
             continue;
         }
-        let result = sweep::measure_depth(plan, depth, &mut |req| runner::cross(wire, req))?;
+        let result =
+            sweep::measure_depth(plan, depth, &mut |req| pass.clock.cross(pass.wire, req))?;
         let warmup = result.decode.as_ref().map_or(0, |s| s.warmup_dropped);
         sink.writer.append(store::Task {
             suite: "throughput".into(),
@@ -1971,7 +2077,7 @@ fn run_throughput(
                 cache_n: result.cache_n,
             },
             grade: None,
-            transport: store::Transport::Buffered,
+            transport,
             codebase: None,
             judge: None,
         })?;
@@ -1983,7 +2089,7 @@ fn run_throughput(
 /// with its reason — a broken exchange must never look like an empty reply.
 fn run_fixture(
     sink: &mut TaskSink,
-    wire: &crate::core::bench::runner::ProbeWire,
+    pass: &SuitePass,
     path: &std::path::Path,
 ) -> Result<(), ChekovError> {
     use crate::core::bench::store::TaskKey;
@@ -1997,13 +2103,17 @@ fn run_fixture(
             );
             continue;
         }
-        let outcome = runner::cross(wire, &probes::fixture_probe(probe)).map(|artifact| {
+        let outcome = runner::cross(pass.wire, &probes::fixture_probe(probe)).map(|artifact| {
             (
                 artifact.timings,
                 grade_row(grade::grade(&artifact.anthropic_body, probe)),
             )
         });
-        append_probe(sink, TaskKey::buffered("fixture", &probe.id), outcome)?;
+        append_probe(
+            sink,
+            TaskKey::buffered("fixture", &probe.id),
+            row_outcome(outcome, pass.runtime),
+        )?;
     }
     Ok(())
 }
@@ -2160,8 +2270,9 @@ fn assemble_stamp(
     stamp::Stamp {
         machine_id: parts.machine_id,
         runtime: parts.runtime,
-        // Task 4 stamps the real value; every run today is server-timed.
-        timing_source: stamp::TIMING_SERVER.to_owned(),
+        // Whoever timed the crossings is whoever the suites asked: one
+        // selection, by runtime, spelled once (§5, §6).
+        timing_source: TimingClock::of(inputs.runtime).source().to_owned(),
         engine_build_commit: parts.engine,
         weights_revision: format!(
             "{}/{}",
