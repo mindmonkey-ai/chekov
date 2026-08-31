@@ -2376,6 +2376,191 @@ mod tests {
         assert!(on.opts.allow_exec);
     }
 
+    /// The declared runtime every foreign test speaks about.
+    fn foreign_spec() -> crate::core::bench::runtime::RuntimeSpec {
+        crate::core::bench::runtime::RuntimeSpec::parse("mtplx@0.4.1").expect("parses")
+    }
+
+    /// A registered model shaped only enough to be stamped — `UseRunning`
+    /// needs no shard on disk, and the stamp reads the entry, not the file.
+    fn foreign_candidate() -> crate::core::bench::candidate::Candidate {
+        crate::core::bench::candidate::Candidate {
+            eff: crate::core::registry::Effective {
+                name: "mtplx-model".into(),
+                ctx_size: 4096,
+                flags: vec![],
+                entry: crate::core::registry::ModelEntry {
+                    repo: "acme/Model-GGUF".into(),
+                    quant: "UD-Q5_K_XL".into(),
+                    revision: "abc123def456".into(),
+                    path: "models/mtplx-model@abc123def456".into(),
+                    first_shard: "Model-UD-Q5_K_XL-00001-of-00001.gguf".into(),
+                    hermes_ok: true,
+                    ctx_size: None,
+                    extra_flags: vec![],
+                    role: None,
+                },
+            },
+            pid: 0,
+        }
+    }
+
+    /// `--upstream` is meaningless without a declared runtime, and a
+    /// malformed `--runtime` refuses at argument assembly — before a
+    /// repository, a registry or a server is asked about.
+    #[test]
+    fn runtime_parses_and_upstream_requires_it() {
+        use clap::Parser;
+
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            opts: super::BenchOpts,
+        }
+
+        let w = Wrap::parse_from([
+            "cap",
+            "--runtime",
+            "mtplx@0.4.1",
+            "--upstream",
+            "http://127.0.0.1:9999",
+        ]);
+        assert_eq!(w.opts.runtime.as_deref(), Some("mtplx@0.4.1"));
+        assert_eq!(w.opts.upstream.as_deref(), Some("http://127.0.0.1:9999"));
+        assert!(
+            Wrap::try_parse_from(["cap", "--upstream", "http://x"]).is_err(),
+            "--upstream alone declares nothing"
+        );
+
+        let good = Wrap::parse_from(["cap", "--runtime", "mtplx@0.4.1"]);
+        let args = super::bench_args(&good.opts).expect("a well-formed runtime");
+        assert_eq!(
+            args.runtime.as_ref().map(super::RuntimeSpec::stored),
+            Some("mtplx 0.4.1".to_owned())
+        );
+        let bad = Wrap::parse_from(["cap", "--runtime", "MTPLX@1"]);
+        assert!(matches!(
+            super::bench_args(&bad.opts),
+            Err(ChekovError::RuntimeFlagInvalid { .. })
+        ));
+    }
+
+    /// The foreign path never launches the subject, so it can only ever
+    /// measure one already-served model — and the refusal is pure: no `Ctx`,
+    /// no server, no HTTP.
+    #[test]
+    fn a_foreign_run_with_two_models_is_refused_before_any_http() {
+        use crate::core::bench::lifecycle::StepAction;
+        let spec = foreign_spec();
+        let two = ["a".to_owned(), "b".to_owned()];
+        let err = super::foreign_actions(&spec, &two).expect_err("two subjects");
+        assert!(
+            matches!(err, ChekovError::RuntimeNeedsRunningServer { .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("mtplx 0.4.1"), "{err}");
+        let one = ["a".to_owned()];
+        assert_eq!(
+            super::foreign_actions(&spec, &one).expect("one served subject"),
+            vec![StepAction::UseRunning]
+        );
+    }
+
+    /// A server chekov did not launch has no observed flags and no observed
+    /// geometry: every one of them is stamped `unmanaged` or zero, and the
+    /// runtime is named rather than assumed (spec §5).
+    #[test]
+    fn a_foreign_stamp_is_sentinelled_and_named() {
+        let spec = foreign_spec();
+        let (engine, flags) = super::foreign_stamp_parts(&spec);
+        assert_eq!(engine, "0.4.1", "the declared version IS the build string");
+        for value in [
+            &flags.kv_unified,
+            &flags.n_batch,
+            &flags.n_ubatch,
+            &flags.type_k,
+            &flags.type_v,
+            &flags.flash_attn,
+        ] {
+            assert_eq!(value, "unmanaged", "not observed, and never invented");
+        }
+        let plan = plan_fixture();
+        let inputs = super::HeadInputs {
+            props: crate::core::bench::runner::PropsInfo {
+                n_ctx: 0,
+                total_slots: 0,
+            },
+            plan: &plan,
+            fixture: None,
+            suite: None,
+            codebase: None,
+            judge: None,
+            runtime: Some(&spec),
+        };
+        let stamp = super::assemble_stamp(
+            &foreign_candidate(),
+            &inputs,
+            super::StampParts {
+                machine_id: "m".to_owned(),
+                engine,
+                prompt_set_hash: "h".to_owned(),
+                corpus_id: "c".to_owned(),
+                flags,
+                runtime: spec.stored(),
+                seed: 7,
+            },
+        );
+        assert_eq!(stamp.ctx, 0);
+        assert_eq!(stamp.n_parallel, 0);
+        assert_eq!(stamp.runtime, "mtplx 0.4.1");
+    }
+
+    /// Selection is by runtime, and only by runtime (spec §6).
+    #[test]
+    fn the_chat_arm_is_selected_exactly_for_a_foreign_runtime() {
+        use crate::core::bench::runner::FimTransport;
+        assert_eq!(super::fim_for(None), FimTransport::Infill);
+        let spec = foreign_spec();
+        assert_eq!(super::fim_for(Some(&spec)), FimTransport::Chat);
+    }
+
+    /// A codebase suite that rides the chat arm carries a DIFFERENT
+    /// prompt-set hash: the template is part of the prompt set, so a template
+    /// edit is a named stamp change and the two transports never match.
+    #[test]
+    fn a_foreign_codebase_hash_wraps_the_base() {
+        use crate::core::bench::lifecycle::Suite;
+        let plan = plan_fixture();
+        let bench_cfg = crate::core::config::BenchSection::default();
+        let local = super::HeadInputs {
+            props: props_fixture(),
+            plan: &plan,
+            fixture: None,
+            suite: Some(Suite::Throughput),
+            codebase: Some(super::CodebaseHead {
+                head: "4818813deeaa",
+                set_hash: "abcdef123456",
+                allow_exec: false,
+                cargo_version: None,
+            }),
+            judge: None,
+            runtime: None,
+        };
+        let (base, corpus) = super::head_corpus(&local, &bench_cfg).expect("local hash");
+        let spec = foreign_spec();
+        let foreign = super::HeadInputs {
+            runtime: Some(&spec),
+            ..local
+        };
+        let (wrapped, foreign_corpus) = super::head_corpus(&foreign, &bench_cfg).expect("chat hash");
+        assert_eq!(
+            wrapped,
+            crate::core::bench::runner::chat_fim_hash(&base),
+            "the chat arm's hash wraps today's value"
+        );
+        assert_eq!(foreign_corpus, corpus, "the corpus is the same task set");
+    }
+
     use crate::core::bench::codebase::ladder::Symbols;
     use crate::core::bench::codebase::{CodebaseTask, Counts, Excluded, Prepared, TaskTier};
 
