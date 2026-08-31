@@ -1073,6 +1073,7 @@ mod tests {
     fn stamp(engine: &str, weights: &str) -> Stamp {
         Stamp {
             machine_id: "8d41f0c2a917".into(),
+            runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
             engine_build_commit: engine.into(),
             weights_revision: weights.into(),
             quant: "Q8_0".into(),

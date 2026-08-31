@@ -207,11 +207,10 @@ pub enum ChekovError {
     },
 
     #[error(
-        "bench stamp mismatch on '{field}' ({a} vs {b}) — llama.cpp does not \
-         guarantee bit-identical results across configurations (GPU reduction \
-         kernels pick different accumulation orders and float addition is not \
-         associative), so determinism holds only inside one pinned \
-         configuration; re-bench under a matching stamp and compare those runs"
+        "bench stamp mismatch on '{field}' ({a} vs {b}) — results are \
+         comparable only inside one pinned configuration (runtime, build, \
+         flags and sampling all held constant); re-bench under a matching \
+         stamp and compare those runs"
     )]
     BenchStampMismatch { field: String, a: String, b: String },
 

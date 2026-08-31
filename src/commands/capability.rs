@@ -1996,6 +1996,7 @@ fn assemble_stamp(
     use crate::core::bench::stamp;
     stamp::Stamp {
         machine_id: parts.machine_id,
+        runtime: stamp::RUNTIME_LLAMA_CPP.to_owned(),
         engine_build_commit: parts.engine,
         weights_revision: format!(
             "{}/{}",
@@ -2638,6 +2639,7 @@ mod tests {
     fn eligible_stamp() -> crate::core::bench::stamp::Stamp {
         crate::core::bench::stamp::Stamp {
             machine_id: "8d41f0c2a917".into(),
+            runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
             engine_build_commit: "dda1b0d67".into(),
             weights_revision: "fbbaed45c2f0/model-00001.gguf".into(),
             quant: "Q8_0".into(),
