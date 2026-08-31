@@ -158,7 +158,11 @@ fn incumbent_batch(incumbent: &[String]) -> u32 {
 }
 
 /// The candidate values a stage tries, per the `[tune]` config (spec §4).
-fn values_for(stage: Stage, incumbent: &[String], cfg: &TuneSection) -> Vec<String> {
+///
+/// The plan line counts these (`N candidates`) while `candidates` returns the
+/// ones that are not the incumbent already — the two numbers differ by the
+/// incumbent, which is what the plan says out loud.
+pub(crate) fn values_for(stage: Stage, incumbent: &[String], cfg: &TuneSection) -> Vec<String> {
     match stage {
         Stage::Fa => cfg.flash_attn.clone(),
         Stage::Kv => cfg.cache_types.clone(),
@@ -352,7 +356,7 @@ pub fn pick_winner<'a>(
 }
 
 /// The two metric cells of a stage-tuning report line (spec §9).
-fn measured_cells(measured: &Measured) -> String {
+pub(crate) fn measured_cells(measured: &Measured) -> String {
     format!(
         "decode {:.1} [{:.1}..{:.1}]  prefill {:.0} [{:.0}..{:.0}]",
         measured.decode.median,

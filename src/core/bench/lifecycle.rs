@@ -135,10 +135,10 @@ pub enum StepAction {
 
 /// Reference rates from the spec's measured inputs (§7.6): load ≈ 4 s/GiB,
 /// prefill ≈ 150 tok/s, decode ≈ 60 tok/s. An estimate, never a promise.
-const LOAD_MS_PER_GIB: u64 = 4_000;
-const PREFILL_TOK_S: u64 = 150;
-const DECODE_TOK_S: u64 = 60;
-const GIB: u64 = 1024 * 1024 * 1024;
+pub(crate) const LOAD_MS_PER_GIB: u64 = 4_000;
+pub(crate) const PREFILL_TOK_S: u64 = 150;
+pub(crate) const DECODE_TOK_S: u64 = 60;
+pub(crate) const GIB: u64 = 1024 * 1024 * 1024;
 
 /// Rough wall-clock seconds for the whole plan.
 ///
@@ -214,7 +214,7 @@ fn step_line(step: &BenchStep) -> String {
 }
 
 /// One-decimal GiB without touching floats.
-fn render_gib(bytes: u64) -> String {
+pub(crate) fn render_gib(bytes: u64) -> String {
     let tenths = bytes * 10 / GIB;
     format!("{}.{} GiB", tenths / 10, tenths % 10)
 }

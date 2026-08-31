@@ -1938,7 +1938,7 @@ impl HeadInputs<'_> {
 
 /// Who measured: the hashed machine identity, its human-readable brand, and
 /// the engine commit. Each is required — a stamp cannot pin an unknown.
-fn stamp_identity(
+pub(crate) fn stamp_identity(
     cfg: &crate::core::config::Config,
 ) -> Result<(String, Option<String>, String), ChekovError> {
     let probed = machine::probe(&cfg.engine_dir());
