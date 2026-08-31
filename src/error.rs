@@ -194,6 +194,13 @@ pub enum ChekovError {
     )]
     BenchNoTimings,
 
+    #[error(
+        "the server declared as runtime '{runtime}' never returned llama.cpp's \
+         `timings` object — chekov cannot measure timings through {runtime} yet; \
+         this is a recorded follow-up, not a defect to work around today"
+    )]
+    ForeignTimingsUnsupported { runtime: String },
+
     #[error("bench fixture {}: {reason}", path.display())]
     FixtureInvalid {
         path: std::path::PathBuf,
@@ -207,13 +214,22 @@ pub enum ChekovError {
     },
 
     #[error(
-        "bench stamp mismatch on '{field}' ({a} vs {b}) — llama.cpp does not \
-         guarantee bit-identical results across configurations (GPU reduction \
-         kernels pick different accumulation orders and float addition is not \
-         associative), so determinism holds only inside one pinned \
-         configuration; re-bench under a matching stamp and compare those runs"
+        "bench stamp mismatch on '{field}' ({a} vs {b}) — results are \
+         comparable only inside one pinned configuration (runtime, build, \
+         flags and sampling all held constant); re-bench under a matching \
+         stamp and compare those runs"
     )]
     BenchStampMismatch { field: String, a: String, b: String },
+
+    #[error("--runtime '{value}' is not <name>@<version> — {reason}")]
+    RuntimeFlagInvalid { value: String, reason: String },
+
+    #[error(
+        "--runtime {runtime} benches a server you started — chekov cannot \
+         launch a {runtime} server; start it, then re-run (the subject must \
+         already be serving)"
+    )]
+    RuntimeNeedsRunningServer { runtime: String },
 
     #[error(
         "the server is running '{running}' but bench was asked for '{resolved}' \

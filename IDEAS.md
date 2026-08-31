@@ -442,7 +442,32 @@ becomes the referee that can measure MTPLX's speed claim AND test its
 exactness claim empirically — same corpus, same HEAD, tiers 1-7 llama.cpp vs
 MTPLX, with the B2 exec tiers checking that the "identical" fills still
 compile and pass. Nobody else's harness can do that today.
-Proposed 2026-08-30 — status: OPEN
+SHIPPED 2026-08-31: `capability bench NAME --runtime <name>@<version>
+[--upstream <url>]` makes a foreign OpenAI-compatible server a
+`UseRunning`-only bench subject — chekov never launches one, and refuses
+(`RuntimeNeedsRunningServer`) before any measurement if the subject isn't
+already serving. Readiness is a plain `GET /v1/models` with served ids
+printed, never asserted; unmanaged launch flags stamp as fixed sentinels
+(`ctx`/`n_parallel` `0`, six flag fields `"unmanaged"`) instead of invented
+ones. `Stamp` gains `runtime` (serde-default `llama.cpp`; every run already
+on disk reads unaffected), and `BenchStampMismatch` is now engine-neutral.
+Codebase mode gained a chat-completions FIM fallback for runtimes with no
+`/infill` (the report names the transport), and `capability compare
+--cross-runtime` permits exactly the runtime/build/unmanaged/prompt-hash
+fields to differ, behind a loud banner ("this measures the runtimes, not the
+model."). Measuring throughput or timing still requires the server to report
+llama.cpp's non-standard `timings` object on every response; a server that
+does not fails loudly, per probe, as `ForeignTimingsUnsupported` naming the
+declared runtime rather than prescribing an engine rebuild that does not
+apply to it — a chekov-timed fallback for a timing-less foreign server is a
+recorded follow-up, not built in this pass. Cut from this pass: `--runtime`
+together with `--judge` is refused by the existing memory-budget gate — a
+foreign server chekov did not launch never comes down, so the judge has
+nowhere to load beside it — and live verification against a real MLX/MTPLX
+server is approval-gated and still owed; the plumbing ships unit-tested
+against fakes on the existing `HttpClient` seam.
+Proposed 2026-08-30 — status: SHIPPED (live foreign verification OPEN —
+approval-gated)
 
 ## MTP-head awareness: `explain` reports it, bench measures it (2026-08-30)
 Qwen 3.5+/3.8, Gemma 4 and GLM-5.x ship native MTP heads in their weights

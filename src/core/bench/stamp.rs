@@ -1,4 +1,4 @@
-//! The 21-field configuration stamp (spec §7.4).
+//! The 22-field configuration stamp (spec §7.4).
 //!
 //! llama.cpp does not guarantee bit-identical results across configurations:
 //! GPU reduction kernels pick different accumulation orders and float
@@ -14,6 +14,12 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct Stamp {
     pub machine_id: String,
+    /// The runtime serving the model: `llama.cpp` for every run chekov
+    /// launches; the declared `<name> <version>` for a foreign server.
+    /// Stored runs from before this field existed were all llama.cpp,
+    /// which is what the serde default says.
+    #[serde(default = "default_runtime")]
+    pub runtime: String,
     pub engine_build_commit: String,
     /// `<revision>/<first_shard>` — the pinned HF revision is content-addressed
     /// upstream; hashing 35-180 GiB of weights per run would cost minutes for
@@ -87,11 +93,20 @@ pub const EXEC_TARGET_SCRATCH: &str = "scratch";
 /// `exec_target` when the run built nothing at all.
 pub const EXEC_TARGET_OFF: &str = "none";
 
+/// A stamp written before the runtime field existed came from llama.cpp.
+fn default_runtime() -> String {
+    RUNTIME_LLAMA_CPP.to_owned()
+}
+
+/// `Stamp.runtime` for every run chekov launches itself.
+pub const RUNTIME_LLAMA_CPP: &str = "llama.cpp";
+
 /// The FIRST differing field name, in declaration order — or `None` if equal.
 #[must_use]
 pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
-    let pairs: [(&'static str, bool); 21] = [
+    let pairs: [(&'static str, bool); 22] = [
         ("machine_id", a.machine_id != b.machine_id),
+        ("runtime", a.runtime != b.runtime),
         (
             "engine_build_commit",
             a.engine_build_commit != b.engine_build_commit,
@@ -168,11 +183,12 @@ pub fn flag_value_either(args: &[String], names: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Stamp, first_mismatch, flag_value};
+    use super::{RUNTIME_LLAMA_CPP, Stamp, first_mismatch, flag_value};
 
     fn stamp() -> Stamp {
         Stamp {
             machine_id: "8d41f0c2a917".into(),
+            runtime: RUNTIME_LLAMA_CPP.to_owned(),
             engine_build_commit: "dda1b0d67".into(),
             weights_revision: "fbbaed45c2f0/model-00001.gguf".into(),
             quant: "Q8_0".into(),
@@ -297,5 +313,40 @@ mod tests {
             Some("ctx"),
             "earlier fields still win"
         );
+    }
+
+    #[test]
+    fn a_stamp_without_a_runtime_field_reads_as_llama_cpp() {
+        // Every run stored before this field existed was a llama.cpp run.
+        let json = serde_json::json!({
+            "machine_id": "m", "engine_build_commit": "c",
+            "weights_revision": "r/s", "quant": "q", "ctx": 1, "n_parallel": 1,
+            "kv_unified": "engine-default", "n_batch": "engine-default",
+            "n_ubatch": "engine-default", "type_k": "engine-default",
+            "type_v": "engine-default", "flash_attn": "engine-default",
+            "seed": 0, "temperature_milli": 0, "chekov_version": "0",
+            "prompt_set_hash": "h", "corpus_id": "corp"
+        });
+        let stamp: super::Stamp = serde_json::from_value(json).unwrap();
+        assert_eq!(stamp.runtime, super::RUNTIME_LLAMA_CPP);
+    }
+
+    #[test]
+    fn runtime_differs_before_the_engine_commit() {
+        let mut a: super::Stamp = serde_json::from_value(serde_json::json!({
+            "machine_id": "m", "engine_build_commit": "aaa",
+            "weights_revision": "r/s", "quant": "q", "ctx": 1, "n_parallel": 1,
+            "kv_unified": "engine-default", "n_batch": "engine-default",
+            "n_ubatch": "engine-default", "type_k": "engine-default",
+            "type_v": "engine-default", "flash_attn": "engine-default",
+            "seed": 0, "temperature_milli": 0, "chekov_version": "0",
+            "prompt_set_hash": "h", "corpus_id": "corp"
+        }))
+        .unwrap();
+        let mut b = a.clone();
+        a.runtime = "mtplx 0.4.1".to_owned();
+        a.engine_build_commit = "0.4.1".to_owned();
+        b.engine_build_commit = "bbb".to_owned();
+        assert_eq!(super::first_mismatch(&a, &b), Some("runtime"));
     }
 }

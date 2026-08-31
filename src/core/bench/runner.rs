@@ -149,6 +149,18 @@ pub struct ProbeWire<'a> {
     pub pins: SamplingPins,
 }
 
+/// Which wire fills a codebase mask (spec §6).
+///
+/// llama.cpp's native `/infill`, or a deterministic chat-completions
+/// instruction for a runtime with no FIM endpoint. The transport is a
+/// function of the runtime, so the report derives it from the stamp
+/// instead of storing it twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FimTransport {
+    Infill,
+    Chat,
+}
+
 /// Route → POST upstream → capture `timings` → translate.
 ///
 /// Timings are read from the upstream `OpenAI` body BEFORE translation (the
@@ -501,6 +513,22 @@ fn timings_from(parsed: &Value) -> Result<Timings, ChekovError> {
     }
 }
 
+/// Recast a missing-`timings` failure on the foreign path (C1).
+///
+/// `BenchNoTimings` prescribes rebuilding llama.cpp — meaningless advice
+/// against a declared foreign runtime. On the foreign path only, name what
+/// was declared instead; every other error, and the llama.cpp path
+/// (`runtime: None`), passes through unchanged.
+#[must_use]
+pub fn foreign_timings_error(err: ChekovError, runtime: Option<&str>) -> ChekovError {
+    match (err, runtime) {
+        (ChekovError::BenchNoTimings, Some(runtime)) => ChekovError::ForeignTimingsUnsupported {
+            runtime: runtime.to_owned(),
+        },
+        (err, _) => err,
+    }
+}
+
 /// One extra file the model is shown beside the masked one, in llama.cpp's
 /// `input_extra` shape.
 ///
@@ -564,6 +592,112 @@ pub fn cross_infill(wire: &ProbeWire, task: &InfillTask) -> Result<InfillOutcome
         anthropic_body: content.to_owned(),
         timings,
     }))
+}
+
+/// The chat arm's fixed instruction (spec §6, verbatim). Hashing it into the
+/// prompt-set hash makes a template edit a NAMED stamp change.
+pub const FIM_CHAT_INSTRUCTION: &str = "You are completing code. Output ONLY \
+the missing code between PREFIX and SUFFIX. No explanation, no code fences, \
+no repetition of the prefix or suffix.\n";
+
+/// The one user message the chat arm sends: instruction, the extra file when
+/// this arm carries one, then PREFIX/SUFFIX/MIDDLE.
+fn chat_fim_prompt(task: &InfillTask) -> String {
+    let extra = task.extra.as_ref().map_or_else(String::new, |e| {
+        format!("FILE {}:\n{}\n\n", e.filename, e.text)
+    });
+    format!(
+        "{FIM_CHAT_INSTRUCTION}\n{extra}PREFIX:\n{}\n\nSUFFIX:\n{}\n\nMIDDLE:\n",
+        task.prefix, task.suffix
+    )
+}
+
+/// Spec §6's two normalization rules, in order, and nothing else.
+fn normalize_chat_fill(reply: &str) -> String {
+    let unfenced = strip_whole_fence(reply);
+    unfenced.strip_suffix('\n').unwrap_or(&unfenced).to_owned()
+}
+
+/// Rule 1: when the ENTIRE reply is one fenced block, strip the fences and
+/// any language tag. A fence anywhere else is content.
+fn strip_whole_fence(reply: &str) -> String {
+    let trimmed = reply.trim_end_matches('\n');
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return reply.to_owned();
+    };
+    let Some(body) = rest.strip_suffix("```") else {
+        return reply.to_owned();
+    };
+    // Drop the language tag line (possibly empty) after the opening fence.
+    match body.split_once('\n') {
+        Some((_tag, inner)) => inner.to_owned(),
+        None => String::new(),
+    }
+}
+
+/// The stamp's prompt-set hash when the chat arm filled the codebase suite:
+/// hash(existing value ‖ the template), first twelve hex chars (spec §6).
+#[must_use]
+pub fn chat_fim_hash(base: &str) -> String {
+    let canonical = format!("{base}|chat-fim|{FIM_CHAT_INSTRUCTION}");
+    crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
+}
+
+/// The reply's first TEXT block — a leading `thinking` block (a reasoning
+/// model's extracted `reasoning_content`, translated ahead of the answer) is
+/// skipped rather than mistaken for the fill. Mirrors `judge::parse_reply`,
+/// the house pattern for reading an Anthropic-shaped body's content array.
+fn chat_text_of(artifact: &ProbeArtifact) -> Result<String, ChekovError> {
+    serde_json::from_str::<Value>(&artifact.anthropic_body)
+        .ok()
+        .and_then(|v| {
+            v["content"]
+                .as_array()
+                .and_then(|blocks| blocks.iter().find(|b| b["type"] == "text"))
+                .and_then(|b| b["text"].as_str())
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| ChekovError::ProxyBadRequest {
+            reason: "chat fill has no text content".to_owned(),
+        })
+}
+
+/// The chat-completions fill: same pins as `/infill` (`temperature 0`,
+/// `top_k 1`, the gold-bounded budget), one deterministic user message,
+/// crossing the translator exactly as the agentic probes do.
+fn cross_fim_chat(wire: &ProbeWire, task: &InfillTask) -> Result<InfillOutcome, ChekovError> {
+    let body = serde_json::json!({
+        "model": "claude-sonnet-4",
+        "max_tokens": n_predict_for(task.gold_lines),
+        "temperature": 0,
+        "top_k": 1,
+        "messages": [{"role": "user", "content": chat_fim_prompt(task)}],
+    });
+    let artifact = cross(wire, &crate::core::bench::probes::anthropic_post(&body))?;
+    let text = chat_text_of(&artifact)?;
+    Ok(InfillOutcome::Answered(ProbeArtifact {
+        anthropic_body: normalize_chat_fill(&text),
+        timings: artifact.timings,
+    }))
+}
+
+/// One fill, whichever transport this run rides (spec §6).
+///
+/// `fim` is a parameter rather than a `ProbeWire` field: `ProbeWire` is
+/// constructed by struct literal from a read-only integration test
+/// (`tests/bench_streamed_probe_crosses_the_translator.rs`, pinned by
+/// `pushkin.toml`'s `read_only_paths`), so widening it would break a file
+/// this task cannot touch. The caller (ultimately Task 4's runtime-based
+/// selection) passes the choice down explicitly instead.
+pub fn cross_fim(
+    wire: &ProbeWire,
+    fim: FimTransport,
+    task: &InfillTask,
+) -> Result<InfillOutcome, ChekovError> {
+    match fim {
+        FimTransport::Infill => cross_infill(wire, task),
+        FimTransport::Chat => cross_fim_chat(wire, task),
+    }
 }
 
 /// The token budget a gold of this many lines earns. The run loop records
@@ -1085,6 +1219,194 @@ mod tests {
     }
 
     #[test]
+    fn the_chat_fim_prompt_carries_the_instruction_the_extra_and_the_three_sections() {
+        let task = super::InfillTask {
+            prefix: "fn a() {",
+            suffix: "}",
+            gold_lines: 1,
+            extra: Some(super::ExtraChunk {
+                filename: "lib.rs",
+                text: "pub fn b() {}",
+            }),
+        };
+        let prompt = super::chat_fim_prompt(&task);
+        assert!(prompt.starts_with(super::FIM_CHAT_INSTRUCTION));
+        for needle in [
+            "FILE lib.rs:",
+            "pub fn b() {}",
+            "PREFIX:\nfn a() {",
+            "SUFFIX:\n}",
+            "MIDDLE:\n",
+        ] {
+            assert!(prompt.contains(needle), "missing {needle}");
+        }
+        let suffix_at = prompt.find("SUFFIX:").unwrap();
+        assert!(prompt.find("PREFIX:").unwrap() < suffix_at);
+        assert!(suffix_at < prompt.find("MIDDLE:").unwrap());
+    }
+
+    #[test]
+    fn a_fenced_reply_is_unwrapped_and_one_trailing_newline_trimmed() {
+        assert_eq!(
+            super::normalize_chat_fill("```rust\nlet x = 1;\n```\n"),
+            "let x = 1;"
+        );
+        assert_eq!(super::normalize_chat_fill("let x = 1;\n"), "let x = 1;");
+        // A fence in the middle is content, not wrapping:
+        assert_eq!(super::normalize_chat_fill("a\n```\nb"), "a\n```\nb");
+    }
+
+    #[test]
+    fn the_chat_fim_hash_diverges_from_its_base_and_is_stable() {
+        let a = super::chat_fim_hash("codebase-only");
+        assert_ne!(a, "codebase-only");
+        assert_eq!(a, super::chat_fim_hash("codebase-only"));
+        assert_ne!(a, super::chat_fim_hash("other"));
+        assert_eq!(a.len(), 12);
+    }
+
+    /// A one-user-message chat crossing sends the pins and the exact
+    /// template prompt, and returns the normalized fill (spec §6, I3a).
+    #[test]
+    fn cross_fim_chat_sends_the_pins_and_the_prompt_and_returns_the_normalized_fill() {
+        let http = CannedUpstream::new(
+            serde_json::json!({
+                "choices": [{
+                    "message": { "content": "```rust\nlet a = 1;\n```\n" },
+                    "finish_reason": "stop"
+                }],
+                "timings": final_frame()["timings"]
+            })
+            .to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn a() {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+            extra: None,
+        };
+        let outcome =
+            super::cross_fim(&wire(&http, &facade, &up), super::FimTransport::Chat, &task)
+                .expect("crosses");
+        let super::InfillOutcome::Answered(artifact) = outcome else {
+            panic!("a 200 with content is an answer");
+        };
+        assert_eq!(artifact.anthropic_body, "let a = 1;");
+        let sent = sent(&http);
+        assert_eq!(sent["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(sent["messages"][0]["role"], "user");
+        assert_eq!(
+            sent["messages"][0]["content"],
+            super::chat_fim_prompt(&task)
+        );
+        assert_eq!(sent["temperature"], 0);
+        assert_eq!(sent["top_k"], 1);
+        assert_eq!(sent["seed"], 42);
+        assert_eq!(sent["max_tokens"], super::n_predict_for(task.gold_lines));
+    }
+
+    /// `cross_fim(.., Infill, ..)` still rides `/infill` — the chat wire never
+    /// hijacks llama.cpp's own door (I3d).
+    #[test]
+    fn cross_fim_still_dispatches_infill_to_the_infill_door() {
+        let http = CannedUpstream::new(
+            serde_json::json!({
+                "content": "let a = 1;",
+                "timings": final_frame()["timings"]
+            })
+            .to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn a() {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+            extra: None,
+        };
+        super::cross_fim(
+            &wire(&http, &facade, &up),
+            super::FimTransport::Infill,
+            &task,
+        )
+        .expect("crosses");
+        assert!(
+            http.url_seen
+                .borrow()
+                .as_deref()
+                .unwrap_or("")
+                .ends_with("/infill")
+        );
+    }
+
+    /// A leading `thinking` block (a reasoning model's `reasoning_content`,
+    /// translated ahead of the answer) must not hide the text block that
+    /// follows it — I1, locked here against a wire-level canned reply.
+    #[test]
+    fn a_leading_thinking_block_does_not_hide_the_chat_fill_text() {
+        let http = CannedUpstream::new(
+            serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": "let a = 1;",
+                        "reasoning_content": "considering the prefix and suffix"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "timings": final_frame()["timings"]
+            })
+            .to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn a() {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+            extra: None,
+        };
+        let outcome =
+            super::cross_fim(&wire(&http, &facade, &up), super::FimTransport::Chat, &task)
+                .expect("a leading thinking block still yields the text");
+        let super::InfillOutcome::Answered(artifact) = outcome else {
+            panic!("must be answered");
+        };
+        assert_eq!(artifact.anthropic_body, "let a = 1;");
+    }
+
+    /// A reply with no text block anywhere (a thinking-only or empty
+    /// content) fails loudly rather than grading an empty string (I3c).
+    #[test]
+    fn a_chat_reply_with_no_text_block_fails_as_a_bad_request() {
+        let http = CannedUpstream::new(
+            serde_json::json!({
+                "choices": [{ "message": { "content": "" }, "finish_reason": "stop" }],
+                "timings": final_frame()["timings"]
+            })
+            .to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn a() {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+            extra: None,
+        };
+        let Err(err) =
+            super::cross_fim(&wire(&http, &facade, &up), super::FimTransport::Chat, &task)
+        else {
+            panic!("no text content should not be an answer");
+        };
+        assert!(
+            matches!(&err, ChekovError::ProxyBadRequest { reason } if reason == "chat fill has no text content"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn only_the_forced_wire_asks_the_engine_to_extract_reasoning() {
         // A thinking-prefill template (ornith) 400s on a forced grammar unless
         // the engine extracts reasoning: the specialized chat handler builds
@@ -1259,6 +1581,34 @@ mod tests {
         let err = super::cross(&wire(&http, &facade, &up), &anthropic_request("hi"))
             .expect_err("no measurement");
         assert!(matches!(err, ChekovError::BenchNoTimings));
+    }
+
+    /// A missing-timings failure against a declared foreign runtime is
+    /// recast naming that runtime — `chekov update --engine` is meaningless
+    /// advice for a server chekov did not build (C1). Untouched (no
+    /// declared runtime) it passes through unchanged, and it never rewrites
+    /// an unrelated error.
+    #[test]
+    fn foreign_timings_error_names_the_runtime_and_leaves_everything_else_alone() {
+        let recast = super::foreign_timings_error(ChekovError::BenchNoTimings, Some("mtplx 0.4.1"));
+        assert!(
+            matches!(&recast, ChekovError::ForeignTimingsUnsupported { runtime } if runtime == "mtplx 0.4.1"),
+            "{recast}"
+        );
+        assert!(recast.to_string().contains("mtplx 0.4.1"), "{recast}");
+        assert!(
+            !recast.to_string().contains("chekov update --engine"),
+            "a foreign server is not fixed by rebuilding chekov's own engine: {recast}"
+        );
+
+        let unchanged = super::foreign_timings_error(ChekovError::BenchNoTimings, None);
+        assert!(matches!(unchanged, ChekovError::BenchNoTimings));
+
+        let other = ChekovError::ProxyBadRequest {
+            reason: "unrelated".to_owned(),
+        };
+        let passthrough = super::foreign_timings_error(other, Some("mtplx 0.4.1"));
+        assert!(matches!(passthrough, ChekovError::ProxyBadRequest { .. }));
     }
 
     #[test]

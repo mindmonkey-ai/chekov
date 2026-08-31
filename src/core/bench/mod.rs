@@ -12,6 +12,7 @@ pub mod lifecycle;
 pub mod probes;
 pub mod probeset;
 pub mod runner;
+pub mod runtime;
 pub mod speeds;
 pub mod stamp;
 pub mod store;

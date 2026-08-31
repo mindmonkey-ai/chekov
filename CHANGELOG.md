@@ -6,6 +6,51 @@ All notable changes to chekov are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `capability bench NAME --runtime <name>@<version> [--upstream <url>]` — an
+  OpenAI-compatible server you already started (MTPLX, MLX, anything on the
+  same wire) becomes a first-class bench subject. `--runtime` is
+  `UseRunning`-only for the subject: chekov never launches, installs, or
+  tears down a foreign server, and refuses before any measurement
+  (`RuntimeNeedsRunningServer`) if the named model isn't already serving —
+  `--judge` still launches chekov's own local llama.cpp judge exactly as
+  today, though `--runtime` together with `--judge` is refused by the
+  existing memory-budget gate (a foreign server chekov did not launch never
+  comes down, so the judge has nowhere to load beside it). Readiness is one
+  plain `GET /v1/models`; the served ids are PRINTED, never asserted
+  (`chekov: runtime mtplx 0.4.1 serves: <id>...`), because chekov cannot know
+  how a foreign server names its own weights. `Stamp` gains a `runtime` field
+  (`#[serde(default)]` to `llama.cpp`, so every stored run reads exactly as
+  before) immediately ahead of `engine_build_commit`, which for a foreign run
+  holds the declared version verbatim rather than a probed commit; launch
+  flags chekov cannot observe are stamped with fixed sentinels (`ctx`/
+  `n_parallel` `0`; `kv_unified`/`n_batch`/`n_ubatch`/`type_k`/`type_v`/
+  `flash_attn` `"unmanaged"` — a third spelling, never `"engine-default"`)
+  instead of invented. The `BenchStampMismatch` message is now engine-neutral
+  (`bench stamp mismatch on '{field}' ({a} vs {b}) — results are comparable
+  only inside one pinned configuration (runtime, build, flags and sampling
+  all held constant); re-bench under a matching stamp and compare those
+  runs`); the llama.cpp float-associativity rationale moved to `Stamp`'s own
+  doc comment. Codebase mode's FIM crossing rides `/infill` for llama.cpp and
+  a deterministic chat-completions instruction for a runtime with none
+  (`prompt_set_hash` covers the chat template only when a run actually rode
+  it), and the report names which: `fim transport: /infill` or
+  `fim transport: chat`. `capability compare A B --cross-runtime` permits
+  exactly `runtime`, `engine_build_commit`, the eight unmanaged fields and
+  `prompt_set_hash` to differ, opens with a loud banner
+  (`cross-runtime comparison: <a> vs <b>` … `this measures the runtimes, not
+  the model.`) naming every differing allow-listed field, and still refuses
+  on anything else — plain `compare` (no flag) refuses a cross-runtime pair
+  on `runtime` like any other first-differing field. Measuring throughput or
+  timing still requires the server to report llama.cpp's non-standard
+  `timings` object on every response; a server that does not fails loudly,
+  per probe, as `ForeignTimingsUnsupported` naming the declared runtime
+  rather than prescribing an engine rebuild that does not apply to it — a
+  chekov-timed fallback for a timing-less foreign server is a recorded
+  follow-up, not built here. Live verification against a real MLX/MTPLX
+  server is approval-gated and has not run yet; the plumbing is unit-tested
+  against fakes on the existing `HttpClient` seam.
+
 ### Changed
 - `[limits] wired_limit_mb` no longer has a built-in value. The old default,
   187000 MB, was one 256 GB desk's number: on any Mac below ~250 GB a fresh

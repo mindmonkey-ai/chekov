@@ -137,15 +137,37 @@ pub struct CodebaseComparison {
     pub judge_note: Option<String>,
 }
 
+/// How a comparison runs: the significance threshold, and whether the
+/// runtime allow-list (spec 2026-08-31 §7) is masked.
+pub struct CompareOpts {
+    pub significance_pct: f64,
+    pub cross_runtime: bool,
+}
+
+/// The fields `--cross-runtime` permits to differ, and no others.
+const CROSS_RUNTIME_ALLOWED: [&str; 11] = [
+    "runtime",
+    "engine_build_commit",
+    "ctx",
+    "n_parallel",
+    "kv_unified",
+    "n_batch",
+    "n_ubatch",
+    "type_k",
+    "type_v",
+    "flash_attn",
+    "prompt_set_hash",
+];
+
 pub fn compare_runs(
     a: &RunLog,
     b: &RunLog,
-    significance_pct: f64,
+    opts: &CompareOpts,
 ) -> Result<RunComparison, ChekovError> {
-    assert_same_environment(a, b)?;
     let pair = RunPair { a, b };
+    assert_same_environment(&pair, opts)?;
     Ok(RunComparison {
-        depths: depth_comparisons(&pair, significance_pct),
+        depths: depth_comparisons(&pair, opts.significance_pct),
         agentic: compare_agentic(&pair),
         codebase: compare_codebase(&pair),
     })
@@ -186,16 +208,58 @@ fn depth_of(row: &TaskRow) -> Option<u32> {
 }
 
 /// Refuse on the first differing stamp field, with the subject fields
-/// (`weights_revision`, `quant`) masked equal — they are what is being
-/// compared, not what must match.
-fn assert_same_environment(a: &RunLog, b: &RunLog) -> Result<(), ChekovError> {
-    let mut b_env = b.head.stamp.clone();
-    b_env
-        .weights_revision
-        .clone_from(&a.head.stamp.weights_revision);
-    b_env.quant.clone_from(&a.head.stamp.quant);
-    b_env.judge.clone_from(&a.head.stamp.judge);
-    stamp::mismatch_error(&a.head.stamp, &b_env).map_or(Ok(()), Err)
+/// (`weights_revision`, `quant`, `judge`) masked equal — they are what is
+/// being compared, not what must match. `--cross-runtime` additionally
+/// masks the runtime allow-list (spec §7).
+fn assert_same_environment(pair: &RunPair, opts: &CompareOpts) -> Result<(), ChekovError> {
+    let a = &pair.a.head.stamp;
+    let mut b_env = pair.b.head.stamp.clone();
+    b_env.weights_revision.clone_from(&a.weights_revision);
+    b_env.quant.clone_from(&a.quant);
+    b_env.judge.clone_from(&a.judge);
+    if opts.cross_runtime {
+        mask_cross_runtime(&mut b_env, a);
+    }
+    stamp::mismatch_error(a, &b_env).map_or(Ok(()), Err)
+}
+
+/// Masks exactly the `--cross-runtime` allow-list (spec §7) onto `b_env` —
+/// the fields a foreign runtime is permitted to differ on, and no others.
+fn mask_cross_runtime(b_env: &mut Stamp, a: &Stamp) {
+    b_env.runtime.clone_from(&a.runtime);
+    b_env.engine_build_commit.clone_from(&a.engine_build_commit);
+    b_env.ctx = a.ctx;
+    b_env.n_parallel = a.n_parallel;
+    b_env.kv_unified.clone_from(&a.kv_unified);
+    b_env.n_batch.clone_from(&a.n_batch);
+    b_env.n_ubatch.clone_from(&a.n_ubatch);
+    b_env.type_k.clone_from(&a.type_k);
+    b_env.type_v.clone_from(&a.type_v);
+    b_env.flash_attn.clone_from(&a.flash_attn);
+    b_env.prompt_set_hash.clone_from(&a.prompt_set_hash);
+}
+
+/// The `--cross-runtime` banner: both runtimes, the warning, one line per
+/// allow-listed field that differs, the closing sentence.
+#[must_use]
+pub fn cross_runtime_banner(a: &Stamp, b: &Stamp) -> String {
+    let mut lines = vec![
+        format!("cross-runtime comparison: {} vs {}", a.runtime, b.runtime),
+        "determinism does not hold across runtimes; differing fields:".to_owned(),
+    ];
+    let (ja, jb) = (json_of(a), json_of(b));
+    for field in CROSS_RUNTIME_ALLOWED {
+        let (va, vb) = (&ja[field], &jb[field]);
+        if va != vb {
+            lines.push(format!("{field}: {va} vs {vb}"));
+        }
+    }
+    lines.push("this measures the runtimes, not the model.".to_owned());
+    lines.join("\n") + "\n"
+}
+
+fn json_of(s: &Stamp) -> serde_json::Value {
+    serde_json::to_value(s).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- agentic
@@ -1058,8 +1122,8 @@ fn verdict_line(pair: &RunPair, row: &DepthComparison) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Presence, RunPair, SuiteTotals, TierDelta, binomial, compare_runs, render_comparison,
-        sign_test,
+        CompareOpts, Presence, RunPair, SuiteTotals, TierDelta, binomial, compare_runs,
+        cross_runtime_banner, render_comparison, sign_test,
     };
     use crate::core::bench::codebase::{Excluded, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
@@ -1073,6 +1137,7 @@ mod tests {
     fn stamp(engine: &str, weights: &str) -> Stamp {
         Stamp {
             machine_id: "8d41f0c2a917".into(),
+            runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
             engine_build_commit: engine.into(),
             weights_revision: weights.into(),
             quant: "Q8_0".into(),
@@ -1134,6 +1199,13 @@ mod tests {
         }
     }
 
+    fn opts(significance_pct: f64) -> CompareOpts {
+        CompareOpts {
+            significance_pct,
+            cross_runtime: false,
+        }
+    }
+
     #[test]
     fn a_differing_environment_is_refused_naming_the_first_field() {
         let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
@@ -1141,7 +1213,7 @@ mod tests {
         changed.seed = 7;
         changed.type_k = "f16".into();
         let b = run("m2", changed, &[19.0, 21.0, 22.0]);
-        let err = compare_runs(&a, &b, 5.0).expect_err("environment differs");
+        let err = compare_runs(&a, &b, &opts(5.0)).expect_err("environment differs");
         match err {
             ChekovError::BenchStampMismatch { field, .. } => {
                 assert_eq!(field, "type_k", "type_k precedes seed in declaration order");
@@ -1164,7 +1236,89 @@ mod tests {
             reasoning_effort: "low".into(),
             min_consistency_pct: 70,
         });
-        assert!(super::assert_same_environment(&a, &b).is_ok());
+        assert!(super::assert_same_environment(&RunPair { a: &a, b: &b }, &opts(5.0)).is_ok());
+    }
+
+    #[test]
+    fn cross_runtime_masks_exactly_the_allow_list() {
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let foreign_stamp = |corpus_id: &str| {
+            let mut s = stamp("dda1b0d67", "r1/s1");
+            s.runtime = "mtplx 0.4.1".into();
+            s.engine_build_commit = "abc123".into();
+            s.ctx = 65_536;
+            s.n_parallel = 4;
+            s.kv_unified = "on".into();
+            s.n_batch = "2048".into();
+            s.n_ubatch = "512".into();
+            s.type_k = "f16".into();
+            s.type_v = "f16".into();
+            s.flash_attn = "off".into();
+            s.prompt_set_hash = "ffff".into();
+            s.corpus_id = corpus_id.into();
+            s
+        };
+        let cross = opts(5.0);
+        let cross = CompareOpts {
+            cross_runtime: true,
+            ..cross
+        };
+
+        let b = run("m2", foreign_stamp("throughput-v1"), &[19.0, 21.0, 22.0]);
+        assert!(compare_runs(&a, &b, &cross).is_ok());
+
+        let b_bad_corpus = run("m2", foreign_stamp("other"), &[19.0, 21.0, 22.0]);
+        let err = compare_runs(&a, &b_bad_corpus, &cross).expect_err("corpus_id must still match");
+        match err {
+            ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "corpus_id"),
+            other => panic!("expected stamp mismatch, got {other}"),
+        }
+
+        let err = compare_runs(&a, &b, &opts(5.0)).expect_err("runtime refused without the flag");
+        match err {
+            ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "runtime"),
+            other => panic!("expected stamp mismatch, got {other}"),
+        }
+    }
+
+    #[test]
+    fn the_banner_names_each_differing_allow_listed_field_and_only_those() {
+        let a = stamp("dda1b0d67", "r1/s1");
+        let mut b = stamp("dda1b0d67", "r1/s1");
+        b.runtime = "mtplx 0.4.1".into();
+        b.engine_build_commit = "def456".into();
+        b.flash_attn = "off".into();
+        b.prompt_set_hash = "ffff".into();
+
+        let banner = cross_runtime_banner(&a, &b);
+        assert!(banner.starts_with("cross-runtime comparison: llama.cpp vs mtplx 0.4.1\n"));
+        assert!(banner.contains("determinism does not hold across runtimes"));
+        for needle in [
+            "runtime: ",
+            "engine_build_commit: ",
+            "flash_attn: ",
+            "prompt_set_hash: ",
+        ] {
+            assert!(banner.contains(needle), "missing {needle}");
+        }
+        assert!(!banner.contains("corpus_id"));
+        assert!(
+            banner
+                .trim_end()
+                .ends_with("this measures the runtimes, not the model.")
+        );
+    }
+
+    #[test]
+    fn same_runtime_cross_runtime_banners_with_no_field_lines() {
+        let a = stamp("dda1b0d67", "r1/s1");
+        let b = stamp("dda1b0d67", "r1/s1");
+        let banner = cross_runtime_banner(&a, &b);
+        let lines: Vec<&str> = banner.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "cross-runtime comparison: llama.cpp vs llama.cpp");
+        assert!(lines[1].contains("determinism does not hold across runtimes"));
+        assert_eq!(lines[2], "this measures the runtimes, not the model.");
     }
 
     #[test]
@@ -1174,7 +1328,7 @@ mod tests {
         let mut other = stamp("dda1b0d67", "r2/s2");
         other.quant = "UD-Q6_K_XL".into();
         let b = run("m2", other, &[19.5, 20.5, 21.0, 21.5]);
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         assert_eq!(compared.depths.len(), 1);
         assert_eq!(
             compared.depths[0].verdict,
@@ -1191,7 +1345,7 @@ mod tests {
         let mut other = stamp("dda1b0d67", "r1/s1");
         other.prompt_set_hash = "ffff".into();
         let b = run("m2", other, &[19.0, 21.0, 22.0]);
-        assert!(compare_runs(&a, &b, 5.0).is_err());
+        assert!(compare_runs(&a, &b, &opts(5.0)).is_err());
     }
 
     #[test]
@@ -1216,7 +1370,7 @@ mod tests {
             judge: None,
         });
         let b = run("m2", stamp("dda1b0d67", "r2/s2"), &[30.0, 40.0, 41.0]);
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         assert_eq!(
             compared.depths.len(),
             1,
@@ -1229,7 +1383,7 @@ mod tests {
     fn a_clear_gap_is_called() {
         let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[38.0, 40.0, 41.0, 40.5]);
         let b = run("m2", stamp("dda1b0d67", "r2/s2"), &[19.0, 20.0, 21.0, 20.5]);
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         assert_eq!(compared.depths[0].verdict, Comparison::Faster);
     }
 
@@ -1456,7 +1610,7 @@ mod tests {
     #[test]
     fn the_two_cross_file_arms_are_compared_apart_not_blended() {
         let (a, b) = cross_file_pair();
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         let without = tier_of(&compared.codebase.tiers, "cross_file_first", "exact");
         assert!(
             approx(without.mean_a, 0.0) && approx(without.mean_b, 1.0),
@@ -1479,7 +1633,7 @@ mod tests {
     #[test]
     fn the_context_lift_is_compared_per_task_with_the_paired_sign_test() {
         let (a, b) = cross_file_pair();
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         let lift = tier_of(&compared.codebase.tiers, "context lift", "exact");
         assert!(
             approx(lift.mean_a, 1.0) && approx(lift.mean_b, -1.0),
@@ -1502,7 +1656,7 @@ mod tests {
     fn a_task_measured_on_one_arm_only_leaves_the_lift_and_is_counted() {
         let (a, mut b) = cross_file_pair();
         b.rows.retain(|r| r.task_id != "cff-5+extra");
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         let lift = tier_of(&compared.codebase.tiers, "context lift", "exact");
         assert_eq!(
             lift.a_better + lift.b_better + lift.ties,
@@ -1558,7 +1712,7 @@ mod tests {
     #[test]
     fn the_agentic_totals_stand_side_by_side_in_the_reports_own_counting() {
         let (a, b) = mixed_agentic_pair();
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         let totals = &compared.agentic.totals;
         assert_eq!(cells(totals, "tool_emit"), ("1/2".into(), "2/2".into()));
         assert_eq!(
@@ -1614,7 +1768,7 @@ mod tests {
                 Case::pass("tool_emit", "te-021"),
             ],
         );
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         let cases = &compared.agentic.disagreements;
         assert_eq!(cases.len(), 1, "only if-012 separates the two runs");
         assert_eq!(cases[0].task_id, "if-012");
@@ -1644,7 +1798,7 @@ mod tests {
             ],
         );
         let b = agentic_run("m2", vec![Case::pass("tool_emit", "te-010")]);
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         assert_eq!(compared.agentic.only_in.len(), 1);
         assert_eq!(compared.agentic.only_in[0].which, "a");
         assert_eq!(compared.agentic.only_in[0].task_id, "te-011");
@@ -1673,7 +1827,7 @@ mod tests {
                 Case::pass("tool_emit", "te-031"),
             ],
         );
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         assert_eq!(compared.agentic.unavailable, (1, 0));
         assert!(
             compared.agentic.disagreements.is_empty(),
@@ -1698,7 +1852,7 @@ mod tests {
             head: head("m2"),
             rows: vec![],
         };
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         assert_eq!(compared.agentic.presence, Presence::OnlyA);
         assert_eq!(compared.codebase.presence, Presence::Neither);
         let rendered = render_comparison(&RunPair { a: &a, b: &b }, &compared);
@@ -1717,7 +1871,7 @@ mod tests {
     #[test]
     fn codebase_tasks_pair_by_id_and_only_a_clear_group_is_called() {
         let (a, b) = codebase_pair();
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         let exact = tier_of(&compared.codebase.tiers, "in_file", "exact");
         assert_eq!((exact.a_better, exact.b_better, exact.ties), (6, 0, 0));
         assert!(approx(exact.mean_a, 1.0) && approx(exact.mean_b, 0.0));
@@ -1747,7 +1901,7 @@ mod tests {
     fn a_codebase_task_unavailable_in_either_run_is_dropped_and_counted() {
         let (mut a, b) = codebase_pair();
         a.rows[0].grade = Some(GradeRow::unavailable("the engine refused".to_owned()));
-        let compared = compare_runs(&a, &b, 5.0).expect("same environment");
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
         let dropped = compared
             .codebase
             .dropped
@@ -1863,7 +2017,7 @@ mod tests {
     fn a_shared_judge_yields_an_equiv_row_with_the_paired_sign_test() {
         // a: fb-1 true, fb-2 false, fb-3 true ; b: fb-1 false, fb-2 false, fb-3 undecided
         let (a, b) = judged_pair();
-        let cmp = super::compare_runs(&a, &b, 5.0).expect("compare");
+        let cmp = super::compare_runs(&a, &b, &opts(5.0)).expect("compare");
         let equiv = cmp
             .codebase
             .tiers
@@ -1889,7 +2043,7 @@ mod tests {
     fn a_differing_or_absent_judge_prints_a_note_and_leaves_the_tiers_alone() {
         let (a, mut b) = judged_pair();
         b.head.stamp.judge = None;
-        let cmp = super::compare_runs(&a, &b, 5.0).expect("compare");
+        let cmp = super::compare_runs(&a, &b, &opts(5.0)).expect("compare");
         assert!(cmp.codebase.tiers.iter().all(|t| t.tier != "equiv"));
         assert_eq!(
             cmp.codebase.judge_note.as_deref(),
@@ -1914,7 +2068,7 @@ mod tests {
             .retain(|r| r.suite != JUDGE_SUITE || r.task_id != "fb-3");
         b.rows.retain(|r| r.suite != JUDGE_SUITE);
         b.rows.push(judge_row(3, "fb-3", verdict(Some(true))));
-        let cmp = super::compare_runs(&a, &b, 5.0).expect("compare");
+        let cmp = super::compare_runs(&a, &b, &opts(5.0)).expect("compare");
         assert!(cmp.codebase.tiers.iter().all(|t| t.tier != "equiv"));
         assert_eq!(
             cmp.codebase.judge_note.as_deref(),
