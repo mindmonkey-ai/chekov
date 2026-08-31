@@ -37,9 +37,14 @@ chekov capability compare A B --cross-runtime [existing compare flags]
   foreign server; chekov never launches, installs, builds, or tears down a
   foreign runtime. If the bench plan would need to launch the subject (the
   named model is not already served), the run refuses with
-  `RuntimeNeedsRunningServer { runtime }` before any measurement. The judge
-  candidate is exempt: `--judge` still launches chekov's own local llama.cpp
-  judge exactly as today — the restriction is on the subject only.
+  `RuntimeNeedsRunningServer { runtime }` before any measurement. The
+  launch prohibition is on the subject only: it does not itself apply to
+  the judge, which `--runtime` never restricts. As shipped, though,
+  `--runtime` together with `--judge` is refused pre-launch by the
+  pre-existing memory-budget gate (`server_check`/`resolve_judge`) —
+  because a foreign server chekov did not launch never comes down, the
+  memory the judge needs to load beside it is never available, so the
+  refusal fires loudly before any candidate runs (§8, `JudgeNeedsTheServer`).
 - `--upstream <url>` overrides the server base URL for this run (foreign
   servers pick their own ports). Valid only together with `--runtime`;
   `--upstream` without `--runtime` is refused by clap (`requires`). Absent,

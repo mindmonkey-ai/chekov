@@ -455,12 +455,17 @@ Codebase mode gained a chat-completions FIM fallback for runtimes with no
 `/infill` (the report names the transport), and `capability compare
 --cross-runtime` permits exactly the runtime/build/unmanaged/prompt-hash
 fields to differ, behind a loud banner ("this measures the runtimes, not the
-model."). Cut from this pass: `--runtime` together with `--judge` is refused
-by the existing memory-budget gate — a foreign server chekov did not launch
-never comes down, so the judge has nowhere to load beside it — and live
-verification against a real MLX/MTPLX server is approval-gated and still
-owed; the plumbing ships unit-tested against fakes on the existing
-`HttpClient` seam.
+model."). Measuring throughput or timing still requires the server to report
+llama.cpp's non-standard `timings` object on every response; a server that
+does not fails loudly, per probe, as `ForeignTimingsUnsupported` naming the
+declared runtime rather than prescribing an engine rebuild that does not
+apply to it — a chekov-timed fallback for a timing-less foreign server is a
+recorded follow-up, not built in this pass. Cut from this pass: `--runtime`
+together with `--judge` is refused by the existing memory-budget gate — a
+foreign server chekov did not launch never comes down, so the judge has
+nowhere to load beside it — and live verification against a real MLX/MTPLX
+server is approval-gated and still owed; the plumbing ships unit-tested
+against fakes on the existing `HttpClient` seam.
 Proposed 2026-08-30 — status: SHIPPED (live foreign verification OPEN —
 approval-gated)
 

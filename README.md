@@ -216,8 +216,14 @@ a runtime with none; the report names which (`fim transport: /infill` or
 `prompt_set_hash` to differ, opens with a loud banner ending "this measures
 the runtimes, not the model.", and still refuses on everything else — plain
 `compare` refuses a cross-runtime pair on `runtime` like any other mismatch.
-No live foreign server has been benched yet; the plumbing ships unit-tested
-against fakes on the existing `HttpClient` seam.
+Measuring throughput or timing still needs the server to report llama.cpp's
+non-standard `timings` object on every response; a server that does not
+(a stock OpenAI-compatible server has no reason to) fails loudly, per probe,
+naming the declared runtime rather than prescribing an engine rebuild that
+does not apply to it. A chekov-timed fallback for a timing-less foreign
+server is a recorded follow-up, not built here. No live foreign server has
+been benched yet; the plumbing ships unit-tested against fakes on the
+existing `HttpClient` seam.
 
 ### The six doctor checks
 

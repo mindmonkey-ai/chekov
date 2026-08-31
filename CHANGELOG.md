@@ -41,9 +41,15 @@ All notable changes to chekov are recorded here. The format follows
   (`cross-runtime comparison: <a> vs <b>` … `this measures the runtimes, not
   the model.`) naming every differing allow-listed field, and still refuses
   on anything else — plain `compare` (no flag) refuses a cross-runtime pair
-  on `runtime` like any other first-differing field. Live verification
-  against a real MLX/MTPLX server is approval-gated and has not run yet; the
-  plumbing is unit-tested against fakes on the existing `HttpClient` seam.
+  on `runtime` like any other first-differing field. Measuring throughput or
+  timing still requires the server to report llama.cpp's non-standard
+  `timings` object on every response; a server that does not fails loudly,
+  per probe, as `ForeignTimingsUnsupported` naming the declared runtime
+  rather than prescribing an engine rebuild that does not apply to it — a
+  chekov-timed fallback for a timing-less foreign server is a recorded
+  follow-up, not built here. Live verification against a real MLX/MTPLX
+  server is approval-gated and has not run yet; the plumbing is unit-tested
+  against fakes on the existing `HttpClient` seam.
 
 ### Changed
 - `[limits] wired_limit_mb` no longer has a built-in value. The old default,
