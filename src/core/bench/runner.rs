@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::core::config::BenchSection;
-use crate::core::hub::{HttpClient, JsonRequest};
+use crate::core::hub::{HttpClient, JsonRequest, StreamMarks};
 use crate::core::proxy::http::HttpRequest;
 use crate::core::proxy::serve::Upstream;
 use crate::core::proxy::{Action, AgentFacade};
@@ -294,6 +294,47 @@ pub fn cross_streaming(wire: &ProbeWire, req: &HttpRequest) -> Result<ProbeArtif
     })
 }
 
+/// The timed streaming crossing.
+///
+/// chekov's own wall clock over the SSE response, ridden only where the
+/// server has no llama.cpp `timings` object to report (a foreign
+/// `OpenAI`-compatible server). Same route, pins, and SSE machinery as
+/// `cross_streaming`, substituting the timed POST and the usage-derived
+/// timings for the read of a `timings` object.
+///
+/// Honesty caveats (spec §1): the measured windows include wire and
+/// translator overhead — negligible on localhost against token times — and
+/// the first-data-frame mark approximates end-of-prefill only because these
+/// servers stream tokens as they are generated, not because prefill and
+/// decode are cleanly separated on the wire.
+pub fn cross_stream_timed(
+    wire: &ProbeWire,
+    req: &HttpRequest,
+) -> Result<ProbeArtifact, ChekovError> {
+    let (path, body) = forward_of(wire, &with_stream_flag(req)?)?;
+    let body = adjust_body(&body, wire.pins, None)?;
+    let (sse, marks) = wire.http.post_json_stream_timed(&JsonRequest {
+        url: format!("{}{}", wire.upstream.base_url, path),
+        body,
+        bearer: Some(wire.upstream.api_key.clone()),
+    })?;
+    let mut translator = wire.facade.stream_translator();
+    let mut events = Vec::new();
+    for data in data_lines(&sse) {
+        events.extend(translator.on_chunk(data));
+    }
+    events.extend(translator.finish());
+    let anthropic_body = assemble(&events)?;
+    let usage = stream_usage(&sse).ok_or_else(|| ChekovError::ForeignTimingsUnsupported {
+        runtime: "unknown".to_owned(),
+        reason: "no usage object in the stream".to_owned(),
+    })?;
+    Ok(ProbeArtifact {
+        anthropic_body,
+        timings: timings_from_stream(&usage, &marks)?,
+    })
+}
+
 /// The probe's Anthropic body with `stream: true`, as Claude Code sends it.
 fn with_stream_flag(req: &HttpRequest) -> Result<HttpRequest, ChekovError> {
     let mut parsed: Value =
@@ -330,6 +371,65 @@ fn stream_timings(sse: &str) -> Result<Timings, ChekovError> {
         .last()
         .ok_or(ChekovError::BenchNoTimings)?;
     read_timings(&last.to_string())
+}
+
+/// Token counts off an `OpenAI` `usage` object — the foreign-timing measure's
+/// only signal, since a foreign server reports no llama.cpp `timings`.
+#[derive(Debug, Clone, Copy)]
+struct StreamUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+}
+
+/// The LAST `usage` object on the stream — an OpenAI-compatible server
+/// delivers it on the terminal chunk (the translator already asks upstream
+/// to stream it). `None` if the stream never carried one.
+fn stream_usage(sse: &str) -> Option<StreamUsage> {
+    let usage = data_lines(sse)
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .filter_map(|frame| frame.get("usage").cloned())
+        .last()?;
+    Some(StreamUsage {
+        prompt_tokens: usage.get("prompt_tokens")?.as_u64()?,
+        completion_tokens: usage.get("completion_tokens")?.as_u64()?,
+    })
+}
+
+/// A token count as `f64` for a rate division — saturating at `u32::MAX`
+/// rather than losing precision on a (never realistic) count that large.
+fn token_count_f64(count: u64) -> f64 {
+    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
+/// llama.cpp-shaped `Timings` from chekov's own measurement: `OpenAI` `usage`
+/// token counts plus the client-measured stream windows (spec §3). Loud on
+/// anything it cannot derive — a foreign server gives chekov no other
+/// honest signal, and a partial measurement must not become a number.
+fn timings_from_stream(usage: &StreamUsage, marks: &StreamMarks) -> Result<Timings, ChekovError> {
+    let unsupported = |reason: &str| ChekovError::ForeignTimingsUnsupported {
+        runtime: "unknown".to_owned(),
+        reason: reason.to_owned(),
+    };
+    if usage.prompt_tokens == 0 {
+        return Err(unsupported("usage.prompt_tokens is 0"));
+    }
+    if usage.completion_tokens < 2 {
+        return Err(unsupported(
+            "fewer than 2 completion tokens — no decode window to time",
+        ));
+    }
+    let to_first_data = marks.to_first_data.as_secs_f64();
+    let first_to_done = marks.first_to_done.as_secs_f64();
+    if to_first_data == 0.0 || first_to_done == 0.0 {
+        return Err(unsupported("zero-length timing window"));
+    }
+    Ok(Timings {
+        prompt_n: usage.prompt_tokens,
+        prompt_per_second: token_count_f64(usage.prompt_tokens) / to_first_data,
+        predicted_n: usage.completion_tokens,
+        predicted_per_second: token_count_f64(usage.completion_tokens - 1) / first_to_done,
+        cache_n: 0,
+    })
 }
 
 /// The agent-side SSE events folded back into one Anthropic message: what an
@@ -526,6 +626,16 @@ pub fn foreign_timings_error(err: ChekovError, runtime: Option<&str>) -> ChekovE
             runtime: runtime.to_owned(),
             reason: "the reply carried no llama.cpp timings object".to_owned(),
         },
+        // A `timings_from_stream`/`cross_stream_timed` guard has no declared
+        // runtime to hand and raises with the "unknown" placeholder; the
+        // recast overwrites it with the caller's runtime, keeping the
+        // guard's own reason.
+        (ChekovError::ForeignTimingsUnsupported { reason, .. }, Some(runtime)) => {
+            ChekovError::ForeignTimingsUnsupported {
+                runtime: runtime.to_owned(),
+                reason,
+            }
+        }
         (err, _) => err,
     }
 }
@@ -674,7 +784,7 @@ fn cross_fim_chat(wire: &ProbeWire, task: &InfillTask) -> Result<InfillOutcome, 
         "top_k": 1,
         "messages": [{"role": "user", "content": chat_fim_prompt(task)}],
     });
-    let artifact = cross(wire, &crate::core::bench::probes::anthropic_post(&body))?;
+    let artifact = cross_stream_timed(wire, &crate::core::bench::probes::anthropic_post(&body))?;
     let text = chat_text_of(&artifact)?;
     Ok(InfillOutcome::Answered(ProbeArtifact {
         anthropic_body: normalize_chat_fill(&text),
@@ -1101,7 +1211,10 @@ mod tests {
             completion_tokens: 10,
         };
         let err = super::timings_from_stream(&zero_prompt, &marks).unwrap_err();
-        assert!(err.to_string().contains("usage.prompt_tokens is 0"), "{err}");
+        assert!(
+            err.to_string().contains("usage.prompt_tokens is 0"),
+            "{err}"
+        );
 
         let one_completion = super::StreamUsage {
             prompt_tokens: 10,
@@ -1123,7 +1236,10 @@ mod tests {
             first_to_done: Duration::from_secs(1),
         };
         let err = super::timings_from_stream(&zero_window, &stalled).unwrap_err();
-        assert!(err.to_string().contains("zero-length timing window"), "{err}");
+        assert!(
+            err.to_string().contains("zero-length timing window"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1176,14 +1292,22 @@ mod tests {
         assert!(
             (artifact.timings.predicted_per_second - expected.predicted_per_second).abs() < 1e-9
         );
+    }
 
+    /// A timed stream that never carries a `usage` object cannot be timed —
+    /// `cross_stream_timed` fails loudly rather than crossing without a
+    /// measurement.
+    #[test]
+    fn a_timed_stream_without_a_usage_object_fails_naming_the_gap() {
         let no_usage = CannedUpstream::new_streamed(
             sse(&[
                 text_frame("hi there"),
                 serde_json::json!({ "id": "c1", "choices": [{ "delta": {}, "finish_reason": "stop" }] }),
             ]),
-            marks,
+            some_marks(),
         );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
         let err =
             super::cross_stream_timed(&wire(&no_usage, &facade, &up), &anthropic_request("hi"))
                 .expect_err("no usage frame, no measurement");
