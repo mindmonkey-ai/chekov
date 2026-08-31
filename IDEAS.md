@@ -466,7 +466,24 @@ did not win). Optionally record thermal pressure at run start/end in the stamp
 so a throttled run explains its own variance — MTPLX pins fans for clean
 timing; chekov can at least say when the clock was dirty. Fits the §12
 portability-sweep idea: tuned-per-machine beats tuned-for-this-desk.
-Proposed 2026-08-30 — status: OPEN
+SHIPPED 2026-08-30 as proposed: `chekov tune [NAME] [--dry-run] [--yes]
+[--apply] [--stages fa,kv,batch,ubatch]` runs a four-stage descent from the
+model's own flags (`fa`/`kv` judged on decode, `batch`/`ubatch` judged on
+prefill), each candidate winning its stage only against `[bench]
+significance_pct`, degenerate trials excluded from every comparison and never
+saved, and the honest **`defaults won`** verdict — with the threshold it was
+reached under — printed and stamped on every run with nothing to beat the
+baseline. Every run writes a JSON record under `tune/<utc>-<model>.json`.
+Thermal pressure is read via `pmset -g therm`'s `CPU_Speed_Limit` before and
+after every probe (no root needed); the true pressure API is a C notification
+this crate cannot link under `#![forbid(unsafe_code)]`, so a nominal reading
+is honestly `None`, not a false "fine". `--apply` writes the winner into the
+model's `extra_flags` only after printing the exact diff and a confirm —
+`defaults.flags` is never touched. Left out, as scoped: `--exhaustive` (the
+full 64-launch grid), any axis beyond the four (`--threads`,
+`--n-gpu-layers`, `--kv-unified`, `--fit`), and looping several models in one
+invocation.
+Proposed 2026-08-30 — status: SHIPPED
 
 ## New benchable models on a 48 GB Mac (survey 2026-08-30)
 Qwen3.8-27B dense (released ~2026-08; qwen3_5-family arch, llama.cpp support

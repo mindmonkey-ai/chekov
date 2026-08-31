@@ -8,6 +8,7 @@
 # Bench run records and rendered reports — machine-local measurements, and
 # `eval/` grows one directory per run.
 /eval/
+/tune/
 /reports/
 # Machine-local registry (absolute paths) + generated launcher + engine checkout.
 /models.toml
