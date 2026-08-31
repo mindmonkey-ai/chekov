@@ -792,7 +792,7 @@ mod tests {
         let slower = judge(&measured(24.9, 397.0), super::Stage::Fa, 5.0);
         assert_eq!(
             (slower.wins, slower.phrase.as_str()),
-            (false, "slower on decode")
+            (false, "slower on decode — incumbent kept")
         );
         let close = judge(&measured(31.3, 402.0), super::Stage::Fa, 5.0);
         assert_eq!(
@@ -819,7 +819,7 @@ mod tests {
         };
         let lose = super::Verdict {
             wins: false,
-            phrase: "slower on prefill".into(),
+            phrase: "slower on prefill — incumbent kept".into(),
         };
         let scored = vec![
             (cand("512"), measured(31.0, 288.0), lose),
