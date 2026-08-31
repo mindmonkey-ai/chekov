@@ -1282,6 +1282,37 @@ mod tests {
     }
 
     #[test]
+    fn timing_source_is_allow_listed_only_under_cross_runtime() {
+        assert_eq!(super::CROSS_RUNTIME_ALLOWED.len(), 12);
+
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut foreign = stamp("dda1b0d67", "r1/s1");
+        foreign.timing_source = crate::core::bench::stamp::TIMING_CHEKOV_STREAMED.to_owned();
+        let b = run("m2", foreign, &[19.0, 21.0, 22.0]);
+
+        let err =
+            compare_runs(&a, &b, &opts(5.0)).expect_err("timing_source refused without the flag");
+        match err {
+            ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "timing_source"),
+            other => panic!("expected stamp mismatch, got {other}"),
+        }
+
+        let cross = CompareOpts {
+            cross_runtime: true,
+            ..opts(5.0)
+        };
+        assert!(compare_runs(&a, &b, &cross).is_ok());
+
+        let banner = cross_runtime_banner(&a.head.stamp, &b.head.stamp);
+        assert!(
+            banner
+                .lines()
+                .any(|line| line.starts_with("timing_source: ")),
+            "banner missing timing_source: {banner}"
+        );
+    }
+
+    #[test]
     fn the_banner_names_each_differing_allow_listed_field_and_only_those() {
         let a = stamp("dda1b0d67", "r1/s1");
         let mut b = stamp("dda1b0d67", "r1/s1");

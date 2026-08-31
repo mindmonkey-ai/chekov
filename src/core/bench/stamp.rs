@@ -183,7 +183,9 @@ pub fn flag_value_either(args: &[String], names: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RUNTIME_LLAMA_CPP, Stamp, first_mismatch, flag_value};
+    use super::{
+        RUNTIME_LLAMA_CPP, Stamp, TIMING_CHEKOV_STREAMED, TIMING_SERVER, first_mismatch, flag_value,
+    };
 
     fn stamp() -> Stamp {
         Stamp {
@@ -348,5 +350,33 @@ mod tests {
         a.engine_build_commit = "0.4.1".to_owned();
         b.engine_build_commit = "bbb".to_owned();
         assert_eq!(super::first_mismatch(&a, &b), Some("runtime"));
+    }
+
+    #[test]
+    fn a_stamp_without_a_timing_source_reads_as_server_reported() {
+        // Same JSON literal as the runtime test, minus both new fields — a
+        // stamp written before either existed measured every run itself.
+        let json = serde_json::json!({
+            "machine_id": "m", "engine_build_commit": "c",
+            "weights_revision": "r/s", "quant": "q", "ctx": 1, "n_parallel": 1,
+            "kv_unified": "engine-default", "n_batch": "engine-default",
+            "n_ubatch": "engine-default", "type_k": "engine-default",
+            "type_v": "engine-default", "flash_attn": "engine-default",
+            "seed": 0, "temperature_milli": 0, "chekov_version": "0",
+            "prompt_set_hash": "h", "corpus_id": "corp"
+        });
+        let stamp: Stamp = serde_json::from_value(json).unwrap();
+        assert_eq!(stamp.timing_source, TIMING_SERVER);
+    }
+
+    #[test]
+    fn timing_source_differs_after_runtime_and_before_the_engine_commit() {
+        let mut a = stamp();
+        let b = stamp();
+        a.timing_source = TIMING_CHEKOV_STREAMED.to_owned();
+        a.engine_build_commit = "x".into();
+        assert_eq!(first_mismatch(&a, &b), Some("timing_source"));
+        a.runtime = "mtplx 1".into();
+        assert_eq!(first_mismatch(&a, &b), Some("runtime"));
     }
 }
