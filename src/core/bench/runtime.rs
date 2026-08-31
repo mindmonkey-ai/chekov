@@ -72,7 +72,10 @@ fn name_ok(name: &str) -> bool {
 /// is `EndpointDown`.
 pub fn foreign_ready(http: &dyn HttpClient, base_url: &str) -> Result<Vec<String>, ChekovError> {
     let url = format!("{base_url}/v1/models");
-    let body = http.get(&url)?;
+    let body = http.get(&url).map_err(|e| ChekovError::EndpointDown {
+        url: url.clone(),
+        reason: e.to_string(),
+    })?;
     let parsed: Value = serde_json::from_str(&body).map_err(|_| ChekovError::EndpointDown {
         url: url.clone(),
         reason: "/v1/models did not return JSON".to_owned(),
@@ -182,7 +185,7 @@ mod tests {
         let err = super::foreign_ready(&http, "http://h:1").unwrap_err();
         assert!(
             matches!(&err, ChekovError::EndpointDown { url, reason }
-                if url == "http://h:1/v1/models" && reason == "connection refused"),
+                if url == "http://h:1/v1/models" && reason.contains("connection refused")),
             "{err}"
         );
     }

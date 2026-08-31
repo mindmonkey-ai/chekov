@@ -627,12 +627,20 @@ pub fn chat_fim_hash(base: &str) -> String {
     crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
 }
 
-/// The reply's first text block, the same shape the graders read — there is
-/// no other door into an Anthropic-shaped body here.
+/// The reply's first TEXT block — a leading `thinking` block (a reasoning
+/// model's extracted `reasoning_content`, translated ahead of the answer) is
+/// skipped rather than mistaken for the fill. Mirrors `judge::parse_reply`,
+/// the house pattern for reading an Anthropic-shaped body's content array.
 fn chat_text_of(artifact: &ProbeArtifact) -> Result<String, ChekovError> {
     serde_json::from_str::<Value>(&artifact.anthropic_body)
         .ok()
-        .and_then(|v| v["content"][0]["text"].as_str().map(str::to_owned))
+        .and_then(|v| {
+            v["content"]
+                .as_array()
+                .and_then(|blocks| blocks.iter().find(|b| b["type"] == "text"))
+                .and_then(|b| b["text"].as_str())
+                .map(str::to_owned)
+        })
         .ok_or_else(|| ChekovError::ProxyBadRequest {
             reason: "chat fill has no text content".to_owned(),
         })
