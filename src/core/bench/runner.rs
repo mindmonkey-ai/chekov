@@ -513,6 +513,22 @@ fn timings_from(parsed: &Value) -> Result<Timings, ChekovError> {
     }
 }
 
+/// Recast a missing-`timings` failure on the foreign path (C1).
+///
+/// `BenchNoTimings` prescribes rebuilding llama.cpp — meaningless advice
+/// against a declared foreign runtime. On the foreign path only, name what
+/// was declared instead; every other error, and the llama.cpp path
+/// (`runtime: None`), passes through unchanged.
+#[must_use]
+pub fn foreign_timings_error(err: ChekovError, runtime: Option<&str>) -> ChekovError {
+    match (err, runtime) {
+        (ChekovError::BenchNoTimings, Some(runtime)) => ChekovError::ForeignTimingsUnsupported {
+            runtime: runtime.to_owned(),
+        },
+        (err, _) => err,
+    }
+}
+
 /// One extra file the model is shown beside the masked one, in llama.cpp's
 /// `input_extra` shape.
 ///

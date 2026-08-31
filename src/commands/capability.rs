@@ -1380,6 +1380,7 @@ fn measure_candidate(
             suite: args.suite,
             prepared: inputs.prepared,
             fim: fim_for(args.runtime.as_ref()),
+            runtime: args.runtime.as_ref().map(RuntimeSpec::stored),
         },
     )?;
     print!("{}", store::render_run(&store::RunLog::load(writer.dir())?));
@@ -1611,6 +1612,10 @@ struct SuiteInputs<'a> {
     /// Which wire the codebase suite fills its rows over — selected by
     /// runtime, and threaded down to the one crossing that sends it (§6).
     fim: crate::core::bench::runner::FimTransport,
+    /// The declared foreign runtime's stored spelling, when there is one —
+    /// so a missing-timings failure names it instead of prescribing an
+    /// engine rebuild that does not apply (C1).
+    runtime: Option<String>,
 }
 
 fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<(), ChekovError> {
@@ -1626,14 +1631,16 @@ fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<()
             seed: ctx.config.file.bench.seed,
         },
     };
+    let runtime = inputs.runtime.as_deref();
+    let recast = |e| runner::foreign_timings_error(e, runtime);
     if inputs.suite.is_some_and(Suite::runs_throughput) {
-        run_throughput(sink, inputs.plan, &wire)?;
+        run_throughput(sink, inputs.plan, &wire).map_err(recast)?;
     }
     if inputs.suite.is_some_and(Suite::runs_agentic) {
-        run_agentic(sink, &wire)?;
+        run_agentic(sink, &wire).map_err(recast)?;
     }
     if let Some(path) = inputs.fixture {
-        run_fixture(sink, &wire, path)?;
+        run_fixture(sink, &wire, path).map_err(recast)?;
     }
     if let Some(prepared) = inputs.prepared {
         crate::core::bench::codebase::run::run_codebase(
@@ -1641,6 +1648,7 @@ fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<()
                 writer: sink.writer,
                 done: sink.done,
                 fim: inputs.fim,
+                runtime: inputs.runtime.clone(),
             },
             &wire,
             prepared,

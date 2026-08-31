@@ -194,6 +194,13 @@ pub enum ChekovError {
     )]
     BenchNoTimings,
 
+    #[error(
+        "the server declared as runtime '{runtime}' never returned llama.cpp's \
+         `timings` object — chekov cannot measure timings through {runtime} yet; \
+         this is a recorded follow-up, not a defect to work around today"
+    )]
+    ForeignTimingsUnsupported { runtime: String },
+
     #[error("bench fixture {}: {reason}", path.display())]
     FixtureInvalid {
         path: std::path::PathBuf,

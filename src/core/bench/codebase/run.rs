@@ -22,6 +22,10 @@ pub struct Sink<'a> {
     /// `/infill` for llama.cpp, chat completions for a foreign runtime — the
     /// command layer selects it from `--runtime` (spec §6).
     pub fim: runner::FimTransport,
+    /// The declared foreign runtime's stored spelling, when there is one —
+    /// names a missing-timings failure rather than prescribing an engine
+    /// rebuild that does not apply to it (C1).
+    pub runtime: Option<String>,
 }
 
 impl Sink<'_> {
@@ -99,6 +103,9 @@ struct Crossing<'a> {
     with_extra: bool,
     /// Which wire this crossing rides, selected by runtime (spec §6).
     fim: runner::FimTransport,
+    /// The declared foreign runtime, carried down for `infill_or_latch`'s
+    /// missing-timings message (C1).
+    runtime: Option<String>,
 }
 
 /// What this arm sends beside the file: the defining file on the "extra"
@@ -155,7 +162,7 @@ fn infill_or_latch(
             Err(Unavailable::unsupported(reason))
         }
         Err(e) => {
-            let reason = e.to_string();
+            let reason = runner::foreign_timings_error(e, crossing.runtime.as_deref()).to_string();
             eprintln!(
                 "chekov bench: codebase task {} unavailable: {reason}",
                 task.id
@@ -424,6 +431,7 @@ pub fn run_codebase(
                 task,
                 with_extra: arm.with_extra,
                 fim: sink.fim,
+                runtime: sink.runtime.clone(),
             };
             let outcome = infill_or_latch(wire, &crossing, &mut unsupported);
             let prediction = outcome.as_ref().ok().map(|a| a.anthropic_body.clone());
@@ -641,18 +649,27 @@ mod tests {
         prepared: &Prepared,
         script: (Vec<Result<String, ChekovError>>, Vec<Done>),
     ) -> (Vec<TaskRow>, usize, Vec<serde_json::Value>) {
-        drive_runtime(name, prepared, script, None)
+        drive_runtime(DriveArgs {
+            name,
+            prepared,
+            script,
+            runtime: None,
+        })
+    }
+
+    /// `drive`'s bundled inputs (§4 — keeps `drive_runtime` at one parameter),
+    /// plus the declared foreign runtime a run's `Sink` carries (C1).
+    struct DriveArgs<'a> {
+        name: &'a str,
+        prepared: &'a Prepared,
+        script: (Vec<Result<String, ChekovError>>, Vec<Done>),
+        runtime: Option<&'a str>,
     }
 
     /// `drive`, with the declared foreign runtime a run's `Sink` carries
     /// (C1) — `None` is llama.cpp, matching every existing `drive` call.
-    fn drive_runtime(
-        name: &str,
-        prepared: &Prepared,
-        script: (Vec<Result<String, ChekovError>>, Vec<Done>),
-        runtime: Option<&str>,
-    ) -> (Vec<TaskRow>, usize, Vec<serde_json::Value>) {
-        let (replies, done) = script;
+    fn drive_runtime(args: DriveArgs) -> (Vec<TaskRow>, usize, Vec<serde_json::Value>) {
+        let (replies, done) = args.script;
         let http = ScriptedInfill {
             replies: RefCell::new(replies),
             posts: RefCell::new(0),
@@ -670,24 +687,28 @@ mod tests {
             pins: runner::SamplingPins { seed: 42 },
         };
         let mut writer =
-            RunWriter::create(&scratch(name), "r-codebase", &run_head()).expect("create");
+            RunWriter::create(&scratch(args.name), "r-codebase", &run_head()).expect("create");
         {
             let mut sink = super::Sink {
                 writer: &mut writer,
                 done: &done,
                 fim: runner::FimTransport::Infill,
-                runtime: runtime.map(str::to_owned),
+                runtime: args.runtime.map(str::to_owned),
             };
-            super::run_codebase(&mut sink, &wire, prepared).expect("the run completes");
+            super::run_codebase(&mut sink, &wire, args.prepared).expect("the run completes");
         }
-        let log = RunLog::load(writer.dir()).expect("load");
-        let bodies = http
-            .bodies
-            .into_inner()
+        let rows = RunLog::load(writer.dir()).expect("load").rows;
+        let bodies = drive_bodies(&http);
+        (rows, http.posts.into_inner(), bodies)
+    }
+
+    /// What went up the wire, one crossing per entry, parsed.
+    fn drive_bodies(http: &ScriptedInfill) -> Vec<serde_json::Value> {
+        http.bodies
+            .borrow()
             .iter()
             .map(|b| serde_json::from_str(b).expect("json"))
-            .collect();
-        (log.rows, http.posts.into_inner(), bodies)
+            .collect()
     }
 
     fn refused(reason: &str) -> Result<String, ChekovError> {
@@ -883,12 +904,14 @@ mod tests {
     #[test]
     fn a_foreign_runtime_missing_timings_names_the_runtime_not_an_engine_rebuild() {
         let no_timings = serde_json::json!({ "content": "let a = 1;" }).to_string();
-        let (rows, _, _) = drive_runtime(
-            "foreign-no-timings",
-            &prepared_pair(),
-            (vec![Ok(no_timings)], vec![]),
-            Some("mtplx 0.4.1"),
-        );
+        let mut prepared = prepared_pair();
+        prepared.tasks.truncate(1);
+        let (rows, _, _) = drive_runtime(DriveArgs {
+            name: "foreign-no-timings",
+            prepared: &prepared,
+            script: (vec![Ok(no_timings)], vec![]),
+            runtime: Some("mtplx 0.4.1"),
+        });
         let reason = unavailable_reason(&rows[0]);
         assert!(reason.contains("mtplx 0.4.1"), "{reason}");
         assert!(
