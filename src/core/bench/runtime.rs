@@ -158,4 +158,32 @@ mod tests {
         let err = super::foreign_ready(&shapeless, "http://h:1").unwrap_err();
         assert!(matches!(err, ChekovError::EndpointDown { .. }));
     }
+
+    /// A transport that never reaches HTTP 200 at all — the server is not
+    /// started, or `/v1/models` 404s/401s. `UreqClient::get` reports this as
+    /// `HubRequestFailed` (spec I2); readiness must still surface it as
+    /// `EndpointDown` naming the URL, per §4/§8.
+    struct FailingGet(&'static str);
+    impl HttpClient for FailingGet {
+        fn get(&self, url: &str) -> Result<String, ChekovError> {
+            Err(ChekovError::HubRequestFailed {
+                url: url.to_owned(),
+                reason: self.0.to_owned(),
+            })
+        }
+        fn post_json(&self, _req: &JsonRequest) -> Result<String, ChekovError> {
+            unreachable!("readiness never POSTs")
+        }
+    }
+
+    #[test]
+    fn a_transport_failure_is_endpoint_down_not_a_hub_error() {
+        let http = FailingGet("connection refused");
+        let err = super::foreign_ready(&http, "http://h:1").unwrap_err();
+        assert!(
+            matches!(&err, ChekovError::EndpointDown { url, reason }
+                if url == "http://h:1/v1/models" && reason == "connection refused"),
+            "{err}"
+        );
+    }
 }

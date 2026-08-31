@@ -1241,6 +1241,147 @@ mod tests {
         assert_eq!(a.len(), 12);
     }
 
+    /// A one-user-message chat crossing sends the pins and the exact
+    /// template prompt, and returns the normalized fill (spec §6, I3a).
+    #[test]
+    fn cross_fim_chat_sends_the_pins_and_the_prompt_and_returns_the_normalized_fill() {
+        let http = CannedUpstream::new(
+            serde_json::json!({
+                "choices": [{
+                    "message": { "content": "```rust\nlet a = 1;\n```\n" },
+                    "finish_reason": "stop"
+                }],
+                "timings": final_frame()["timings"]
+            })
+            .to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn a() {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+            extra: None,
+        };
+        let outcome =
+            super::cross_fim(&wire(&http, &facade, &up), super::FimTransport::Chat, &task)
+                .expect("crosses");
+        let super::InfillOutcome::Answered(artifact) = outcome else {
+            panic!("a 200 with content is an answer");
+        };
+        assert_eq!(artifact.anthropic_body, "let a = 1;");
+        let sent = sent(&http);
+        assert_eq!(sent["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(sent["messages"][0]["role"], "user");
+        assert_eq!(
+            sent["messages"][0]["content"],
+            super::chat_fim_prompt(&task)
+        );
+        assert_eq!(sent["temperature"], 0);
+        assert_eq!(sent["top_k"], 1);
+        assert_eq!(sent["seed"], 42);
+        assert_eq!(sent["max_tokens"], super::n_predict_for(task.gold_lines));
+    }
+
+    /// `cross_fim(.., Infill, ..)` still rides `/infill` — the chat wire never
+    /// hijacks llama.cpp's own door (I3d).
+    #[test]
+    fn cross_fim_still_dispatches_infill_to_the_infill_door() {
+        let http = CannedUpstream::new(
+            serde_json::json!({
+                "content": "let a = 1;",
+                "timings": final_frame()["timings"]
+            })
+            .to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn a() {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+            extra: None,
+        };
+        super::cross_fim(
+            &wire(&http, &facade, &up),
+            super::FimTransport::Infill,
+            &task,
+        )
+        .expect("crosses");
+        assert!(
+            http.url_seen
+                .borrow()
+                .as_deref()
+                .unwrap_or("")
+                .ends_with("/infill")
+        );
+    }
+
+    /// A leading `thinking` block (a reasoning model's `reasoning_content`,
+    /// translated ahead of the answer) must not hide the text block that
+    /// follows it — I1, locked here against a wire-level canned reply.
+    #[test]
+    fn a_leading_thinking_block_does_not_hide_the_chat_fill_text() {
+        let http = CannedUpstream::new(
+            serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": "let a = 1;",
+                        "reasoning_content": "considering the prefix and suffix"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "timings": final_frame()["timings"]
+            })
+            .to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn a() {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+            extra: None,
+        };
+        let outcome =
+            super::cross_fim(&wire(&http, &facade, &up), super::FimTransport::Chat, &task)
+                .expect("a leading thinking block still yields the text");
+        let super::InfillOutcome::Answered(artifact) = outcome else {
+            panic!("must be answered");
+        };
+        assert_eq!(artifact.anthropic_body, "let a = 1;");
+    }
+
+    /// A reply with no text block anywhere (a thinking-only or empty
+    /// content) fails loudly rather than grading an empty string (I3c).
+    #[test]
+    fn a_chat_reply_with_no_text_block_fails_as_a_bad_request() {
+        let http = CannedUpstream::new(
+            serde_json::json!({
+                "choices": [{ "message": { "content": "" }, "finish_reason": "stop" }],
+                "timings": final_frame()["timings"]
+            })
+            .to_string(),
+        );
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let task = super::InfillTask {
+            prefix: "fn a() {\n",
+            suffix: "\n}\n",
+            gold_lines: 1,
+            extra: None,
+        };
+        let Err(err) =
+            super::cross_fim(&wire(&http, &facade, &up), super::FimTransport::Chat, &task)
+        else {
+            panic!("no text content should not be an answer");
+        };
+        assert!(
+            matches!(&err, ChekovError::ProxyBadRequest { reason } if reason == "chat fill has no text content"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn only_the_forced_wire_asks_the_engine_to_extract_reasoning() {
         // A thinking-prefill template (ornith) 400s on a forced grammar unless
