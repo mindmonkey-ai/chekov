@@ -137,15 +137,37 @@ pub struct CodebaseComparison {
     pub judge_note: Option<String>,
 }
 
+/// How a comparison runs: the significance threshold, and whether the
+/// runtime allow-list (spec 2026-08-31 §7) is masked.
+pub struct CompareOpts {
+    pub significance_pct: f64,
+    pub cross_runtime: bool,
+}
+
+/// The fields `--cross-runtime` permits to differ, and no others.
+const CROSS_RUNTIME_ALLOWED: [&str; 11] = [
+    "runtime",
+    "engine_build_commit",
+    "ctx",
+    "n_parallel",
+    "kv_unified",
+    "n_batch",
+    "n_ubatch",
+    "type_k",
+    "type_v",
+    "flash_attn",
+    "prompt_set_hash",
+];
+
 pub fn compare_runs(
     a: &RunLog,
     b: &RunLog,
-    significance_pct: f64,
+    opts: &CompareOpts,
 ) -> Result<RunComparison, ChekovError> {
-    assert_same_environment(a, b)?;
     let pair = RunPair { a, b };
+    assert_same_environment(&pair, opts)?;
     Ok(RunComparison {
-        depths: depth_comparisons(&pair, significance_pct),
+        depths: depth_comparisons(&pair, opts.significance_pct),
         agentic: compare_agentic(&pair),
         codebase: compare_codebase(&pair),
     })
@@ -186,16 +208,58 @@ fn depth_of(row: &TaskRow) -> Option<u32> {
 }
 
 /// Refuse on the first differing stamp field, with the subject fields
-/// (`weights_revision`, `quant`) masked equal — they are what is being
-/// compared, not what must match.
-fn assert_same_environment(a: &RunLog, b: &RunLog) -> Result<(), ChekovError> {
-    let mut b_env = b.head.stamp.clone();
-    b_env
-        .weights_revision
-        .clone_from(&a.head.stamp.weights_revision);
-    b_env.quant.clone_from(&a.head.stamp.quant);
-    b_env.judge.clone_from(&a.head.stamp.judge);
-    stamp::mismatch_error(&a.head.stamp, &b_env).map_or(Ok(()), Err)
+/// (`weights_revision`, `quant`, `judge`) masked equal — they are what is
+/// being compared, not what must match. `--cross-runtime` additionally
+/// masks the runtime allow-list (spec §7).
+fn assert_same_environment(pair: &RunPair, opts: &CompareOpts) -> Result<(), ChekovError> {
+    let a = &pair.a.head.stamp;
+    let mut b_env = pair.b.head.stamp.clone();
+    b_env.weights_revision.clone_from(&a.weights_revision);
+    b_env.quant.clone_from(&a.quant);
+    b_env.judge.clone_from(&a.judge);
+    if opts.cross_runtime {
+        mask_cross_runtime(&mut b_env, a);
+    }
+    stamp::mismatch_error(a, &b_env).map_or(Ok(()), Err)
+}
+
+/// Masks exactly the `--cross-runtime` allow-list (spec §7) onto `b_env` —
+/// the fields a foreign runtime is permitted to differ on, and no others.
+fn mask_cross_runtime(b_env: &mut Stamp, a: &Stamp) {
+    b_env.runtime.clone_from(&a.runtime);
+    b_env.engine_build_commit.clone_from(&a.engine_build_commit);
+    b_env.ctx = a.ctx;
+    b_env.n_parallel = a.n_parallel;
+    b_env.kv_unified.clone_from(&a.kv_unified);
+    b_env.n_batch.clone_from(&a.n_batch);
+    b_env.n_ubatch.clone_from(&a.n_ubatch);
+    b_env.type_k.clone_from(&a.type_k);
+    b_env.type_v.clone_from(&a.type_v);
+    b_env.flash_attn.clone_from(&a.flash_attn);
+    b_env.prompt_set_hash.clone_from(&a.prompt_set_hash);
+}
+
+/// The `--cross-runtime` banner: both runtimes, the warning, one line per
+/// allow-listed field that differs, the closing sentence.
+#[must_use]
+pub fn cross_runtime_banner(a: &Stamp, b: &Stamp) -> String {
+    let mut lines = vec![
+        format!("cross-runtime comparison: {} vs {}", a.runtime, b.runtime),
+        "determinism does not hold across runtimes; differing fields:".to_owned(),
+    ];
+    let (ja, jb) = (json_of(a), json_of(b));
+    for field in CROSS_RUNTIME_ALLOWED {
+        let (va, vb) = (&ja[field], &jb[field]);
+        if va != vb {
+            lines.push(format!("{field}: {va} vs {vb}"));
+        }
+    }
+    lines.push("this measures the runtimes, not the model.".to_owned());
+    lines.join("\n") + "\n"
+}
+
+fn json_of(s: &Stamp) -> serde_json::Value {
+    serde_json::to_value(s).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- agentic
@@ -1172,9 +1236,7 @@ mod tests {
             reasoning_effort: "low".into(),
             min_consistency_pct: 70,
         });
-        assert!(
-            super::assert_same_environment(&RunPair { a: &a, b: &b }, &opts(5.0)).is_ok()
-        );
+        assert!(super::assert_same_environment(&RunPair { a: &a, b: &b }, &opts(5.0)).is_ok());
     }
 
     #[test]
@@ -1231,11 +1293,20 @@ mod tests {
         let banner = cross_runtime_banner(&a, &b);
         assert!(banner.starts_with("cross-runtime comparison: llama.cpp vs mtplx 0.4.1\n"));
         assert!(banner.contains("determinism does not hold across runtimes"));
-        for needle in ["runtime: ", "engine_build_commit: ", "flash_attn: ", "prompt_set_hash: "] {
+        for needle in [
+            "runtime: ",
+            "engine_build_commit: ",
+            "flash_attn: ",
+            "prompt_set_hash: ",
+        ] {
             assert!(banner.contains(needle), "missing {needle}");
         }
         assert!(!banner.contains("corpus_id"));
-        assert!(banner.trim_end().ends_with("this measures the runtimes, not the model."));
+        assert!(
+            banner
+                .trim_end()
+                .ends_with("this measures the runtimes, not the model.")
+        );
     }
 
     #[test]

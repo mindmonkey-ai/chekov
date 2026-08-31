@@ -59,6 +59,10 @@ pub enum CapAction {
         /// Run ids under `eval/`, or paths to run directories.
         a: std::path::PathBuf,
         b: std::path::PathBuf,
+        /// Permit the runtime allow-list (spec §7) to differ — a loud
+        /// banner prints before any other output.
+        #[arg(long)]
+        cross_runtime: bool,
     },
 }
 
@@ -222,7 +226,13 @@ impl Command for CapabilityCmd {
                 );
             }
             Some(CapAction::Bench(opts)) => return bench(ctx, &bench_args(opts)?),
-            Some(CapAction::Compare { a, b }) => return compare(ctx, a, b),
+            Some(CapAction::Compare {
+                a,
+                b,
+                cross_runtime,
+            }) => {
+                return compare(ctx, &compare_args(a, b, *cross_runtime));
+            }
             _ => {}
         }
         let m = machine::probe(&ctx.config.engine_dir());
@@ -2345,15 +2355,40 @@ fn resolve_run(ctx: &Ctx, arg: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-fn compare(ctx: &Ctx, a: &std::path::Path, b: &std::path::Path) -> Result<ExitCode, ChekovError> {
+/// Which two stored runs to compare, and under what rules (spec §7).
+struct CompareArgs<'a> {
+    a: &'a std::path::Path,
+    b: &'a std::path::Path,
+    cross_runtime: bool,
+}
+
+const fn compare_args<'a>(
+    a: &'a std::path::Path,
+    b: &'a std::path::Path,
+    cross_runtime: bool,
+) -> CompareArgs<'a> {
+    CompareArgs {
+        a,
+        b,
+        cross_runtime,
+    }
+}
+
+fn compare(ctx: &Ctx, args: &CompareArgs) -> Result<ExitCode, ChekovError> {
     use crate::core::bench::{compare as bench_compare, store};
-    let run_a = store::RunLog::load(&resolve_run(ctx, a))?;
-    let run_b = store::RunLog::load(&resolve_run(ctx, b))?;
-    let comparison = bench_compare::compare_runs(
-        &run_a,
-        &run_b,
-        f64::from(ctx.config.file.bench.significance_pct),
-    )?;
+    let run_a = store::RunLog::load(&resolve_run(ctx, args.a))?;
+    let run_b = store::RunLog::load(&resolve_run(ctx, args.b))?;
+    let opts = bench_compare::CompareOpts {
+        significance_pct: f64::from(ctx.config.file.bench.significance_pct),
+        cross_runtime: args.cross_runtime,
+    };
+    if opts.cross_runtime {
+        print!(
+            "{}",
+            bench_compare::cross_runtime_banner(&run_a.head.stamp, &run_b.head.stamp)
+        );
+    }
+    let comparison = bench_compare::compare_runs(&run_a, &run_b, &opts)?;
     print!(
         "{}",
         bench_compare::render_comparison(
