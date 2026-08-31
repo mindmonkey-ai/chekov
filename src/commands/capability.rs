@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use super::{Command, Ctx};
 use crate::core::bench::candidate::{self, Candidate};
+use crate::core::bench::runtime::{self, RuntimeSpec};
 use crate::core::frontier;
 use crate::core::machine::{self, Machine, Probed, Provenance};
 use crate::error::ChekovError;
@@ -140,6 +141,14 @@ pub struct BenchOpts {
     /// would have to stop a server bench did not start.
     #[arg(long, requires = "codebase")]
     pub judge: Option<String>,
+    /// A foreign runtime serving the subject (`<name>@<version>`, e.g.
+    /// `mtplx@0.4.1`). Declared, never probed: chekov measures a server YOU
+    /// started, and refuses to launch one (spec 2026-08-31 §2).
+    #[arg(long)]
+    pub runtime: Option<String>,
+    /// Base URL of the foreign server (default: the configured endpoint).
+    #[arg(long, requires = "runtime")]
+    pub upstream: Option<String>,
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -212,7 +221,7 @@ impl Command for CapabilityCmd {
                     },
                 );
             }
-            Some(CapAction::Bench(opts)) => return bench(ctx, &BenchArgs::from(opts)),
+            Some(CapAction::Bench(opts)) => return bench(ctx, &bench_args(opts)?),
             Some(CapAction::Compare { a, b }) => return compare(ctx, a, b),
             _ => {}
         }
@@ -720,6 +729,45 @@ fn server_use_rule(
     }
 }
 
+/// A declared foreign runtime benches exactly ONE already-served subject.
+/// chekov holds no pid and no run-state file for a server it did not start,
+/// so there is nothing to consult and nothing it could launch (spec §2).
+fn foreign_actions(
+    spec: &RuntimeSpec,
+    requested: &[String],
+) -> Result<Vec<crate::core::bench::lifecycle::StepAction>, ChekovError> {
+    use crate::core::bench::lifecycle::StepAction;
+    if requested.len() != 1 {
+        return Err(ChekovError::RuntimeNeedsRunningServer {
+            runtime: spec.stored(),
+        });
+    }
+    Ok(vec![StepAction::UseRunning])
+}
+
+/// Which action each requested candidate takes: the foreign path is
+/// `UseRunning`-only and never asks chekov's own server state, the llama.cpp
+/// path asks as it always has (§7.3).
+fn candidate_actions(
+    ctx: &Ctx,
+    args: &BenchArgs,
+    names: &[String],
+) -> Result<Vec<crate::core::bench::lifecycle::StepAction>, ChekovError> {
+    if let Some(spec) = args.runtime.as_ref() {
+        return foreign_actions(spec, names);
+    }
+    let running = match crate::core::server::live_pid(&ctx.config) {
+        // A live server whose model is unrecorded cannot be identified —
+        // benching through it would attribute numbers to a guess.
+        Some(_) => Some(
+            crate::core::server::read_run_state(&ctx.config)
+                .ok_or(ChekovError::ServerModelUnknown)?,
+        ),
+        None => None,
+    };
+    server_use_rule(running.as_deref(), names)
+}
+
 /// The requested candidates with their actions, every guard applied.
 fn resolve_candidates(
     ctx: &Ctx,
@@ -740,16 +788,7 @@ fn resolve_candidates(
     if args.resume.is_some() && names.len() > 1 {
         return Err(ChekovError::BenchResumeNeedsOneCandidate);
     }
-    let running = match crate::core::server::live_pid(&ctx.config) {
-        // A live server whose model is unrecorded cannot be identified —
-        // benching through it would attribute numbers to a guess.
-        Some(_) => Some(
-            crate::core::server::read_run_state(&ctx.config)
-                .ok_or(ChekovError::ServerModelUnknown)?,
-        ),
-        None => None,
-    };
-    let actions = server_use_rule(running.as_deref(), &names)?;
+    let actions = candidate_actions(ctx, args, &names)?;
     names
         .iter()
         .zip(actions)
@@ -841,22 +880,34 @@ struct BenchArgs<'a> {
     codebase: Option<&'a std::path::Path>,
     allow_exec: bool,
     judge: Option<&'a str>,
+    /// The declared foreign runtime, when there is one — the whole foreign
+    /// path hangs off this being `Some` (spec §2).
+    runtime: Option<RuntimeSpec>,
+    /// `--upstream`, overriding the configured endpoint for this run only.
+    upstream: Option<&'a str>,
 }
 
-impl<'a> From<&'a BenchOpts> for BenchArgs<'a> {
-    fn from(opts: &'a BenchOpts) -> Self {
-        Self {
-            fixture: opts.fixture.as_deref(),
-            resume: opts.resume.as_deref(),
-            models: &opts.models,
-            dry_run: opts.dry_run,
-            yes: opts.yes,
-            suite: effective_suite(opts.suite, opts.codebase.is_some()),
-            codebase: opts.codebase.as_deref(),
-            allow_exec: opts.allow_exec,
-            judge: opts.judge.as_deref(),
-        }
-    }
+/// The parsed invocation. Fallible where `From` could not be: a malformed
+/// `--runtime` is refused HERE, before the repository, the registry or any
+/// server is asked about.
+fn bench_args(opts: &BenchOpts) -> Result<BenchArgs<'_>, ChekovError> {
+    Ok(BenchArgs {
+        fixture: opts.fixture.as_deref(),
+        resume: opts.resume.as_deref(),
+        models: &opts.models,
+        dry_run: opts.dry_run,
+        yes: opts.yes,
+        suite: effective_suite(opts.suite, opts.codebase.is_some()),
+        codebase: opts.codebase.as_deref(),
+        allow_exec: opts.allow_exec,
+        judge: opts.judge.as_deref(),
+        runtime: opts
+            .runtime
+            .as_deref()
+            .map(RuntimeSpec::parse)
+            .transpose()?,
+        upstream: opts.upstream.as_deref(),
+    })
 }
 
 /// `--suite` not passed means `throughput` — unless `--codebase` is given, in
@@ -1174,6 +1225,30 @@ fn finish_codebase(
     }
 }
 
+/// The pid this candidate is measured against. A foreign server has none:
+/// chekov did not start it, holds no pidfile for it, and will not watch or
+/// stop it (spec §2, §4).
+fn candidate_pid(
+    ctx: &Ctx,
+    candidate: &(
+        crate::core::registry::Effective,
+        crate::core::bench::lifecycle::StepAction,
+    ),
+    runtime: Option<&RuntimeSpec>,
+) -> Result<i32, ChekovError> {
+    use crate::core::bench::lifecycle::StepAction;
+    if runtime.is_some() {
+        return Ok(0);
+    }
+    let (eff, action) = candidate;
+    match action {
+        StepAction::UseRunning => {
+            crate::core::server::live_pid(&ctx.config).ok_or(ChekovError::ServerNotRunning)
+        }
+        StepAction::Launch | StepAction::Judge => candidate::launch(ctx, eff),
+    }
+}
+
 /// One candidate end to end: server up (ours or reused), measure, record —
 /// and for launches, teardown with the budget-release check.
 fn run_candidate(
@@ -1186,12 +1261,7 @@ fn run_candidate(
 ) -> Result<std::path::PathBuf, ChekovError> {
     use crate::core::bench::lifecycle::StepAction;
     let (eff, action) = candidate;
-    let pid = match action {
-        StepAction::UseRunning => {
-            crate::core::server::live_pid(&ctx.config).ok_or(ChekovError::ServerNotRunning)?
-        }
-        StepAction::Launch | StepAction::Judge => candidate::launch(ctx, eff)?,
-    };
+    let pid = candidate_pid(ctx, candidate, inputs.args.runtime.as_ref())?;
     let setup = Candidate {
         eff: eff.clone(),
         pid,
@@ -1224,6 +1294,44 @@ fn head_inputs<'a>(
         judge: inputs
             .judge
             .map(crate::core::bench::judge::JudgePlan::stamp),
+        runtime: inputs.args.runtime.as_ref(),
+    }
+}
+
+/// `chekov: runtime <stored> serves: <id>[, <id>...]` — chekov cannot know
+/// how a foreign server names the weights, so it REPORTS and lets the human
+/// read (spec §4). An empty list still prints and the run proceeds.
+fn serves_line(spec: &RuntimeSpec, ids: &[String]) -> String {
+    let served = if ids.is_empty() {
+        "(none listed)".to_owned()
+    } else {
+        ids.join(", ")
+    };
+    format!("chekov: runtime {} serves: {served}", spec.stored())
+}
+
+/// Foreign readiness: one `GET /v1/models`, the served ids printed, and a
+/// geometry chekov did not set left at zero rather than invented (§4, §5).
+fn foreign_props(
+    ctx: &Ctx,
+    upstream: &crate::core::proxy::serve::Upstream,
+    spec: &RuntimeSpec,
+) -> Result<crate::core::bench::runner::PropsInfo, ChekovError> {
+    let ids = runtime::foreign_ready(ctx.http.as_ref(), &upstream.base_url)?;
+    println!("{}", serves_line(spec, &ids));
+    Ok(crate::core::bench::runner::PropsInfo {
+        n_ctx: 0,
+        total_slots: 0,
+    })
+}
+
+/// Which FIM transport the codebase suite rides: llama.cpp's own `/infill`,
+/// and chat completions for every foreign runtime (spec §6).
+const fn fim_for(runtime: Option<&RuntimeSpec>) -> crate::core::bench::runner::FimTransport {
+    use crate::core::bench::runner::FimTransport;
+    match runtime {
+        Some(_) => FimTransport::Chat,
+        None => FimTransport::Infill,
     }
 }
 
@@ -1238,10 +1346,13 @@ fn measure_candidate(
     let cfg = &ctx.config;
     let args = inputs.args;
     let upstream = Upstream {
-        base_url: cfg.base_url(),
+        base_url: args.upstream.map_or_else(|| cfg.base_url(), str::to_owned),
         api_key: cfg.file.server.api_key.clone(),
     };
-    let props = candidate::ensure_ready(ctx, &upstream, setup)?;
+    let props = match args.runtime.as_ref() {
+        Some(spec) => foreign_props(ctx, &upstream, spec)?,
+        None => candidate::ensure_ready(ctx, &upstream, setup)?,
+    };
     let plan: sweep::SweepPlan = (&cfg.file.bench).into();
     let head = build_head(ctx, setup, &head_inputs(props, &plan, inputs))?;
     let (mut writer, done) = open_run(ctx, &head, args.resume)?;
@@ -1258,6 +1369,7 @@ fn measure_candidate(
             fixture: args.fixture,
             suite: args.suite,
             prepared: inputs.prepared,
+            fim: fim_for(args.runtime.as_ref()),
         },
     )?;
     print!("{}", store::render_run(&store::RunLog::load(writer.dir())?));
@@ -1486,6 +1598,9 @@ struct SuiteInputs<'a> {
     fixture: Option<&'a std::path::Path>,
     suite: Option<crate::core::bench::lifecycle::Suite>,
     prepared: Option<&'a crate::core::bench::codebase::Prepared>,
+    /// Which wire the codebase suite fills its rows over — selected by
+    /// runtime, and threaded down to the one crossing that sends it (§6).
+    fim: crate::core::bench::runner::FimTransport,
 }
 
 fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<(), ChekovError> {
@@ -1515,6 +1630,7 @@ fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<()
             &mut crate::core::bench::codebase::run::Sink {
                 writer: sink.writer,
                 done: sink.done,
+                fim: inputs.fim,
             },
             &wire,
             prepared,
@@ -1920,6 +2036,9 @@ struct HeadInputs<'a> {
     /// The judge this run's `equiv` column will be measured with, when
     /// `--judge` was given — the instrument, its budget and its floor.
     judge: Option<crate::core::bench::stamp::JudgeStamp>,
+    /// The declared foreign runtime, when there is one — what turns the
+    /// engine lookup, the flag sextet and the FIM hash foreign (§5, §6).
+    runtime: Option<&'a RuntimeSpec>,
 }
 
 impl HeadInputs<'_> {
@@ -1936,17 +2055,28 @@ impl HeadInputs<'_> {
     }
 }
 
-/// Who measured: the hashed machine identity, its human-readable brand, and
-/// the engine commit. Each is required — a stamp cannot pin an unknown.
-pub(crate) fn stamp_identity(
+/// WHICH machine measured: the hashed identity and its human-readable brand.
+/// Required on every path, foreign included — chekov always knows its own
+/// hardware, and a stamp cannot pin an unknown one.
+fn machine_identity(
     cfg: &crate::core::config::Config,
-) -> Result<(String, Option<String>, String), ChekovError> {
+) -> Result<(String, Option<String>), ChekovError> {
     let probed = machine::probe(&cfg.engine_dir());
     let machine_id = machine::machine_id(&probed).ok_or_else(|| ChekovError::SetupIncomplete {
         remaining: "the machine identity is incomplete (model, memory, chip, or GPU \
                     cores unknown) — run `chekov setup` and retry"
             .to_owned(),
     })?;
+    Ok((machine_id, probed.chip))
+}
+
+/// Who measured: the machine identity, its brand, and the engine commit. Each
+/// is required — a stamp cannot pin an unknown. The foreign path does not come
+/// through here: it has no chekov-built engine to look up (spec §5).
+pub(crate) fn stamp_identity(
+    cfg: &crate::core::config::Config,
+) -> Result<(String, Option<String>, String), ChekovError> {
+    let (machine_id, brand) = machine_identity(cfg)?;
     let engine = crate::core::engine::recorded_commit(&cfg.logs_dir())
         .or_else(|| crate::core::engine::current_commit(&cfg.engine_dir()))
         .ok_or_else(|| ChekovError::SetupIncomplete {
@@ -1954,7 +2084,7 @@ pub(crate) fn stamp_identity(
                         the stamp can pin it"
                 .to_owned(),
         })?;
-    Ok((machine_id, probed.chip, engine))
+    Ok((machine_id, brand, engine))
 }
 
 /// The stamp's prompt-set hash and corpus id — split out since both read
@@ -1964,10 +2094,11 @@ fn head_corpus(
     bench_cfg: &crate::core::config::BenchSection,
 ) -> Result<(String, String), ChekovError> {
     use crate::core::bench::probes;
-    let prompt_set_hash = inputs.suite.map_or_else(
+    let base = inputs.suite.map_or_else(
         || "codebase-only".to_owned(),
         |suite| probes::suite_prompt_hash(suite, inputs.plan, bench_cfg.seed),
     );
+    let prompt_set_hash = wrapped_prompt_hash(inputs, base);
     let corpus = match inputs.codebase.as_ref() {
         Some(c) => codebase_corpus_id(c.head, c.set_hash),
         None => corpus_id(inputs.suite, inputs.fixture)?,
@@ -1975,10 +2106,24 @@ fn head_corpus(
     Ok((prompt_set_hash, corpus))
 }
 
+/// The chat FIM template is part of the prompt set, so a codebase suite that
+/// rides the chat arm hashes differently from one that rides `/infill` — a
+/// template edit is then a NAMED stamp change, and the two transports can
+/// never carry the same hash (spec §6). A foreign run with no codebase suite
+/// sends no FIM prompt at all, and keeps today's value.
+fn wrapped_prompt_hash(inputs: &HeadInputs, base: String) -> String {
+    if inputs.runtime.is_some() && inputs.codebase.is_some() {
+        return crate::core::bench::runner::chat_fim_hash(&base);
+    }
+    base
+}
+
 /// The stamp's remaining pieces once identity, flags and corpus are known —
 /// bundled so `assemble_stamp` stays within the 3-argument limit (§4).
 struct StampParts {
     machine_id: String,
+    /// `"llama.cpp"`, or the declared `<name> <version>` (spec §3).
+    runtime: String,
     engine: String,
     prompt_set_hash: String,
     corpus_id: String,
@@ -1996,7 +2141,7 @@ fn assemble_stamp(
     use crate::core::bench::stamp;
     stamp::Stamp {
         machine_id: parts.machine_id,
-        runtime: stamp::RUNTIME_LLAMA_CPP.to_owned(),
+        runtime: parts.runtime,
         engine_build_commit: parts.engine,
         weights_revision: format!(
             "{}/{}",
@@ -2029,27 +2174,79 @@ fn assemble_stamp(
     }
 }
 
+/// Who and what measured, as the head records it: the machine, the build
+/// string, the argv chekov passed, the flags read back out of it, and the
+/// runtime's stored name. Bundled so `build_head` stays one assembly (§4).
+struct HeadIdentity {
+    machine_id: String,
+    machine_brand: Option<String>,
+    engine: String,
+    launch_args: Vec<String>,
+    flags: StampedFlags,
+    runtime: String,
+}
+
+/// chekov's own llama.cpp: a probed engine commit and the real argv it will
+/// launch the server with, exactly as before this flag existed.
+fn local_identity(ctx: &Ctx, setup: &Candidate) -> Result<HeadIdentity, ChekovError> {
+    let cfg = &ctx.config;
+    let (machine_id, machine_brand, engine) = stamp_identity(cfg)?;
+    let launch_args = crate::core::server::launch_args(cfg, &setup.eff);
+    let flags = stamped_flags(&launch_args);
+    Ok(HeadIdentity {
+        machine_id,
+        machine_brand,
+        engine,
+        launch_args,
+        flags,
+        runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
+    })
+}
+
+/// A server chekov did not launch: the declared version IS the build string,
+/// the argv is empty because chekov passed none, and every flag is the
+/// `unmanaged` sentinel (spec §5).
+fn foreign_identity(ctx: &Ctx, spec: &RuntimeSpec) -> Result<HeadIdentity, ChekovError> {
+    let (machine_id, machine_brand) = machine_identity(&ctx.config)?;
+    let (engine, flags) = foreign_stamp_parts(spec);
+    Ok(HeadIdentity {
+        machine_id,
+        machine_brand,
+        engine,
+        launch_args: Vec::new(),
+        flags,
+        runtime: spec.stored(),
+    })
+}
+
+/// The declared runtime's build identity and its sentinel flag sextet — the
+/// pure half of the foreign head, so it can be pinned without a machine.
+fn foreign_stamp_parts(spec: &RuntimeSpec) -> (String, StampedFlags) {
+    (spec.version.clone(), unmanaged_flags())
+}
+
 fn build_head(
     ctx: &Ctx,
     setup: &Candidate,
     inputs: &HeadInputs,
 ) -> Result<crate::core::bench::store::RunHead, ChekovError> {
     use crate::core::bench::store;
-    let cfg = &ctx.config;
-    let (machine_id, machine_brand, engine) = stamp_identity(cfg)?;
-    let launch_args = crate::core::server::launch_args(cfg, &setup.eff);
-    let bench_cfg = &cfg.file.bench;
-    let flags = stamped_flags(&launch_args);
+    let identity = match inputs.runtime {
+        Some(spec) => foreign_identity(ctx, spec)?,
+        None => local_identity(ctx, setup)?,
+    };
+    let bench_cfg = &ctx.config.file.bench;
     let (prompt_set_hash, corpus_id) = head_corpus(inputs, bench_cfg)?;
     let head_stamp = assemble_stamp(
         setup,
         inputs,
         StampParts {
-            machine_id,
-            engine,
+            machine_id: identity.machine_id,
+            runtime: identity.runtime,
+            engine: identity.engine,
             prompt_set_hash,
             corpus_id,
-            flags,
+            flags: identity.flags,
             seed: bench_cfg.seed,
         },
     );
@@ -2060,8 +2257,8 @@ fn build_head(
         .then(|| crate::core::bench::runner::FORCED_REASONING_FORMAT.to_owned());
     Ok(store::RunHead {
         model: setup.eff.name.clone(),
-        machine_brand,
-        launch_args,
+        machine_brand: identity.machine_brand,
+        launch_args: identity.launch_args,
         forced_reasoning_format,
         stamp: head_stamp,
     })
@@ -2075,6 +2272,23 @@ struct StampedFlags {
     type_k: String,
     type_v: String,
     flash_attn: String,
+}
+
+/// A flag on a server chekov did not launch: not observed, not invented —
+/// a third spelling distinct from "engine-default" (spec §5).
+const FLAG_UNMANAGED: &str = "unmanaged";
+
+/// Every launch flag of a foreign server, all six unobservable (spec §5).
+fn unmanaged_flags() -> StampedFlags {
+    let sentinel = || FLAG_UNMANAGED.to_owned();
+    StampedFlags {
+        kv_unified: sentinel(),
+        n_batch: sentinel(),
+        n_ubatch: sentinel(),
+        type_k: sentinel(),
+        type_v: sentinel(),
+        flash_attn: sentinel(),
+    }
 }
 
 fn stamped_flags(launch_args: &[String]) -> StampedFlags {
@@ -2485,34 +2699,45 @@ mod tests {
             assert_eq!(value, "unmanaged", "not observed, and never invented");
         }
         let plan = plan_fixture();
+        let stamp = foreign_stamp(&spec, &plan, (engine, flags));
+        assert_eq!(stamp.ctx, 0);
+        assert_eq!(stamp.n_parallel, 0);
+        assert_eq!(stamp.runtime, "mtplx 0.4.1");
+    }
+
+    /// The stamp `build_head`'s foreign branch assembles, given the parts its
+    /// own helper produced — the geometry chekov never observed stays zero.
+    fn foreign_stamp(
+        spec: &super::RuntimeSpec,
+        plan: &crate::core::bench::sweep::SweepPlan,
+        parts: (String, super::StampedFlags),
+    ) -> crate::core::bench::stamp::Stamp {
+        let (engine, flags) = parts;
         let inputs = super::HeadInputs {
             props: crate::core::bench::runner::PropsInfo {
                 n_ctx: 0,
                 total_slots: 0,
             },
-            plan: &plan,
+            plan,
             fixture: None,
             suite: None,
             codebase: None,
             judge: None,
-            runtime: Some(&spec),
+            runtime: Some(spec),
         };
-        let stamp = super::assemble_stamp(
+        super::assemble_stamp(
             &foreign_candidate(),
             &inputs,
             super::StampParts {
                 machine_id: "m".to_owned(),
+                runtime: spec.stored(),
                 engine,
                 prompt_set_hash: "h".to_owned(),
                 corpus_id: "c".to_owned(),
                 flags,
-                runtime: spec.stored(),
                 seed: 7,
             },
-        );
-        assert_eq!(stamp.ctx, 0);
-        assert_eq!(stamp.n_parallel, 0);
-        assert_eq!(stamp.runtime, "mtplx 0.4.1");
+        )
     }
 
     /// Selection is by runtime, and only by runtime (spec §6).
@@ -2552,7 +2777,8 @@ mod tests {
             runtime: Some(&spec),
             ..local
         };
-        let (wrapped, foreign_corpus) = super::head_corpus(&foreign, &bench_cfg).expect("chat hash");
+        let (wrapped, foreign_corpus) =
+            super::head_corpus(&foreign, &bench_cfg).expect("chat hash");
         assert_eq!(
             wrapped,
             crate::core::bench::runner::chat_fim_hash(&base),
@@ -2641,6 +2867,7 @@ mod tests {
                 cargo_version: None,
             }),
             judge: None,
+            runtime: None,
         };
         assert!(!off.allow_exec());
         assert_eq!(off.cargo_version(), None);

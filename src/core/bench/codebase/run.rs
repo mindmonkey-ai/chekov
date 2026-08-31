@@ -11,11 +11,17 @@ use crate::core::bench::runner::{self, ProbeArtifact};
 use crate::core::bench::store::{self, TaskKey};
 use crate::error::ChekovError;
 
-/// Where rows land and what a resumed run already holds. The command layer
-/// owns the writer; this module owns the loop.
+/// What the command layer hands the loop.
+///
+/// Where rows land, what a resumed run already holds, and which wire this
+/// runtime's crossings ride. The command layer owns the writer and the
+/// runtime choice; this module owns the loop.
 pub struct Sink<'a> {
     pub writer: &'a mut store::RunWriter,
     pub done: &'a [(String, String, store::Transport)],
+    /// `/infill` for llama.cpp, chat completions for a foreign runtime — the
+    /// command layer selects it from `--runtime` (spec §6).
+    pub fim: runner::FimTransport,
 }
 
 impl Sink<'_> {
@@ -91,6 +97,8 @@ fn arms(task: &CodebaseTask) -> Vec<Arm> {
 struct Crossing<'a> {
     task: &'a CodebaseTask,
     with_extra: bool,
+    /// Which wire this crossing rides, selected by runtime (spec §6).
+    fim: runner::FimTransport,
 }
 
 /// What this arm sends beside the file: the defining file on the "extra"
@@ -126,7 +134,7 @@ fn infill_or_latch(
     crossing: &Crossing,
     latch: &mut Option<String>,
 ) -> Result<ProbeArtifact, Unavailable> {
-    use crate::core::bench::runner::{FimTransport, InfillOutcome, InfillTask, cross_fim};
+    use crate::core::bench::runner::{InfillOutcome, InfillTask, cross_fim};
     if let Some(reason) = latch {
         return Err(Unavailable::unsupported(reason.clone()));
     }
@@ -137,9 +145,7 @@ fn infill_or_latch(
         gold_lines: gold_lines(task),
         extra: extra_chunk(crossing),
     };
-    // Task 4 will select this by runtime; every codebase run rides `/infill`
-    // until then (spec §6).
-    match cross_fim(wire, FimTransport::Infill, &infill_task) {
+    match cross_fim(wire, crossing.fim, &infill_task) {
         Ok(InfillOutcome::Answered(artifact)) => Ok(artifact),
         Ok(InfillOutcome::Unsupported(reason)) => {
             eprintln!(
@@ -417,6 +423,7 @@ pub fn run_codebase(
             let crossing = Crossing {
                 task,
                 with_extra: arm.with_extra,
+                fim: sink.fim,
             };
             let outcome = infill_or_latch(wire, &crossing, &mut unsupported);
             let prediction = outcome.as_ref().ok().map(|a| a.anthropic_body.clone());
@@ -657,6 +664,7 @@ mod tests {
             let mut sink = super::Sink {
                 writer: &mut writer,
                 done: &done,
+                fim: runner::FimTransport::Infill,
             };
             super::run_codebase(&mut sink, &wire, prepared).expect("the run completes");
         }
