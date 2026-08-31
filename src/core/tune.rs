@@ -151,6 +151,43 @@ pub fn value_of(argv: &[String], flag: Flag) -> Option<String> {
     argv.get(position + 1).cloned()
 }
 
+/// `current` with every flag the winner carries rewritten to the winner's
+/// value; a flag the winner does not carry is left untouched (spec §8).
+#[must_use]
+pub fn applied_extra_flags(current: &[String], winner: &[String]) -> Vec<String> {
+    const FLAGS: [Flag; 5] = [
+        Flag::FlashAttn,
+        Flag::CacheTypeK,
+        Flag::CacheTypeV,
+        Flag::BatchSize,
+        Flag::UbatchSize,
+    ];
+    let mut out = current.to_vec();
+    for flag in FLAGS {
+        if let Some(value) = value_of(winner, flag) {
+            out = rewrite(&out, flag, &value);
+        }
+    }
+    out
+}
+
+/// TOML-style double-quoted, comma-space separated array literal.
+fn quoted_array(values: &[String]) -> String {
+    let quoted: Vec<String> = values.iter().map(|v| format!("{v:?}")).collect();
+    format!("[{}]", quoted.join(", "))
+}
+
+/// The `models.toml [models.<name>]` diff `--apply` prints before writing
+/// (spec §8): `extra_flags` before, then after.
+#[must_use]
+pub fn apply_diff(name: &str, before: &[String], after: &[String]) -> String {
+    format!(
+        "models.toml [models.{name}]\n- extra_flags = {}\n+ extra_flags = {}\n",
+        quoted_array(before),
+        quoted_array(after)
+    )
+}
+
 fn incumbent_batch(incumbent: &[String]) -> u32 {
     value_of(incumbent, Flag::BatchSize)
         .and_then(|value| value.parse().ok())

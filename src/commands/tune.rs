@@ -701,6 +701,26 @@ impl<'a> Session<'a> {
         }
         tune::write_record(&self.path, &self.record)
     }
+
+    /// Writes `flags` into this session's model's `extra_flags`, after
+    /// printing the diff and confirming (spec §8). The registry write is
+    /// `Registry::save`'s atomic tmp + rename.
+    fn apply(&self, flags: &[String], yes: bool) -> Result<(), ChekovError> {
+        let name = &self.plan.eff.name;
+        let mut registry = self.ctx.registry()?;
+        let entry = registry
+            .models
+            .get_mut(name.as_str())
+            .ok_or_else(|| ChekovError::UnknownModel { name: name.clone() })?;
+        let before = entry.extra_flags.clone();
+        let after = tune::applied_extra_flags(&before, flags);
+        print!("{}", tune::apply_diff(name, &before, &after));
+        confirm(&format!("write extra_flags for '{name}'"), yes)?;
+        entry.extra_flags = after;
+        registry.save(&self.ctx.config.registry_path())?;
+        println!("applied — the next `chekov run {name}` launches with these flags");
+        Ok(())
+    }
 }
 
 impl TuneCmd {
@@ -725,25 +745,17 @@ impl TuneCmd {
             significance_pct: f64::from(bench.significance_pct),
         })
     }
+}
 
-    /// `--apply` (spec §8). The `defaults won` refusal is binding today; the
-    /// `models.toml` write and its printed diff land with the apply task, so
-    /// until then a winning run says plainly that nothing was written.
-    fn apply_gate(&self, name: &str, winner: Option<&[String]>) -> Result<(), ChekovError> {
-        if !self.apply {
-            return Ok(());
-        }
-        if winner.is_none() {
-            return Err(ChekovError::TuneNothingToApply {
-                name: name.to_owned(),
-            });
-        }
-        eprintln!(
-            "chekov tune: --apply does not write models.toml yet — copy the winner flags \
-             into that model's extra_flags by hand"
-        );
-        Ok(())
+/// `--apply` on a run that found nothing to apply (spec §8): the named
+/// refusal, not a silent no-op.
+fn nothing_to_apply(name: &str, winner: Option<&[String]>) -> Result<(), ChekovError> {
+    if winner.is_some() {
+        return Ok(());
     }
+    Err(ChekovError::TuneNothingToApply {
+        name: name.to_owned(),
+    })
 }
 
 impl Command for TuneCmd {
@@ -772,18 +784,26 @@ impl Command for TuneCmd {
         if let Some((_, name)) = &running {
             println!("  note: the running '{name}' was stopped for tuning and not restarted");
         }
-        self.apply_gate(&plan.eff.name, session.record.winner.as_deref())?;
+        if self.apply {
+            let winner = session.record.winner.clone();
+            nothing_to_apply(&plan.eff.name, winner.as_deref())?;
+            if let Some(flags) = winner {
+                session.apply(&flags, self.yes)?;
+            }
+        }
         Ok(ExitCode::SUCCESS)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
+    use crate::commands::Ctx;
     use crate::core::bench::sweep::SweepPlan;
-    use crate::core::config::TuneSection;
-    use crate::core::registry::{Effective, ModelEntry};
+    use crate::core::config::{Config, TuneSection};
+    use crate::core::hub::{HttpClient, JsonRequest};
+    use crate::core::registry::{Effective, ModelEntry, Registry};
     use crate::core::stats::Summary;
     use crate::core::tune::{
         DEFAULTS_WON, Measured, Outcome, Probe, Record, Stage, THERMAL_SOURCE, Trial, sextet,
@@ -1063,6 +1083,71 @@ mod tests {
             "{err}"
         );
         assert!(super::nothing_to_apply("m", Some(&baseline_argv())).is_ok());
+    }
+
+    struct NoHttp;
+
+    impl HttpClient for NoHttp {
+        fn get(&self, _url: &str) -> Result<String, ChekovError> {
+            unreachable!("apply's registry write never touches HTTP")
+        }
+        fn post_json(&self, _req: &JsonRequest) -> Result<String, ChekovError> {
+            unreachable!("apply's registry write never touches HTTP")
+        }
+    }
+
+    fn scratch_ctx(tag: &str) -> Ctx {
+        let root = std::env::temp_dir().join(tag);
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("scratch");
+        Ctx {
+            config: Config::load(&root).expect("defaults"),
+            http: Box::new(NoHttp),
+        }
+    }
+
+    #[test]
+    fn apply_writes_the_winner_into_extra_flags_through_registry_save() {
+        let ctx = scratch_ctx("chekov-test-tune-apply");
+        let current = baseline_argv();
+        let mut registry = Registry::default();
+        registry.models.insert(
+            "m".into(),
+            ModelEntry {
+                repo: "o/r".into(),
+                quant: "Q8_0".into(),
+                revision: "abc123def456".into(),
+                path: "models/m@abc123def456".into(),
+                first_shard: "m.gguf".into(),
+                hermes_ok: false,
+                ctx_size: None,
+                extra_flags: current.clone(),
+                role: None,
+            },
+        );
+        registry
+            .save(&ctx.config.registry_path())
+            .expect("seed registry");
+
+        let tune = TuneSection::default();
+        let plan = plan_for(&tune, &[]);
+        let session = super::Session {
+            ctx: &ctx,
+            plan: &plan,
+            path: PathBuf::from("unused"),
+            record: record_of(vec![], None),
+            lines: Vec::new(),
+        };
+        let winner = argv(&["--batch-size", "4096"]);
+        session.apply(&winner, true).expect("apply");
+
+        let stored = Registry::load(&ctx.config.registry_path())
+            .expect("reload")
+            .models
+            .remove("m")
+            .expect("model present")
+            .extra_flags;
+        assert_eq!(stored, super::tune::applied_extra_flags(&current, &winner));
     }
 
     #[test]
