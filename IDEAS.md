@@ -476,12 +476,28 @@ reason. `Stamp` gains `timing_source` (`server-reported` default; every run
 already on disk reads unaffected), the report prints a `timing source:` line
 only when it isn't the default, and `--cross-runtime` permits it to differ.
 Remaining: agentic and fixture suites are still not on the timed path
-(recorded follow-up riding the same streamed mechanism), and live
-verification against a real MLX/MTPLX server is still approval-gated and
-owed.
+(recorded follow-up riding the same streamed mechanism).
+LIVE VERIFICATION DONE 2026-08-31 against mlx-lm 0.31.3 serving
+ornith-ai/Ornith-1.5-35B-A3B-MLX (bf16) on this machine: stream-timed
+throughput measured 55.5/56.0/54.4 tok/s decode at depths 1024/4096/16384
+(prefill 1.9-2.7K), the codebase suite graded all 24 tasks over the chat
+arm (`fim transport: chat`; in_file exact 0.17, cross_file 0.33 -> 0.50
+with the extra file), and `--cross-runtime` against the 2026-08-28
+llama.cpp Q8_0 run printed the banner and read llama.cpp faster at every
+depth (78.6/77.7/68.1) — a quant-confounded number (Q8_0 vs bf16), noted
+on the record, not a runtime verdict. Two interop findings, both OPEN:
+(a) chekov sends its registry name as the OpenAI `model` id; llama-server
+ignores it but mlx-lm routes on it and 404s trying to download that name —
+worked around by serving the snapshot under the registry name; a foreign
+run should probably send the served id, or the field should be
+declarable. (b) A thinking-default model burns the gold-bounded fill
+budget on reasoning and every chat fill fails loudly as "chat fill has no
+text content" (honest N/A, recorded in run 20260831T201602Z); serving
+with `enable_thinking: false` fixed it — the chat-FIM docs should say so,
+or the arm should grow a thinking-budget strategy.
 Proposed 2026-08-30 — status: SHIPPED; foreign-timing measurement SHIPPED
-2026-08-31 — remaining: foreign agentic/fixture timing, live MLX
-verification (approval-gated)
+2026-08-31; live MLX verification DONE 2026-08-31 — remaining: foreign
+agentic/fixture timing, the two interop findings above
 
 ## MTP-head awareness: `explain` reports it, bench measures it (2026-08-30)
 Qwen 3.5+/3.8, Gemma 4 and GLM-5.x ship native MTP heads in their weights
