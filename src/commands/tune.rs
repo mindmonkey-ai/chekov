@@ -15,7 +15,7 @@ use crate::core::config::TuneSection;
 use crate::core::proxy::claude::ClaudeFacade;
 use crate::core::proxy::serve::Upstream;
 use crate::core::registry::Effective;
-use crate::core::stats::Summary;
+use crate::core::stats::{Comparison, Summary, compare};
 use crate::core::tune::{
     self, CandidateLabel, JudgeCriteria, LineContext, Measured, Metric, Outcome, Probe, Record,
     Stage, Trial, Verdict,
@@ -74,14 +74,28 @@ enum Started {
     Skipped(String),
 }
 
+/// A finished trial beside the verdict of the teardown that followed it.
+///
+/// The two travel together so the caller can record the trial BEFORE it
+/// propagates a teardown failure: `BenchBudgetNotReleased` is fatal (spec §11
+/// — the next trial would measure a contended machine), but a measurement
+/// already taken must not be thrown away with it.
+struct Completed {
+    trial: TrialOutcome,
+    released: Result<(), ChekovError>,
+}
+
 /// The run's verdict when the final incumbent is not the baseline (spec §8).
 const CANDIDATE_WON: &str = "a candidate beat the current flags";
 
-/// Spec §9's `defaults won` line, verbatim. The threshold it names is the
-/// shipped `[bench] significance_pct` default; a run configured otherwise is
-/// judged at its own value, which `config.toml` — not this line — records.
-const DEFAULTS_WON_LINE: &str =
-    "defaults won — no candidate beat the current flags at p < 5% on its metric";
+/// Spec §9's `defaults won` line. The threshold is the record's own — the one
+/// every verdict in that run was reached under — never a restated default.
+fn defaults_won_line(significance_pct: f64) -> String {
+    format!(
+        "{} — no candidate beat the current flags at p < {significance_pct:.0}% on its metric",
+        tune::DEFAULTS_WON
+    )
+}
 
 /// llama-server's own value for each stage's flag when the flag is absent
 /// (`llama-server --help`). An absent flag still names a configuration, so a
@@ -122,24 +136,51 @@ fn planned(stage: Stage, incumbent: &[String], cfg: &TuneSection) -> Vec<tune::C
         .collect()
 }
 
+/// The largest `--batch-size` this descent can end up at: any value the batch
+/// stage may win, or the baseline's own when nothing configured beats it.
+fn widest_batch(plan: &Plan) -> u32 {
+    let current = incumbent_value(Stage::Batch, &plan.eff.flags)
+        .parse()
+        .unwrap_or(0);
+    plan.tune
+        .batch_sizes
+        .iter()
+        .copied()
+        .chain([current])
+        .max()
+        .unwrap_or(current)
+}
+
+/// The argv a stage is COUNTED against in the plan. Only `ubatch` differs from
+/// the baseline: its list is filtered by the incumbent batch, so a batch stage
+/// that wins a value above the baseline's GROWS it. Counting `ubatch` against
+/// the widest batch the descent can reach is what makes the printed `≤ N` a
+/// real ceiling rather than a number the run can quietly exceed (spec §7).
+fn counted_against(plan: &Plan, stage: Stage) -> Vec<String> {
+    if stage != Stage::Ubatch || !plan.stages.contains(&Stage::Batch) {
+        return plan.eff.flags.clone();
+    }
+    let widest = widest_batch(plan).to_string();
+    tune::rewrite(&plan.eff.flags, tune::Flag::BatchSize, &widest)
+}
+
 /// The launch ceiling: the baseline plus one launch per non-incumbent
-/// candidate, counted against the baseline argv. An upper bound — a stage's
-/// winner can only shrink the next stage, and a skip costs nothing (spec §7).
+/// candidate. An upper bound for every descent outcome — a stage's winner can
+/// only shrink what follows, and a skip costs nothing (spec §7).
 fn max_launches(plan: &Plan) -> usize {
-    let argv = &plan.eff.flags;
     1 + plan
         .stages
         .iter()
-        .map(|&stage| planned(stage, argv, plan.tune).len())
+        .map(|&stage| planned(stage, &counted_against(plan, stage), plan.tune).len())
         .sum::<usize>()
 }
 
 /// One stage's plan line: how many values it lists, and what the parenthetical
 /// has to say about them (spec §7).
 fn stage_plan_line(plan: &Plan, stage: Stage) -> String {
-    let argv = &plan.eff.flags;
-    let listed = tune::values_for(stage, argv, plan.tune).len();
-    let held = if listed > planned(stage, argv, plan.tune).len() {
+    let argv = counted_against(plan, stage);
+    let listed = tune::values_for(stage, &argv, plan.tune).len();
+    let held = if listed > planned(stage, &argv, plan.tune).len() {
         "1 is the incumbent"
     } else {
         "none is the incumbent"
@@ -271,23 +312,26 @@ fn baseline_line(trial: &Trial) -> String {
     format!("  {:<10} {cells}   {flags}\n", "baseline")
 }
 
-/// Overlapping p10–p90 intervals are not a difference this run resolved; a
-/// separated pair prints its signed median delta and claims nothing more.
-fn delta_note(a: &Summary, b: &Summary) -> String {
-    if b.median <= 0.0 {
+/// The same rule the run's own verdicts were reached under (`stats::compare`
+/// at the record's threshold), so the report never calls a difference
+/// significant that the descent did not. A separated pair prints its signed
+/// median delta and claims nothing more.
+fn delta_note(pair: (&Summary, &Summary), significance_pct: f64) -> String {
+    let (candidate, baseline) = pair;
+    if baseline.median <= 0.0 {
         return "no baseline median".to_owned();
     }
-    if a.p10 <= b.p90 && b.p10 <= a.p90 {
+    if compare(candidate, baseline, significance_pct) == Comparison::NoSignificantDifference {
         return "no significant difference".to_owned();
     }
-    let pct = (a.median - b.median) / b.median * 100.0;
+    let pct = (candidate.median - baseline.median) / baseline.median * 100.0;
     format!("{pct:+.0}%")
 }
 
 /// One metric's winner-versus-baseline cell (spec §9).
-fn versus(metric: Metric, winner: &Summary, baseline: &Summary) -> String {
-    let note = delta_note(winner, baseline);
-    let (won, base) = (winner.median, baseline.median);
+fn versus(metric: Metric, pair: (&Summary, &Summary), significance_pct: f64) -> String {
+    let note = delta_note(pair, significance_pct);
+    let (won, base) = (pair.0.median, pair.1.median);
     match metric {
         Metric::Decode => format!("decode {won:.1} vs {base:.1} ({note})"),
         Metric::Prefill => format!("prefill {won:.0} vs {base:.0} ({note})"),
@@ -298,15 +342,16 @@ fn versus(metric: Metric, winner: &Summary, baseline: &Summary) -> String {
 fn winner_versus(record: &Record, winner: &[String]) -> Option<String> {
     let baseline = measured_of(record.trials.first()?)?;
     let won = measured_of(record.trials.iter().rev().find(|t| t.argv == winner)?)?;
-    let decode = versus(Metric::Decode, &won.decode, &baseline.decode);
-    let prefill = versus(Metric::Prefill, &won.prefill, &baseline.prefill);
+    let pct = record.significance_pct;
+    let decode = versus(Metric::Decode, (&won.decode, &baseline.decode), pct);
+    let prefill = versus(Metric::Prefill, (&won.prefill, &baseline.prefill), pct);
     Some(format!("  {:<10} {decode}   {prefill}\n", ""))
 }
 
 /// The winner block, or the one line that says nothing beat the baseline.
 fn verdict_block(record: &Record) -> String {
     let Some(winner) = record.winner.as_deref() else {
-        return format!("  {DEFAULTS_WON_LINE}\n");
+        return format!("  {}\n", defaults_won_line(record.significance_pct));
     };
     let flags = winner.join(" ");
     let named = format!("  {:<10} {flags}\n", "winner");
@@ -418,6 +463,7 @@ impl<'a> Session<'a> {
                     repetitions: plan.sweep.repetitions,
                     max_tokens: plan.sweep.max_tokens,
                 },
+                significance_pct: plan.significance_pct,
                 thermal_source: tune::THERMAL_SOURCE.to_owned(),
                 trials: Vec::new(),
                 winner: None,
@@ -442,8 +488,9 @@ impl<'a> Session<'a> {
     /// Trial 0: the model's current flags, unchanged. A degenerate baseline
     /// ends the run — there is nothing to compare against (spec §5).
     fn baseline(&mut self) -> Result<Incumbent, ChekovError> {
-        let trial = self.measure(None)?;
+        let Completed { trial, released } = self.measure(None)?;
         self.append(&trial, None)?;
+        released?;
         let argv = trial.argv;
         match trial.outcome {
             Outcome::Measured(measured) => Ok(Incumbent { argv, measured }),
@@ -465,9 +512,10 @@ impl<'a> Session<'a> {
     ) -> Result<Option<Incumbent>, ChekovError> {
         let mut scored = Vec::new();
         for candidate in planned(stage, &incumbent.argv, self.plan.tune) {
-            let trial = self.trial(candidate, incumbent)?;
+            let Completed { trial, released } = self.trial(candidate, incumbent)?;
             let verdict = self.verdict_for(&trial, incumbent);
             self.append(&trial, verdict.as_ref())?;
+            released?;
             if let (Outcome::Measured(m), Some(v), Some(p)) = (trial.outcome, verdict, trial.picked)
             {
                 scored.push((p, m, v));
@@ -486,13 +534,16 @@ impl<'a> Session<'a> {
         &self,
         candidate: tune::Candidate,
         incumbent: &Incumbent,
-    ) -> Result<TrialOutcome, ChekovError> {
+    ) -> Result<Completed, ChekovError> {
         match kv_skip(&candidate, &incumbent.argv) {
-            Some(reason) => Ok(TrialOutcome {
-                argv: candidate.argv.clone(),
-                picked: Some(candidate),
-                outcome: Outcome::Skipped(reason),
-                therm: [None, None],
+            Some(reason) => Ok(Completed {
+                trial: TrialOutcome {
+                    argv: candidate.argv.clone(),
+                    picked: Some(candidate),
+                    outcome: Outcome::Skipped(reason),
+                    therm: [None, None],
+                },
+                released: Ok(()),
             }),
             None => self.measure(Some(candidate)),
         }
@@ -515,8 +566,10 @@ impl<'a> Session<'a> {
     }
 
     /// Launch, wait, probe, tear down — always tearing down what was launched
-    /// (spec §3). `None` measures the baseline's own flags.
-    fn measure(&self, picked: Option<tune::Candidate>) -> Result<TrialOutcome, ChekovError> {
+    /// (spec §3). `None` measures the baseline's own flags. The teardown's
+    /// verdict rides back beside the trial rather than short-circuiting it:
+    /// the caller records the measurement first, then propagates.
+    fn measure(&self, picked: Option<tune::Candidate>) -> Result<Completed, ChekovError> {
         let argv = picked
             .as_ref()
             .map_or_else(|| self.plan.eff.flags.clone(), |p| p.argv.clone());
@@ -526,23 +579,29 @@ impl<'a> Session<'a> {
         };
         let pid = match self.start(&eff)? {
             Started::Skipped(reason) => {
-                return Ok(TrialOutcome {
+                let outcome = Outcome::Skipped(reason);
+                let trial = TrialOutcome {
                     picked,
                     argv,
-                    outcome: Outcome::Skipped(reason),
+                    outcome,
                     therm: [None, None],
+                };
+                return Ok(Completed {
+                    trial,
+                    released: Ok(()),
                 });
             }
             Started::Pid(pid) => pid,
         };
         let (outcome, therm) = self.probe(&candidate::Candidate { eff, pid });
-        candidate::teardown(self.ctx, pid)?;
-        Ok(TrialOutcome {
+        let released = candidate::teardown(self.ctx, pid);
+        let trial = TrialOutcome {
             picked,
             argv,
             outcome,
             therm,
-        })
+        };
+        Ok(Completed { trial, released })
     }
 
     /// The footprint gate before the spawn, then `launch`'s own preflight —
@@ -726,7 +785,9 @@ mod tests {
     use crate::core::config::TuneSection;
     use crate::core::registry::{Effective, ModelEntry};
     use crate::core::stats::Summary;
-    use crate::core::tune::{DEFAULTS_WON, Probe, Record, Stage, THERMAL_SOURCE, Trial, sextet};
+    use crate::core::tune::{
+        DEFAULTS_WON, Measured, Outcome, Probe, Record, Stage, THERMAL_SOURCE, Trial, sextet,
+    };
     use crate::error::ChekovError;
 
     fn argv(parts: &[&str]) -> Vec<String> {
@@ -805,6 +866,7 @@ mod tests {
                 repetitions: 5,
                 max_tokens: 128,
             },
+            significance_pct: 5.0,
             thermal_source: THERMAL_SOURCE.into(),
             verdict: if winner.is_some() {
                 super::CANDIDATE_WON.into()
@@ -893,6 +955,75 @@ mod tests {
         assert!(
             with_running.contains("will stop the running 'm' first"),
             "{with_running}"
+        );
+    }
+
+    #[test]
+    fn the_bound_counts_ubatch_against_the_widest_batch_the_descent_can_reach() {
+        let tune = TuneSection::default();
+        let mut flags = baseline_argv();
+        flags.extend(argv(&["--batch-size", "512"]));
+        let borrowed: Vec<&str> = flags.iter().map(String::as_str).collect();
+        let plan = plan_for(&tune, &borrowed);
+        // Counted against the baseline's own 512, ubatch lists only 256 and
+        // 512 and the bound would print 7 — which a batch stage that wins
+        // 4096 then exceeds. The ceiling has to hold for every outcome.
+        assert_eq!(
+            super::max_launches(&plan),
+            9,
+            "ubatch is counted against 4096, the largest configured batch"
+        );
+        let text = super::plan_text(&plan, None, None);
+        assert!(
+            text.contains(
+                "  ubatch     4 candidates   (1 is the incumbent; values ≤ the incumbent batch)\n"
+            ),
+            "{text}"
+        );
+        // Without the batch stage nothing can grow the list, so the honest
+        // count is the baseline's own two values.
+        let narrowed = super::Plan {
+            stages: vec![Stage::Ubatch],
+            ..plan
+        };
+        assert_eq!(super::max_launches(&narrowed), 2, "baseline + 256 only");
+    }
+
+    #[test]
+    fn the_report_names_the_threshold_its_verdicts_were_reached_under() {
+        let (mut record, lines) = defaults_won_fixture();
+        record.significance_pct = 12.0;
+        let out = super::report(&record, &lines, Path::new("tune/x-m.json"));
+        assert!(
+            out.contains("no candidate beat the current flags at p < 12% on its metric\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_failed_teardown_still_carries_the_measured_trial() {
+        let completed = super::Completed {
+            trial: super::TrialOutcome {
+                picked: None,
+                argv: baseline_argv(),
+                outcome: Outcome::Measured(Measured {
+                    decode: summary(31.2, 0.4),
+                    prefill: summary(402.0, 4.0),
+                    prompt_n: 4101,
+                }),
+                therm: [None, None],
+            },
+            released: Err(ChekovError::BenchBudgetNotReleased {
+                free_mib: 1024,
+                want_mib: 24_576,
+            }),
+        };
+        let row = super::trial_row(&completed.trial, None);
+        assert_eq!(row.outcome, "measured", "the measurement is not discarded");
+        assert!(row.decode.is_some() && row.prefill.is_some(), "{row:?}");
+        assert!(
+            completed.released.is_err(),
+            "the fatal teardown still propagates, after the row is recorded"
         );
     }
 

@@ -515,6 +515,10 @@ pub struct Record {
     pub engine_build_commit: String,
     pub chekov_version: String,
     pub probe: Probe,
+    /// The `[bench] significance_pct` this run judged at. Stamped beside the
+    /// probe geometry because a verdict is only as strong as its threshold,
+    /// and the report reads it rather than restating a default.
+    pub significance_pct: f64,
     pub thermal_source: String,
     pub trials: Vec<Trial>,
     /// The final incumbent's argv, when it beat the baseline; `None` means
@@ -849,6 +853,7 @@ mod tests {
                 repetitions: 5,
                 max_tokens: 128,
             },
+            significance_pct: 5.0,
             thermal_source: super::THERMAL_SOURCE.into(),
             trials: vec![super::Trial {
                 stage: "baseline".into(),
