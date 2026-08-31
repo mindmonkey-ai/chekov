@@ -149,6 +149,18 @@ pub struct ProbeWire<'a> {
     pub pins: SamplingPins,
 }
 
+/// Which wire fills a codebase mask (spec §6).
+///
+/// llama.cpp's native `/infill`, or a deterministic chat-completions
+/// instruction for a runtime with no FIM endpoint. The transport is a
+/// function of the runtime, so the report derives it from the stamp
+/// instead of storing it twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FimTransport {
+    Infill,
+    Chat,
+}
+
 /// Route → POST upstream → capture `timings` → translate.
 ///
 /// Timings are read from the upstream `OpenAI` body BEFORE translation (the
@@ -564,6 +576,104 @@ pub fn cross_infill(wire: &ProbeWire, task: &InfillTask) -> Result<InfillOutcome
         anthropic_body: content.to_owned(),
         timings,
     }))
+}
+
+/// The chat arm's fixed instruction (spec §6, verbatim). Hashing it into the
+/// prompt-set hash makes a template edit a NAMED stamp change.
+pub const FIM_CHAT_INSTRUCTION: &str = "You are completing code. Output ONLY \
+the missing code between PREFIX and SUFFIX. No explanation, no code fences, \
+no repetition of the prefix or suffix.\n";
+
+/// The one user message the chat arm sends: instruction, the extra file when
+/// this arm carries one, then PREFIX/SUFFIX/MIDDLE.
+fn chat_fim_prompt(task: &InfillTask) -> String {
+    let extra = task.extra.as_ref().map_or_else(String::new, |e| {
+        format!("FILE {}:\n{}\n\n", e.filename, e.text)
+    });
+    format!(
+        "{FIM_CHAT_INSTRUCTION}\n{extra}PREFIX:\n{}\n\nSUFFIX:\n{}\n\nMIDDLE:\n",
+        task.prefix, task.suffix
+    )
+}
+
+/// Spec §6's two normalization rules, in order, and nothing else.
+fn normalize_chat_fill(reply: &str) -> String {
+    let unfenced = strip_whole_fence(reply);
+    unfenced.strip_suffix('\n').unwrap_or(&unfenced).to_owned()
+}
+
+/// Rule 1: when the ENTIRE reply is one fenced block, strip the fences and
+/// any language tag. A fence anywhere else is content.
+fn strip_whole_fence(reply: &str) -> String {
+    let trimmed = reply.trim_end_matches('\n');
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return reply.to_owned();
+    };
+    let Some(body) = rest.strip_suffix("```") else {
+        return reply.to_owned();
+    };
+    // Drop the language tag line (possibly empty) after the opening fence.
+    match body.split_once('\n') {
+        Some((_tag, inner)) => inner.to_owned(),
+        None => String::new(),
+    }
+}
+
+/// The stamp's prompt-set hash when the chat arm filled the codebase suite:
+/// hash(existing value ‖ the template), first twelve hex chars (spec §6).
+#[must_use]
+pub fn chat_fim_hash(base: &str) -> String {
+    let canonical = format!("{base}|chat-fim|{FIM_CHAT_INSTRUCTION}");
+    crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
+}
+
+/// The reply's first text block, the same shape the graders read — there is
+/// no other door into an Anthropic-shaped body here.
+fn chat_text_of(artifact: &ProbeArtifact) -> Result<String, ChekovError> {
+    serde_json::from_str::<Value>(&artifact.anthropic_body)
+        .ok()
+        .and_then(|v| v["content"][0]["text"].as_str().map(str::to_owned))
+        .ok_or_else(|| ChekovError::ProxyBadRequest {
+            reason: "chat fill has no text content".to_owned(),
+        })
+}
+
+/// The chat-completions fill: same pins as `/infill` (`temperature 0`,
+/// `top_k 1`, the gold-bounded budget), one deterministic user message,
+/// crossing the translator exactly as the agentic probes do.
+fn cross_fim_chat(wire: &ProbeWire, task: &InfillTask) -> Result<InfillOutcome, ChekovError> {
+    let body = serde_json::json!({
+        "model": "claude-sonnet-4",
+        "max_tokens": n_predict_for(task.gold_lines),
+        "temperature": 0,
+        "top_k": 1,
+        "messages": [{"role": "user", "content": chat_fim_prompt(task)}],
+    });
+    let artifact = cross(wire, &crate::core::bench::probes::anthropic_post(&body))?;
+    let text = chat_text_of(&artifact)?;
+    Ok(InfillOutcome::Answered(ProbeArtifact {
+        anthropic_body: normalize_chat_fill(&text),
+        timings: artifact.timings,
+    }))
+}
+
+/// One fill, whichever transport this run rides (spec §6).
+///
+/// `fim` is a parameter rather than a `ProbeWire` field: `ProbeWire` is
+/// constructed by struct literal from a read-only integration test
+/// (`tests/bench_streamed_probe_crosses_the_translator.rs`, pinned by
+/// `pushkin.toml`'s `read_only_paths`), so widening it would break a file
+/// this task cannot touch. The caller (ultimately Task 4's runtime-based
+/// selection) passes the choice down explicitly instead.
+pub fn cross_fim(
+    wire: &ProbeWire,
+    fim: FimTransport,
+    task: &InfillTask,
+) -> Result<InfillOutcome, ChekovError> {
+    match fim {
+        FimTransport::Infill => cross_infill(wire, task),
+        FimTransport::Chat => cross_fim_chat(wire, task),
+    }
 }
 
 /// The token budget a gold of this many lines earns. The run loop records

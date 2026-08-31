@@ -126,7 +126,7 @@ fn infill_or_latch(
     crossing: &Crossing,
     latch: &mut Option<String>,
 ) -> Result<ProbeArtifact, Unavailable> {
-    use crate::core::bench::runner::{InfillOutcome, InfillTask, cross_infill};
+    use crate::core::bench::runner::{FimTransport, InfillOutcome, InfillTask, cross_fim};
     if let Some(reason) = latch {
         return Err(Unavailable::unsupported(reason.clone()));
     }
@@ -137,7 +137,9 @@ fn infill_or_latch(
         gold_lines: gold_lines(task),
         extra: extra_chunk(crossing),
     };
-    match cross_infill(wire, &infill_task) {
+    // Task 4 will select this by runtime; every codebase run rides `/infill`
+    // until then (spec §6).
+    match cross_fim(wire, FimTransport::Infill, &infill_task) {
         Ok(InfillOutcome::Answered(artifact)) => Ok(artifact),
         Ok(InfillOutcome::Unsupported(reason)) => {
             eprintln!(

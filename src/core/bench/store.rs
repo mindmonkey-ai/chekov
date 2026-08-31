@@ -852,6 +852,7 @@ pub fn render_codebase(log: &RunLog) -> String {
         excluded,
         log,
     });
+    out.push_str(&fim_transport_line(&log.head.stamp));
     out.push_str(&scores_line(
         "in_file",
         &group(&kept, TaskTier::InFile, None),
@@ -897,6 +898,18 @@ fn codebase_header(header: &Header) -> String {
         judge_clause(header.log),
         excluded_note(header.excluded),
     )
+}
+
+/// Which wire filled the codebase rows (spec §6): llama.cpp's native
+/// `/infill` for every run chekov launches itself, or the chat-completions
+/// fallback for a foreign runtime with no FIM endpoint.
+fn fim_transport_line(stamp: &crate::core::bench::stamp::Stamp) -> String {
+    let transport = if stamp.runtime == crate::core::bench::stamp::RUNTIME_LLAMA_CPP {
+        "/infill"
+    } else {
+        "chat"
+    };
+    format!("fim transport: {transport}\n")
 }
 
 /// `; exec: cargo 1.95.0 (…), offline, scratch target` — what the exec tiers
@@ -3268,6 +3281,40 @@ mod tests {
             ),
             "{out}"
         );
+    }
+
+    /// A codebase run for a given stamp, under its own scratch directory —
+    /// separate from `codebase_only_run`'s so the two runs in the transport
+    /// test below cannot race the same fixture directory.
+    fn codebase_run_stamped(dir_name: &str, run_id: &str, stamp: Stamp) -> RunLog {
+        let eval = scratch(dir_name);
+        let head = RunHead { stamp, ..head() };
+        let mut writer = RunWriter::create(&eval, run_id, &head).expect("create");
+        for task in codebase_fixtures().map(codebase_task) {
+            writer.append(task).expect("append");
+        }
+        RunLog::load(writer.dir()).expect("load")
+    }
+
+    /// The report names the wire that filled the rows, read from the run's
+    /// own stamp — never a separately stored choice that could drift from it.
+    #[test]
+    fn the_codebase_header_names_the_fim_transport() {
+        let llama_cpp =
+            codebase_run_stamped("codebase-infill-transport-report", "r-infill", stamp());
+        let out = render_codebase(&llama_cpp);
+        assert!(out.contains("fim transport: /infill\n"), "{out}");
+
+        let foreign = codebase_run_stamped(
+            "codebase-chat-transport-report",
+            "r-chat",
+            Stamp {
+                runtime: "vllm 0.7.0".into(),
+                ..stamp()
+            },
+        );
+        let out = render_codebase(&foreign);
+        assert!(out.contains("fim transport: chat\n"), "{out}");
     }
 
     /// A run the judge had nothing to ask about does not read as a run whose
