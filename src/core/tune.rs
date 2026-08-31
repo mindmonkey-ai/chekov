@@ -906,6 +906,25 @@ mod tests {
     }
 
     #[test]
+    fn a_stage_line_names_the_degenerate_branch() {
+        let degenerate = super::stage_line(
+            &super::CandidateLabel {
+                stage: super::Stage::Fa,
+                value: "off",
+            },
+            &super::Outcome::Degenerate("prompt_n 1900 short of depth 4096".into()),
+            &super::LineContext {
+                verdict: None,
+                dirty: None,
+            },
+        );
+        assert_eq!(
+            degenerate,
+            "  fa         off      degenerate: prompt_n 1900 short of depth 4096"
+        );
+    }
+
+    #[test]
     fn the_thermal_readout_is_the_speed_limit_when_throttled_and_none_when_nominal() {
         assert_eq!(
             super::parse_therm("CPU_Speed_Limit \t= 87\nCPU_Available_CPUs = 24\n"),

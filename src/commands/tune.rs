@@ -806,7 +806,8 @@ mod tests {
     use crate::core::registry::{Effective, ModelEntry, Registry};
     use crate::core::stats::Summary;
     use crate::core::tune::{
-        DEFAULTS_WON, Measured, Outcome, Probe, Record, Stage, THERMAL_SOURCE, Trial, sextet,
+        Candidate, DEFAULTS_WON, Measured, Outcome, Probe, Record, Stage, THERMAL_SOURCE, Trial,
+        sextet,
     };
     use crate::error::ChekovError;
 
@@ -1163,5 +1164,64 @@ mod tests {
             Some("exceeds the GPU budget by 4120 MiB")
         );
         assert!(super::skip_reason(&ChekovError::ServerNotRunning).is_none());
+    }
+
+    #[test]
+    fn q8_0_kv_is_skipped_only_under_an_fa_off_incumbent_and_only_for_kv_candidates() {
+        let kv_q8_0 = Candidate {
+            stage: Stage::Kv,
+            value: "q8_0".into(),
+            argv: vec![],
+        };
+        let fa_off = argv(&["--flash-attn", "off"]);
+        assert_eq!(
+            super::kv_skip(&kv_q8_0, &fa_off).as_deref(),
+            Some("q8_0 KV needs flash attention on")
+        );
+        let fa_on = argv(&["--flash-attn", "on"]);
+        assert!(super::kv_skip(&kv_q8_0, &fa_on).is_none());
+        let batch_q8_0 = Candidate {
+            stage: Stage::Batch,
+            value: "q8_0".into(),
+            argv: vec![],
+        };
+        assert!(super::kv_skip(&batch_q8_0, &fa_off).is_none());
+    }
+
+    #[test]
+    fn settle_threads_the_winner_into_the_record_only_when_it_beats_the_baseline() {
+        let ctx = scratch_ctx("chekov-test-tune-settle");
+        let tune = TuneSection::default();
+        let plan = plan_for(&tune, &[]);
+        let baseline = baseline_argv();
+        let record = record_of(
+            vec![measured_trial("baseline", None, baseline.clone())],
+            None,
+        );
+        let path = std::env::temp_dir().join("chekov-test-tune-settle-record.json");
+
+        let mut won = super::Session {
+            ctx: &ctx,
+            plan: &plan,
+            path: path.clone(),
+            record: record.clone(),
+            lines: Vec::new(),
+        };
+        let mut winner_argv = baseline.clone();
+        winner_argv.extend(argv(&["--batch-size", "4096"]));
+        won.settle(&winner_argv).expect("settle");
+        assert_eq!(won.record.winner, Some(winner_argv));
+        assert_eq!(won.record.verdict, super::CANDIDATE_WON);
+
+        let mut unchanged = super::Session {
+            ctx: &ctx,
+            plan: &plan,
+            path,
+            record,
+            lines: Vec::new(),
+        };
+        unchanged.settle(&baseline).expect("settle");
+        assert_eq!(unchanged.record.winner, None);
+        assert_eq!(unchanged.record.verdict, DEFAULTS_WON);
     }
 }
