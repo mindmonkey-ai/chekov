@@ -163,7 +163,7 @@ fn read_stream_timed(
     started: std::time::Instant,
     url: &str,
 ) -> Result<(String, StreamMarks), ChekovError> {
-    let mut buffer = String::new();
+    let mut bytes: Vec<u8> = Vec::new();
     let mut first_data: Option<std::time::Duration> = None;
     let mut data_reads: u32 = 0;
     let mut chunk = [0_u8; 8192];
@@ -178,8 +178,13 @@ fn read_stream_timed(
             break;
         }
         data_reads += 1;
-        buffer.push_str(&String::from_utf8_lossy(&chunk[..n]));
-        if first_data.is_none() && saw_first_data(&buffer) {
+        bytes.extend_from_slice(&chunk[..n]);
+        // Lossy-decoding the accumulator (not the raw chunk) is only ever
+        // done here, and only until the first data frame is found — bounded
+        // to the pre-first-frame prefix. The body itself is decoded once,
+        // below, so a multi-byte sequence split across this chunk boundary
+        // never becomes U+FFFD in the assembled result (I1).
+        if first_data.is_none() && saw_first_data(&String::from_utf8_lossy(&bytes)) {
             first_data = Some(started.elapsed());
         }
     }
@@ -188,7 +193,7 @@ fn read_stream_timed(
         reason: "stream ended with no data frame".to_owned(),
     })?;
     Ok((
-        buffer,
+        String::from_utf8_lossy(&bytes).into_owned(),
         StreamMarks {
             to_first_data,
             first_to_done: started.elapsed().saturating_sub(to_first_data),

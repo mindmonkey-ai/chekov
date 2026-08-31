@@ -388,6 +388,7 @@ fn stream_usage(sse: &str) -> Option<StreamUsage> {
     let usage = data_lines(sse)
         .filter_map(|data| serde_json::from_str::<Value>(data).ok())
         .filter_map(|frame| frame.get("usage").cloned())
+        .filter(|usage| !usage.is_null())
         .last()?;
     Some(StreamUsage {
         prompt_tokens: usage.get("prompt_tokens")?.as_u64()?,
@@ -416,6 +417,11 @@ fn timings_from_stream(usage: &StreamUsage, marks: &StreamMarks) -> Result<Timin
     if usage.completion_tokens < 2 {
         return Err(unsupported(
             "fewer than 2 completion tokens — no decode window to time",
+        ));
+    }
+    if marks.single_read {
+        return Err(unsupported(
+            "the whole reply arrived in one read — nothing to time",
         ));
     }
     let to_first_data = marks.to_first_data.as_secs_f64();
