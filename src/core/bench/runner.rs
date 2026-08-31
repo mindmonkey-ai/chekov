@@ -1567,6 +1567,34 @@ mod tests {
         assert!(matches!(err, ChekovError::BenchNoTimings));
     }
 
+    /// A missing-timings failure against a declared foreign runtime is
+    /// recast naming that runtime — `chekov update --engine` is meaningless
+    /// advice for a server chekov did not build (C1). Untouched (no
+    /// declared runtime) it passes through unchanged, and it never rewrites
+    /// an unrelated error.
+    #[test]
+    fn foreign_timings_error_names_the_runtime_and_leaves_everything_else_alone() {
+        let recast = super::foreign_timings_error(ChekovError::BenchNoTimings, Some("mtplx 0.4.1"));
+        assert!(
+            matches!(&recast, ChekovError::ForeignTimingsUnsupported { runtime } if runtime == "mtplx 0.4.1"),
+            "{recast}"
+        );
+        assert!(recast.to_string().contains("mtplx 0.4.1"), "{recast}");
+        assert!(
+            !recast.to_string().contains("chekov update --engine"),
+            "a foreign server is not fixed by rebuilding chekov's own engine: {recast}"
+        );
+
+        let unchanged = super::foreign_timings_error(ChekovError::BenchNoTimings, None);
+        assert!(matches!(unchanged, ChekovError::BenchNoTimings));
+
+        let other = ChekovError::ProxyBadRequest {
+            reason: "unrelated".to_owned(),
+        };
+        let passthrough = super::foreign_timings_error(other, Some("mtplx 0.4.1"));
+        assert!(matches!(passthrough, ChekovError::ProxyBadRequest { .. }));
+    }
+
     #[test]
     fn a_locally_answered_request_cannot_be_a_probe() {
         // GET /v1/models is answered by the facade without touching the server —

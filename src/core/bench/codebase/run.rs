@@ -641,6 +641,17 @@ mod tests {
         prepared: &Prepared,
         script: (Vec<Result<String, ChekovError>>, Vec<Done>),
     ) -> (Vec<TaskRow>, usize, Vec<serde_json::Value>) {
+        drive_runtime(name, prepared, script, None)
+    }
+
+    /// `drive`, with the declared foreign runtime a run's `Sink` carries
+    /// (C1) — `None` is llama.cpp, matching every existing `drive` call.
+    fn drive_runtime(
+        name: &str,
+        prepared: &Prepared,
+        script: (Vec<Result<String, ChekovError>>, Vec<Done>),
+        runtime: Option<&str>,
+    ) -> (Vec<TaskRow>, usize, Vec<serde_json::Value>) {
         let (replies, done) = script;
         let http = ScriptedInfill {
             replies: RefCell::new(replies),
@@ -665,6 +676,7 @@ mod tests {
                 writer: &mut writer,
                 done: &done,
                 fim: runner::FimTransport::Infill,
+                runtime: runtime.map(str::to_owned),
             };
             super::run_codebase(&mut sink, &wire, prepared).expect("the run completes");
         }
@@ -863,6 +875,26 @@ mod tests {
         let answered = rows[1].codebase.as_ref().expect("a codebase row");
         assert_eq!(answered.prediction, "let a = 1;");
         assert!(answered.symbols_score.is_some(), "scored at run time");
+    }
+
+    /// A reply missing llama.cpp's `timings` object against a declared
+    /// foreign runtime is unavailable with the runtime named — never the
+    /// engine-rebuild remedy that reply means for llama.cpp (C1).
+    #[test]
+    fn a_foreign_runtime_missing_timings_names_the_runtime_not_an_engine_rebuild() {
+        let no_timings = serde_json::json!({ "content": "let a = 1;" }).to_string();
+        let (rows, _, _) = drive_runtime(
+            "foreign-no-timings",
+            &prepared_pair(),
+            (vec![Ok(no_timings)], vec![]),
+            Some("mtplx 0.4.1"),
+        );
+        let reason = unavailable_reason(&rows[0]);
+        assert!(reason.contains("mtplx 0.4.1"), "{reason}");
+        assert!(
+            !reason.contains("chekov update --engine"),
+            "a foreign server is not fixed by rebuilding chekov's own engine: {reason}"
+        );
     }
 
     #[test]
