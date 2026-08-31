@@ -298,4 +298,40 @@ mod tests {
             "earlier fields still win"
         );
     }
+
+    #[test]
+    fn a_stamp_without_a_runtime_field_reads_as_llama_cpp() {
+        // Every run stored before this field existed was a llama.cpp run.
+        let json = serde_json::json!({
+            "machine_id": "m", "engine_build_commit": "c",
+            "weights_revision": "r/s", "quant": "q", "ctx": 1, "n_parallel": 1,
+            "kv_unified": "engine-default", "n_batch": "engine-default",
+            "n_ubatch": "engine-default", "type_k": "engine-default",
+            "type_v": "engine-default", "flash_attn": "engine-default",
+            "seed": 0, "temperature_milli": 0, "chekov_version": "0",
+            "prompt_set_hash": "h", "corpus_id": "corp"
+        });
+        let stamp: super::Stamp = serde_json::from_value(json).unwrap();
+        assert_eq!(stamp.runtime, super::RUNTIME_LLAMA_CPP);
+    }
+
+    #[test]
+    fn runtime_differs_before_the_engine_commit() {
+        let mut a: super::Stamp =
+            serde_json::from_value(serde_json::json!({
+                "machine_id": "m", "engine_build_commit": "aaa",
+                "weights_revision": "r/s", "quant": "q", "ctx": 1, "n_parallel": 1,
+                "kv_unified": "engine-default", "n_batch": "engine-default",
+                "n_ubatch": "engine-default", "type_k": "engine-default",
+                "type_v": "engine-default", "flash_attn": "engine-default",
+                "seed": 0, "temperature_milli": 0, "chekov_version": "0",
+                "prompt_set_hash": "h", "corpus_id": "corp"
+            }))
+            .unwrap();
+        let mut b = a.clone();
+        a.runtime = "mtplx 0.4.1".to_owned();
+        a.engine_build_commit = "0.4.1".to_owned();
+        b.engine_build_commit = "bbb".to_owned();
+        assert_eq!(super::first_mismatch(&a, &b), Some("runtime"));
+    }
 }
