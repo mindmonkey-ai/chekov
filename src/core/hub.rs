@@ -18,11 +18,38 @@ pub struct JsonRequest {
     pub bearer: Option<String>,
 }
 
+/// Client-measured stream timing: request-written → first SSE data frame,
+/// and first data frame → stream end. Durations, not instants — the math
+/// needs only the two windows.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamMarks {
+    pub to_first_data: std::time::Duration,
+    pub first_to_done: std::time::Duration,
+    /// True when every payload byte arrived on the single `read()` call that
+    /// also set `to_first_data` — the whole reply landed in one read, so
+    /// `first_to_done` times nothing but the gap to the terminal EOF read.
+    pub single_read: bool,
+}
+
 /// The HTTP boundary (§C.6). Implemented by `UreqClient` for real use and by
 /// canned fakes in tests — no test ever touches the network.
 pub trait HttpClient {
     fn get(&self, url: &str) -> Result<String, ChekovError>;
     fn post_json(&self, req: &JsonRequest) -> Result<String, ChekovError>;
+
+    /// POST and read the response as a stream, timing it. Returns the full
+    /// body plus the two durations the timing math needs. The default
+    /// refuses: a client that cannot stream-time must say so, never fake
+    /// marks around a buffered read.
+    fn post_json_stream_timed(
+        &self,
+        _req: &JsonRequest,
+    ) -> Result<(String, StreamMarks), ChekovError> {
+        Err(ChekovError::ForeignTimingsUnsupported {
+            runtime: "unknown".to_owned(),
+            reason: "this HTTP client cannot stream-time responses".to_owned(),
+        })
+    }
 }
 
 /// Production client: blocking `ureq` (no async runtime, prompt §2.1).
@@ -75,6 +102,113 @@ impl HttpClient for UreqClient {
             })?;
         crate::core::proxy::serve::answered(&req.url, status, text)
     }
+
+    fn post_json_stream_timed(
+        &self,
+        req: &JsonRequest,
+    ) -> Result<(String, StreamMarks), ChekovError> {
+        // Same request shape as post_json; the read is incremental so the
+        // first data frame can be timestamped. Thin network I/O — untested
+        // by design, like the hub's shard download; the pure parts
+        // (saw_first_data, the timing math) carry the tests.
+        let started = std::time::Instant::now();
+        let mut builder = ureq::post(&req.url)
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .header("Content-Type", "application/json");
+        if let Some(token) = &req.bearer {
+            builder = builder.header("Authorization", &format!("Bearer {token}"));
+        }
+        let response = builder
+            .send(&req.body)
+            .map_err(|e| ChekovError::EndpointDown {
+                url: req.url.clone(),
+                reason: e.to_string(),
+            })?;
+        let status = response.status().as_u16();
+        let mut body = response.into_body();
+        if !(200..300).contains(&status) {
+            let text = body
+                .read_to_string()
+                .map_err(|e| ChekovError::EndpointDown {
+                    url: req.url.clone(),
+                    reason: e.to_string(),
+                })?;
+            return Err(status_error(&req.url, status, text));
+        }
+        read_stream_timed(body.into_reader(), started, &req.url)
+    }
+}
+
+/// The error `answered` reports for a non-2xx status — it always errors
+/// when `status` is outside 200..300, so the fallback stays panic-free
+/// without assuming that invariant holds forever.
+fn status_error(url: &str, status: u16, text: String) -> ChekovError {
+    let fallback = ChekovError::EndpointDown {
+        url: url.to_owned(),
+        reason: format!("unexpected status {status}"),
+    };
+    crate::core::proxy::serve::answered(url, status, text)
+        .err()
+        .unwrap_or(fallback)
+}
+
+/// Reads the streamed body incrementally, marking the first SSE data frame
+/// and the point the stream ends. Thin network I/O — untested by design,
+/// like the hub's shard download; `saw_first_data` and the timing math
+/// carry the tests.
+fn read_stream_timed(
+    mut reader: impl std::io::Read,
+    started: std::time::Instant,
+    url: &str,
+) -> Result<(String, StreamMarks), ChekovError> {
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut first_data: Option<std::time::Duration> = None;
+    let mut data_reads: u32 = 0;
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let n = reader
+            .read(&mut chunk)
+            .map_err(|e| ChekovError::EndpointDown {
+                url: url.to_owned(),
+                reason: e.to_string(),
+            })?;
+        if n == 0 {
+            break;
+        }
+        data_reads += 1;
+        bytes.extend_from_slice(&chunk[..n]);
+        // Lossy-decoding the accumulator (not the raw chunk) is only ever
+        // done here, and only until the first data frame is found — bounded
+        // to the pre-first-frame prefix. The body itself is decoded once,
+        // below, so a multi-byte sequence split across this chunk boundary
+        // never becomes U+FFFD in the assembled result (I1).
+        if first_data.is_none() && saw_first_data(&String::from_utf8_lossy(&bytes)) {
+            first_data = Some(started.elapsed());
+        }
+    }
+    let to_first_data = first_data.ok_or_else(|| ChekovError::EndpointDown {
+        url: url.to_owned(),
+        reason: "stream ended with no data frame".to_owned(),
+    })?;
+    Ok((
+        String::from_utf8_lossy(&bytes).into_owned(),
+        StreamMarks {
+            to_first_data,
+            first_to_done: started.elapsed().saturating_sub(to_first_data),
+            single_read: data_reads == 1,
+        },
+    ))
+}
+
+/// True once `buffer` holds a `data:` line with at least one non-whitespace
+/// payload byte — the first real SSE data frame, not just the marker.
+fn saw_first_data(buffer: &str) -> bool {
+    buffer
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .any(|payload| !payload.trim().is_empty())
 }
 
 /// HF model-info API response — only the fields chekov reads.
@@ -952,6 +1086,78 @@ mod tests {
         fn post_json(&self, _req: &JsonRequest) -> Result<String, ChekovError> {
             unreachable!("hub metadata never POSTs")
         }
+    }
+
+    /// A client with no override must say so, never fake marks around a
+    /// buffered read (spec §2's default body).
+    #[test]
+    fn the_default_stream_timed_post_refuses_honestly() {
+        let http = FakeHttp {
+            body: String::new(),
+        };
+        let req = JsonRequest {
+            url: "http://x".to_owned(),
+            body: "{}".to_owned(),
+            bearer: None,
+        };
+        let err = http
+            .post_json_stream_timed(&req)
+            .expect_err("the default must refuse, never fabricate marks");
+        assert!(err.to_string().contains("cannot stream-time"), "{err}");
+    }
+
+    #[test]
+    fn the_first_data_scan_fires_on_a_payload_byte_and_not_before() {
+        assert!(!super::saw_first_data("event: x\n"));
+        assert!(!super::saw_first_data("data:"));
+        assert!(super::saw_first_data("data: {"));
+        assert!(super::saw_first_data("event: x\ndata: 1\n"));
+    }
+
+    /// A `std::io::Read` that hands back one predetermined chunk per
+    /// `read()` call, then EOF — lets a test pick exactly where a stream's
+    /// read boundaries fall.
+    struct ChunkedReader {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl ChunkedReader {
+        fn new(chunks: Vec<Vec<u8>>) -> Self {
+            Self {
+                chunks: chunks.into(),
+            }
+        }
+    }
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.chunks.pop_front().map_or(Ok(0), |part| {
+                buf[..part.len()].copy_from_slice(&part);
+                Ok(part.len())
+            })
+        }
+    }
+
+    /// A 2-byte UTF-8 sequence ("é" = 0xC3 0xA9) split across a read
+    /// boundary must survive intact in the assembled body — never become
+    /// U+FFFD on either side of the split (I1: each 8 KiB read was
+    /// previously lossy-decoded independently of the others).
+    #[test]
+    fn a_multibyte_utf8_sequence_split_across_reads_survives_intact() {
+        let whole = "data: prélude\n".as_bytes().to_vec();
+        let split_at = whole.iter().position(|&b| b == 0xC3).expect("has é") + 1;
+        let (first, second) = whole.split_at(split_at);
+        let reader = ChunkedReader::new(vec![first.to_vec(), second.to_vec()]);
+
+        let (body, _marks) =
+            super::read_stream_timed(reader, std::time::Instant::now(), "http://x")
+                .expect("a well-formed split stream reads fine");
+
+        assert!(
+            !body.contains('\u{FFFD}'),
+            "a split multi-byte sequence must never become U+FFFD: {body:?}"
+        );
+        assert_eq!(body, "data: prélude\n");
     }
 
     const API_JSON: &str = r#"{

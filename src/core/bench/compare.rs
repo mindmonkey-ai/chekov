@@ -145,8 +145,9 @@ pub struct CompareOpts {
 }
 
 /// The fields `--cross-runtime` permits to differ, and no others.
-const CROSS_RUNTIME_ALLOWED: [&str; 11] = [
+const CROSS_RUNTIME_ALLOWED: [&str; 12] = [
     "runtime",
+    "timing_source",
     "engine_build_commit",
     "ctx",
     "n_parallel",
@@ -227,6 +228,7 @@ fn assert_same_environment(pair: &RunPair, opts: &CompareOpts) -> Result<(), Che
 /// the fields a foreign runtime is permitted to differ on, and no others.
 fn mask_cross_runtime(b_env: &mut Stamp, a: &Stamp) {
     b_env.runtime.clone_from(&a.runtime);
+    b_env.timing_source.clone_from(&a.timing_source);
     b_env.engine_build_commit.clone_from(&a.engine_build_commit);
     b_env.ctx = a.ctx;
     b_env.n_parallel = a.n_parallel;
@@ -1138,6 +1140,7 @@ mod tests {
         Stamp {
             machine_id: "8d41f0c2a917".into(),
             runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
+            timing_source: crate::core::bench::stamp::TIMING_SERVER.to_owned(),
             engine_build_commit: engine.into(),
             weights_revision: weights.into(),
             quant: "Q8_0".into(),
@@ -1279,6 +1282,37 @@ mod tests {
             ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "runtime"),
             other => panic!("expected stamp mismatch, got {other}"),
         }
+    }
+
+    #[test]
+    fn timing_source_is_allow_listed_only_under_cross_runtime() {
+        assert_eq!(super::CROSS_RUNTIME_ALLOWED.len(), 12);
+
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut foreign = stamp("dda1b0d67", "r1/s1");
+        foreign.timing_source = crate::core::bench::stamp::TIMING_CHEKOV_STREAMED.to_owned();
+        let b = run("m2", foreign, &[19.0, 21.0, 22.0]);
+
+        let err =
+            compare_runs(&a, &b, &opts(5.0)).expect_err("timing_source refused without the flag");
+        match err {
+            ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "timing_source"),
+            other => panic!("expected stamp mismatch, got {other}"),
+        }
+
+        let cross = CompareOpts {
+            cross_runtime: true,
+            ..opts(5.0)
+        };
+        assert!(compare_runs(&a, &b, &cross).is_ok());
+
+        let banner = cross_runtime_banner(&a.head.stamp, &b.head.stamp);
+        assert!(
+            banner
+                .lines()
+                .any(|line| line.starts_with("timing_source: ")),
+            "banner missing timing_source: {banner}"
+        );
     }
 
     #[test]

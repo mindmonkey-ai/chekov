@@ -206,6 +206,7 @@ mod tests {
         Stamp {
             machine_id: machine_id.into(),
             runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
+            timing_source: crate::core::bench::stamp::TIMING_SERVER.to_owned(),
             engine_build_commit: "dda1b0d67".into(),
             weights_revision: "fbbaed45c2f0/model-00001.gguf".into(),
             quant: quant.into(),

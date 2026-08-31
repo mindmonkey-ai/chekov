@@ -505,6 +505,7 @@ pub fn render_run(log: &RunLog) -> String {
         "bench {}  ctx {}  engine {}  machine {}\n",
         log.head.model, stamp.ctx, stamp.engine_build_commit, stamp.machine_id
     );
+    out.push_str(&timing_source_line(stamp));
     out.push_str(&throughput_table(log));
     let probes: String = log
         .rows
@@ -910,6 +911,22 @@ fn fim_transport_line(stamp: &crate::core::bench::stamp::Stamp) -> String {
         "chat"
     };
     format!("fim transport: {transport}\n")
+}
+
+/// Whose clock produced the run's numbers, said out loud exactly when it was
+/// not the server's own (spec §6).
+///
+/// A llama.cpp run reads its timings off the server and prints nothing here —
+/// its render is what it always was. A run chekov timed itself carries the
+/// caveat with the claim: the windows include wire overhead.
+fn timing_source_line(stamp: &crate::core::bench::stamp::Stamp) -> String {
+    if stamp.timing_source == crate::core::bench::stamp::TIMING_SERVER {
+        return String::new();
+    }
+    format!(
+        "timing source: {} (client wall-clock over SSE; includes wire overhead)\n",
+        stamp.timing_source
+    )
 }
 
 /// `; exec: cargo 1.95.0 (…), offline, scratch target` — what the exec tiers
@@ -1643,6 +1660,7 @@ mod tests {
         Stamp {
             machine_id: "8d41f0c2a917".into(),
             runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
+            timing_source: crate::core::bench::stamp::TIMING_SERVER.to_owned(),
             engine_build_commit: "dda1b0d67".into(),
             weights_revision: "fbbaed45c2f0/model-00001.gguf".into(),
             quant: "Q8_0".into(),
@@ -2738,6 +2756,46 @@ mod tests {
         );
         assert!(rendered.contains("fixture FAIL greeting"), "{rendered}");
     }
+
+    /// The header says whose clock measured the run exactly when it was not
+    /// the server's own: a llama.cpp render never mentions it at all, and a
+    /// chekov-timed run says so with its caveat attached (spec §6).
+    #[test]
+    fn the_header_names_chekovs_clock_only_when_it_measured() {
+        let eval = scratch("timing-source");
+        let served = rendered_with(&eval, "r-server", &head());
+        assert!(!served.contains("timing source:"), "{served}");
+
+        let mut foreign = head();
+        foreign.stamp.runtime = "mtplx 0.4.1".into();
+        foreign.stamp.timing_source = crate::core::bench::stamp::TIMING_CHEKOV_STREAMED.to_owned();
+        let timed = rendered_with(&eval, "r-foreign", &foreign);
+        assert!(
+            timed.contains(
+                "timing source: chekov-streamed (client wall-clock over SSE; includes wire \
+                 overhead)\n"
+            ),
+            "{timed}"
+        );
+    }
+
+    /// One depth recorded under the given head, rendered.
+    fn rendered_with(eval: &std::path::Path, run_id: &str, head: &RunHead) -> String {
+        let mut writer = RunWriter::create(eval, run_id, head).expect("create");
+        writer
+            .append(Task {
+                suite: "throughput".into(),
+                task_id: "depth-1024".into(),
+                measure: measure(&[19.0, 21.0, 22.0, 22.4]),
+                grade: None,
+                transport: Transport::Buffered,
+                codebase: None,
+                judge: None,
+            })
+            .expect("append");
+        render_run(&RunLog::load(writer.dir()).expect("load"))
+    }
+
     /// A codebase task whose exec half is what the caller says.
     fn exec_task(id: &str, compile: super::ExecScore, tests: &[&str]) -> Task {
         let mut task = codebase_task(CodebaseFixture {

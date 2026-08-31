@@ -195,11 +195,11 @@ pub enum ChekovError {
     BenchNoTimings,
 
     #[error(
-        "the server declared as runtime '{runtime}' never returned llama.cpp's \
-         `timings` object — chekov cannot measure timings through {runtime} yet; \
-         this is a recorded follow-up, not a defect to work around today"
+        "the server declared as runtime '{runtime}' gave chekov nothing to time \
+         ({reason}) — a foreign run is stream-timed from `usage` token counts, \
+         and this reply had none to work with"
     )]
-    ForeignTimingsUnsupported { runtime: String },
+    ForeignTimingsUnsupported { runtime: String, reason: String },
 
     #[error("bench fixture {}: {reason}", path.display())]
     FixtureInvalid {
