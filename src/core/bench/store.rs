@@ -2739,6 +2739,46 @@ mod tests {
         );
         assert!(rendered.contains("fixture FAIL greeting"), "{rendered}");
     }
+
+    /// The header says whose clock measured the run exactly when it was not
+    /// the server's own: a llama.cpp render never mentions it at all, and a
+    /// chekov-timed run says so with its caveat attached (spec §6).
+    #[test]
+    fn the_header_names_chekovs_clock_only_when_it_measured() {
+        let eval = scratch("timing-source");
+        let served = rendered_with(&eval, "r-server", head());
+        assert!(!served.contains("timing source:"), "{served}");
+
+        let mut foreign = head();
+        foreign.stamp.runtime = "mtplx 0.4.1".into();
+        foreign.stamp.timing_source = crate::core::bench::stamp::TIMING_CHEKOV_STREAMED.to_owned();
+        let timed = rendered_with(&eval, "r-foreign", foreign);
+        assert!(
+            timed.contains(
+                "timing source: chekov-streamed (client wall-clock over SSE; includes wire \
+                 overhead)\n"
+            ),
+            "{timed}"
+        );
+    }
+
+    /// One depth recorded under the given head, rendered.
+    fn rendered_with(eval: &std::path::Path, run_id: &str, head: RunHead) -> String {
+        let mut writer = RunWriter::create(eval, run_id, &head).expect("create");
+        writer
+            .append(Task {
+                suite: "throughput".into(),
+                task_id: "depth-1024".into(),
+                measure: measure(&[19.0, 21.0, 22.0, 22.4]),
+                grade: None,
+                transport: Transport::Buffered,
+                codebase: None,
+                judge: None,
+            })
+            .expect("append");
+        render_run(&RunLog::load(writer.dir()).expect("load"))
+    }
+
     /// A codebase task whose exec half is what the caller says.
     fn exec_task(id: &str, compile: super::ExecScore, tests: &[&str]) -> Task {
         let mut task = codebase_task(CodebaseFixture {

@@ -2834,6 +2834,100 @@ mod tests {
         assert_eq!(super::fim_for(Some(&spec)), FimTransport::Chat);
     }
 
+    /// A foreign run is timed by chekov over the stream, so its throughput
+    /// rows record the streamed door — and a resume must look for them there,
+    /// or it re-runs every depth the run already holds (spec §5).
+    #[test]
+    fn a_foreign_throughput_row_is_streamed_and_resume_sees_it() {
+        use crate::core::bench::store::{TaskKey, Transport};
+        let spec = foreign_spec();
+        let local = super::TimingClock::of(None);
+        let foreign = super::TimingClock::of(Some(&spec));
+        assert_eq!(local, super::TimingClock::Server);
+        assert_eq!(foreign, super::TimingClock::ChekovStreamed);
+        assert_eq!(local.transport(), Transport::Buffered);
+        assert_eq!(foreign.transport(), Transport::Streamed);
+
+        let recorded = vec![(
+            "throughput".to_owned(),
+            "depth-1024".to_owned(),
+            Transport::Streamed,
+        )];
+        assert!(super::already_done(
+            &recorded,
+            &TaskKey {
+                suite: "throughput",
+                task_id: "depth-1024",
+                transport: foreign.transport(),
+            }
+        ));
+        assert!(
+            !super::already_done(&recorded, &TaskKey::buffered("throughput", "depth-1024")),
+            "today's buffered key would re-run every depth a foreign resume holds"
+        );
+    }
+
+    /// Whose clock measured the run is the stamp's own claim: chekov's on a
+    /// foreign run, the server's on every run chekov launches (spec §6).
+    #[test]
+    fn the_stamp_names_chekovs_clock_exactly_on_foreign_runs() {
+        use crate::core::bench::stamp::{TIMING_CHEKOV_STREAMED, TIMING_SERVER};
+        let spec = foreign_spec();
+        let plan = plan_fixture();
+        let foreign = foreign_stamp(&spec, &plan, super::foreign_stamp_parts(&spec));
+        assert_eq!(foreign.timing_source, TIMING_CHEKOV_STREAMED);
+        assert_eq!(local_stamp(&plan).timing_source, TIMING_SERVER);
+    }
+
+    /// The stamp `build_head`'s local branch assembles: the same assembly with
+    /// no declared runtime.
+    fn local_stamp(
+        plan: &crate::core::bench::sweep::SweepPlan,
+    ) -> crate::core::bench::stamp::Stamp {
+        let inputs = super::HeadInputs {
+            props: crate::core::bench::runner::PropsInfo {
+                n_ctx: 4096,
+                total_slots: 1,
+            },
+            plan,
+            fixture: None,
+            suite: None,
+            codebase: None,
+            judge: None,
+            runtime: None,
+        };
+        super::assemble_stamp(
+            &foreign_candidate(),
+            &inputs,
+            super::StampParts {
+                machine_id: "m".to_owned(),
+                runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
+                engine: "dda1b0d67".to_owned(),
+                prompt_set_hash: "h".to_owned(),
+                corpus_id: "c".to_owned(),
+                flags: super::unmanaged_flags(),
+                seed: 7,
+            },
+        )
+    }
+
+    /// A foreign row's own FAIL text names the runtime that gave chekov
+    /// nothing to time — never llama.cpp's rebuild advice, which cannot apply
+    /// to a server chekov did not build (spec §7).
+    #[test]
+    fn a_foreign_agentic_row_failure_names_the_runtime_not_the_engine() {
+        let outcome: Result<(), ChekovError> = Err(ChekovError::BenchNoTimings);
+        let foreign = super::row_outcome(outcome, Some("mtplx 0.4.1")).expect_err("the crossing");
+        let (_, row) = super::failed_probe(&foreign);
+        let reason = row.reason.expect("a failed row carries its reason");
+        assert!(reason.contains("mtplx 0.4.1"), "{reason}");
+        assert!(!reason.contains("chekov update --engine"), "{reason}");
+
+        let untouched: Result<(), ChekovError> = Err(ChekovError::BenchNoTimings);
+        let local = super::row_outcome(untouched, None).expect_err("the crossing");
+        assert_eq!(local.to_string(), ChekovError::BenchNoTimings.to_string());
+    }
+
     /// `serves_line` reports what a foreign server names its weights on both
     /// branches — chekov cannot verify the list, so it prints and lets the
     /// human read (spec §4, M2).
