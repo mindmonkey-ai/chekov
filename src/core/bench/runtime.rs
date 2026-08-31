@@ -1,8 +1,9 @@
-//! A declared foreign runtime (spec 2026-08-31 §2, §4): parsed from
-//! `--runtime <name>@<version>`, stored on the stamp as `<name> <version>`,
-//! and made ready by listing `/v1/models` — chekov never launches, installs,
-//! or probes a foreign server's identity; it prints what was declared and
-//! what is served, and measures.
+//! A declared foreign runtime (spec 2026-08-31 §2, §4).
+//!
+//! Parsed from `--runtime <name>@<version>`, stored on the stamp as
+//! `<name> <version>`, and made ready by listing `/v1/models` — chekov
+//! never launches, installs, or probes a foreign server's identity; it
+//! prints what was declared and what is served, and measures.
 
 use serde_json::Value;
 
@@ -10,6 +11,7 @@ use crate::core::hub::HttpClient;
 use crate::error::ChekovError;
 
 /// One declared runtime. `@` is a CLI spelling; `stored` is the stamp's.
+#[derive(Debug)]
 pub struct RuntimeSpec {
     pub name: String,
     pub version: String,
@@ -23,7 +25,9 @@ impl RuntimeSpec {
             value: value.to_owned(),
             reason: reason.to_owned(),
         };
-        let (name, version) = value.rsplit_once('@').ok_or_else(|| refuse("missing '@'"))?;
+        let (name, version) = value
+            .rsplit_once('@')
+            .ok_or_else(|| refuse("missing '@'"))?;
         if name.is_empty() {
             return Err(refuse("empty name"));
         }
@@ -60,10 +64,12 @@ fn name_ok(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || ".-_".contains(c))
 }
 
-/// Foreign readiness (spec §4): one plain `GET /v1/models`; a 200 with a
-/// `data` array is ready and its `id`s are returned FOR PRINTING — chekov
-/// cannot know how a foreign server names the weights, so it reports and
-/// lets the human read. Anything else is `EndpointDown`.
+/// Foreign readiness (spec §4).
+///
+/// One plain `GET /v1/models`; a 200 with a `data` array is ready and its
+/// `id`s are returned FOR PRINTING — chekov cannot know how a foreign server
+/// names the weights, so it reports and lets the human read. Anything else
+/// is `EndpointDown`.
 pub fn foreign_ready(http: &dyn HttpClient, base_url: &str) -> Result<Vec<String>, ChekovError> {
     let url = format!("{base_url}/v1/models");
     let body = http.get(&url)?;
@@ -74,7 +80,7 @@ pub fn foreign_ready(http: &dyn HttpClient, base_url: &str) -> Result<Vec<String
     let data = parsed
         .get("data")
         .and_then(Value::as_array)
-        .ok_or(ChekovError::EndpointDown {
+        .ok_or_else(|| ChekovError::EndpointDown {
             url,
             reason: "/v1/models reply has no `data` array".to_owned(),
         })?;
@@ -144,7 +150,10 @@ mod tests {
     #[test]
     fn an_empty_list_is_ready_and_a_shapeless_reply_is_not() {
         let empty = CannedModels(r#"{"data":[]}"#);
-        assert_eq!(super::foreign_ready(&empty, "http://h:1").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            super::foreign_ready(&empty, "http://h:1").unwrap(),
+            Vec::<String>::new()
+        );
         let shapeless = CannedModels("not json");
         let err = super::foreign_ready(&shapeless, "http://h:1").unwrap_err();
         assert!(matches!(err, ChekovError::EndpointDown { .. }));
