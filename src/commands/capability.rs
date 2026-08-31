@@ -2390,13 +2390,13 @@ fn compare(ctx: &Ctx, args: &CompareArgs) -> Result<ExitCode, ChekovError> {
         significance_pct: f64::from(ctx.config.file.bench.significance_pct),
         cross_runtime: args.cross_runtime,
     };
+    let comparison = bench_compare::compare_runs(&run_a, &run_b, &opts)?;
     if opts.cross_runtime {
         print!(
             "{}",
             bench_compare::cross_runtime_banner(&run_a.head.stamp, &run_b.head.stamp)
         );
     }
-    let comparison = bench_compare::compare_runs(&run_a, &run_b, &opts)?;
     print!(
         "{}",
         bench_compare::render_comparison(
@@ -2830,6 +2830,22 @@ mod tests {
         assert_eq!(super::fim_for(None), FimTransport::Infill);
         let spec = foreign_spec();
         assert_eq!(super::fim_for(Some(&spec)), FimTransport::Chat);
+    }
+
+    /// `serves_line` reports what a foreign server names its weights on both
+    /// branches — chekov cannot verify the list, so it prints and lets the
+    /// human read (spec §4, M2).
+    #[test]
+    fn serves_line_joins_ids_or_says_none_listed() {
+        let spec = foreign_spec();
+        assert_eq!(
+            super::serves_line(&spec, &["a".to_owned(), "b".to_owned()]),
+            "chekov: runtime mtplx 0.4.1 serves: a, b"
+        );
+        assert_eq!(
+            super::serves_line(&spec, &[]),
+            "chekov: runtime mtplx 0.4.1 serves: (none listed)"
+        );
     }
 
     /// A codebase suite that rides the chat arm carries a DIFFERENT
