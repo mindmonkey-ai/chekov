@@ -1026,6 +1026,7 @@ mod tests {
         StreamMarks {
             to_first_data: Duration::from_millis(100),
             first_to_done: Duration::from_secs(1),
+            single_read: false,
         }
     }
 
@@ -1190,6 +1191,7 @@ mod tests {
         let marks = StreamMarks {
             to_first_data: Duration::from_millis(500),
             first_to_done: Duration::from_secs(2),
+            single_read: false,
         };
         let t = super::timings_from_stream(&usage, &marks).unwrap();
         assert_eq!(t.prompt_n, 100);
@@ -1234,12 +1236,44 @@ mod tests {
         let stalled = StreamMarks {
             to_first_data: Duration::ZERO,
             first_to_done: Duration::from_secs(1),
+            single_read: false,
         };
         let err = super::timings_from_stream(&zero_window, &stalled).unwrap_err();
         assert!(
             err.to_string().contains("zero-length timing window"),
             "{err}"
         );
+    }
+
+    /// A body that arrives on a single read dodges the zero-length-window
+    /// guard (`first_to_done` is a nonzero handful of microseconds, not
+    /// zero) and would otherwise silently produce an absurd decode rate.
+    /// `timings_from_stream` must refuse by name instead of inventing a
+    /// number; a genuinely two-read stream still derives normally (I2).
+    #[test]
+    fn a_single_read_stream_refuses_rather_than_inventing_a_rate() {
+        let usage = super::StreamUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+        };
+        let one_read = StreamMarks {
+            to_first_data: Duration::from_millis(50),
+            first_to_done: Duration::from_micros(5),
+            single_read: true,
+        };
+        let err = super::timings_from_stream(&usage, &one_read).unwrap_err();
+        assert!(
+            matches!(&err, ChekovError::ForeignTimingsUnsupported { reason, .. } if reason == "the whole reply arrived in one read — nothing to time"),
+            "{err}"
+        );
+
+        let two_reads = StreamMarks {
+            to_first_data: Duration::from_millis(50),
+            first_to_done: Duration::from_micros(5),
+            single_read: false,
+        };
+        super::timings_from_stream(&usage, &two_reads)
+            .expect("a genuinely two-read stream still derives");
     }
 
     #[test]
@@ -1250,6 +1284,19 @@ mod tests {
         let u = super::stream_usage(sse).unwrap();
         assert_eq!((u.prompt_tokens, u.completion_tokens), (9, 8));
         assert!(super::stream_usage("data: {\"x\":1}\n").is_none());
+    }
+
+    /// The `OpenAI` `include_usage` shape sets `"usage": null` on every
+    /// non-terminal chunk and the real object on the terminal one — but
+    /// chunk ordering across servers is not guaranteed. A trailing
+    /// `"usage": null` frame after the real one must not shadow it (I3).
+    #[test]
+    fn stream_usage_skips_a_trailing_null_usage_frame() {
+        let sse = "data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":8}}\n\
+                   data: {\"usage\":null}\n\
+                   data: [DONE]\n";
+        let u = super::stream_usage(sse).expect("the earlier real usage object must be found");
+        assert_eq!((u.prompt_tokens, u.completion_tokens), (9, 8));
     }
 
     /// `cross_stream_timed` runs the same SSE machinery as `cross_streaming`

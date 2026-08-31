@@ -25,6 +25,10 @@ pub struct JsonRequest {
 pub struct StreamMarks {
     pub to_first_data: std::time::Duration,
     pub first_to_done: std::time::Duration,
+    /// True when every payload byte arrived on the single `read()` call that
+    /// also set `to_first_data` — the whole reply landed in one read, so
+    /// `first_to_done` times nothing but the gap to the terminal EOF read.
+    pub single_read: bool,
 }
 
 /// The HTTP boundary (§C.6). Implemented by `UreqClient` for real use and by
@@ -161,6 +165,7 @@ fn read_stream_timed(
 ) -> Result<(String, StreamMarks), ChekovError> {
     let mut buffer = String::new();
     let mut first_data: Option<std::time::Duration> = None;
+    let mut data_reads: u32 = 0;
     let mut chunk = [0_u8; 8192];
     loop {
         let n = reader
@@ -172,6 +177,7 @@ fn read_stream_timed(
         if n == 0 {
             break;
         }
+        data_reads += 1;
         buffer.push_str(&String::from_utf8_lossy(&chunk[..n]));
         if first_data.is_none() && saw_first_data(&buffer) {
             first_data = Some(started.elapsed());
@@ -186,6 +192,7 @@ fn read_stream_timed(
         StreamMarks {
             to_first_data,
             first_to_done: started.elapsed().saturating_sub(to_first_data),
+            single_read: data_reads == 1,
         },
     ))
 }
@@ -1100,6 +1107,52 @@ mod tests {
         assert!(!super::saw_first_data("data:"));
         assert!(super::saw_first_data("data: {"));
         assert!(super::saw_first_data("event: x\ndata: 1\n"));
+    }
+
+    /// A `std::io::Read` that hands back one predetermined chunk per
+    /// `read()` call, then EOF — lets a test pick exactly where a stream's
+    /// read boundaries fall.
+    struct ChunkedReader {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl ChunkedReader {
+        fn new(chunks: Vec<Vec<u8>>) -> Self {
+            Self {
+                chunks: chunks.into(),
+            }
+        }
+    }
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.chunks.pop_front().map_or(Ok(0), |part| {
+                buf[..part.len()].copy_from_slice(&part);
+                Ok(part.len())
+            })
+        }
+    }
+
+    /// A 2-byte UTF-8 sequence ("é" = 0xC3 0xA9) split across a read
+    /// boundary must survive intact in the assembled body — never become
+    /// U+FFFD on either side of the split (I1: each 8 KiB read was
+    /// previously lossy-decoded independently of the others).
+    #[test]
+    fn a_multibyte_utf8_sequence_split_across_reads_survives_intact() {
+        let whole = "data: prélude\n".as_bytes().to_vec();
+        let split_at = whole.iter().position(|&b| b == 0xC3).expect("has é") + 1;
+        let (first, second) = whole.split_at(split_at);
+        let reader = ChunkedReader::new(vec![first.to_vec(), second.to_vec()]);
+
+        let (body, _marks) =
+            super::read_stream_timed(reader, std::time::Instant::now(), "http://x")
+                .expect("a well-formed split stream reads fine");
+
+        assert!(
+            !body.contains('\u{FFFD}'),
+            "a split multi-byte sequence must never become U+FFFD: {body:?}"
+        );
+        assert_eq!(body, "data: prélude\n");
     }
 
     const API_JSON: &str = r#"{
