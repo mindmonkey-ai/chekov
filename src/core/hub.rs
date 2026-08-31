@@ -954,6 +954,32 @@ mod tests {
         }
     }
 
+    /// A client with no override must say so, never fake marks around a
+    /// buffered read (spec §2's default body).
+    #[test]
+    fn the_default_stream_timed_post_refuses_honestly() {
+        let http = FakeHttp {
+            body: String::new(),
+        };
+        let req = JsonRequest {
+            url: "http://x".to_owned(),
+            body: "{}".to_owned(),
+            bearer: None,
+        };
+        let err = http
+            .post_json_stream_timed(&req)
+            .expect_err("the default must refuse, never fabricate marks");
+        assert!(err.to_string().contains("cannot stream-time"), "{err}");
+    }
+
+    #[test]
+    fn the_first_data_scan_fires_on_a_payload_byte_and_not_before() {
+        assert!(!super::saw_first_data("event: x\n"));
+        assert!(!super::saw_first_data("data:"));
+        assert!(super::saw_first_data("data: {"));
+        assert!(super::saw_first_data("event: x\ndata: 1\n"));
+    }
+
     const API_JSON: &str = r#"{
         "sha": "0123456789abcdef0123456789abcdef01234567",
         "modelId": "unsloth/MiniMax-M2.7-GGUF",
