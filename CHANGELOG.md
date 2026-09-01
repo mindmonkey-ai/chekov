@@ -69,6 +69,16 @@ All notable changes to chekov are recorded here. The format follows
   streamed mechanism is a recorded follow-up. Live verification against a
   real MLX/MTPLX server is approval-gated and has not run yet; the plumbing
   is unit-tested against fakes on the existing `HttpClient` seam.
+- `capability bench NAME --runtime ... --served-model <id>` names which of a
+  foreign server's served ids is the bench subject on the request wire's
+  OpenAI `model` field — chekov's own registry name never reaches it on a
+  foreign run. Absent the flag, a single served id is used automatically; a
+  server listing zero or several ids without one refuses loudly
+  (`RuntimeServedModelRequired { count }`) rather than guessing. Fixes a live
+  finding: llama.cpp ignores the `model` field, but mlx-lm routes on it and
+  404s trying to download chekov's registry name from Hugging Face. The
+  registry name still names the run directory, the stamp's weights identity,
+  and the report header.
 
 ### Changed
 - `[limits] wired_limit_mb` no longer has a built-in value. The old default,

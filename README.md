@@ -193,8 +193,9 @@ same gate. Without the flag the ladder stops at tier 5 and the trailer reads
 that executed and one that did not — they are different environments.
 
 **Foreign runtimes** (`capability bench NAME --runtime <name>@<version>
-[--upstream <url>]`) let an OpenAI-compatible server you already started —
-MTPLX, MLX, anything on the same wire — stand in as the bench subject.
+[--upstream <url>] [--served-model <id>]`) let an OpenAI-compatible server you
+already started — MTPLX, MLX, anything on the same wire — stand in as the
+bench subject.
 `--runtime` is `UseRunning`-only for the subject: chekov never launches,
 installs, or tears down a foreign server, and refuses before any measurement
 if the named model isn't already serving (`--judge` is exempt — it still
@@ -203,7 +204,21 @@ launches chekov's own local llama.cpp judge exactly as today, though
 gate, since a foreign server chekov did not launch never comes down for the
 judge to load beside). Readiness is one plain `GET /v1/models`; the served
 ids are **printed, never asserted** — chekov cannot know how a foreign server
-names its own weights. Launch flags chekov cannot observe are stamped with
+names its own weights. The request wire's OpenAI `model` field is addressed
+by what the server actually serves, never by chekov's own registry name:
+`--served-model <id>` names it explicitly; absent the flag, a single served
+id is used automatically, and a server listing zero or several is a refusal
+(`RuntimeServedModelRequired`) naming the count rather than guessing. This
+matters because llama.cpp ignores the `model` field but mlx-lm **routes** on
+it, 404ing trying to download chekov's registry name from Hugging Face — a
+live finding serving under the registry name works around, `--served-model`
+fixes properly. The registry name still names everything else: the run
+directory, the stamp's weights identity, and the report header. A
+thinking-default model must be served with reasoning disabled (mlx-lm:
+`--chat-template-args '{"enable_thinking": false}'`) or the codebase suite's
+chat-FIM fills burn the gold-bounded budget on reasoning and fail loudly as
+`chat fill has no text content` — a second live finding, not yet automated.
+Launch flags chekov cannot observe are stamped with
 fixed sentinels (`ctx`/`n_parallel` `0`; the six flag fields `"unmanaged"`,
 a third spelling distinct from `"engine-default"`) rather than invented, and
 the stamp's new `runtime` field (`llama.cpp` unless declared — every run on

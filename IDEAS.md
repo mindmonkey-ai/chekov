@@ -485,19 +485,25 @@ arm (`fim transport: chat`; in_file exact 0.17, cross_file 0.33 -> 0.50
 with the extra file), and `--cross-runtime` against the 2026-08-28
 llama.cpp Q8_0 run printed the banner and read llama.cpp faster at every
 depth (78.6/77.7/68.1) — a quant-confounded number (Q8_0 vs bf16), noted
-on the record, not a runtime verdict. Two interop findings, both OPEN:
-(a) chekov sends its registry name as the OpenAI `model` id; llama-server
-ignores it but mlx-lm routes on it and 404s trying to download that name —
-worked around by serving the snapshot under the registry name; a foreign
-run should probably send the served id, or the field should be
-declarable. (b) A thinking-default model burns the gold-bounded fill
-budget on reasoning and every chat fill fails loudly as "chat fill has no
-text content" (honest N/A, recorded in run 20260831T201602Z); serving
-with `enable_thinking: false` fixed it — the chat-FIM docs should say so,
-or the arm should grow a thinking-budget strategy.
+on the record, not a runtime verdict. Two interop findings:
+(a) SHIPPED 2026-08-31 (this change): chekov sent its registry name as the
+OpenAI `model` id; llama-server ignores it but mlx-lm routes on it and
+404s trying to download that name. `--served-model <id>` now names which
+served id is the subject explicitly; absent it, a single served id is
+used automatically, and a server listing zero or several without the flag
+refuses (`RuntimeServedModelRequired`) rather than guessing — the
+registry name still names the run directory, the stamp and the report,
+never the request wire on a foreign run. (b) DOCUMENTED 2026-08-31: a
+thinking-default model burns the gold-bounded fill budget on reasoning
+and every chat fill fails loudly as "chat fill has no text content"
+(honest N/A, recorded in run 20260831T201602Z); serving with
+`enable_thinking: false` fixed it live, and the README's foreign-runtime
+section now says so — still owed: growing the chat-FIM arm its own
+thinking-budget strategy instead of relying on the operator to disable it.
 Proposed 2026-08-30 — status: SHIPPED; foreign-timing measurement SHIPPED
-2026-08-31; live MLX verification DONE 2026-08-31 — remaining: foreign
-agentic/fixture timing, the two interop findings above
+2026-08-31; live MLX verification DONE 2026-08-31; finding (a) SHIPPED and
+finding (b) documented 2026-08-31 — remaining: foreign agentic/fixture
+timing, a thinking-budget strategy for the chat-FIM arm (finding (b))
 
 ## MTP-head awareness: `explain` reports it, bench measures it (2026-08-30)
 Qwen 3.5+/3.8, Gemma 4 and GLM-5.x ship native MTP heads in their weights
