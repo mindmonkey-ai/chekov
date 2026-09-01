@@ -78,8 +78,12 @@ pub fn process_alive(pid: i32) -> bool {
 /// falls back to the signal-0 probe.
 #[must_use]
 pub fn child_alive(pid: i32) -> bool {
-    // TODO(red): not yet reap-aware — a zombie still reads as alive here.
-    process_alive(pid)
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+    match waitpid(nix::unistd::Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
+        Ok(WaitStatus::StillAlive) => true,
+        Ok(_) => false, // exited or signaled — reaped now
+        Err(_) => process_alive(pid),
+    }
 }
 
 /// SIGTERM, wait up to `grace`, then SIGKILL with a warning to stderr.
@@ -91,7 +95,7 @@ pub fn stop_pid(pid: i32, grace: Duration) -> Result<StopOutcome, ChekovError> {
     }
     let deadline = std::time::Instant::now() + grace;
     while std::time::Instant::now() < deadline {
-        if !process_alive(pid) {
+        if !child_alive(pid) {
             return Ok(StopOutcome::Terminated);
         }
         std::thread::sleep(Duration::from_millis(50));

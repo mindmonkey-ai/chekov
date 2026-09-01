@@ -47,7 +47,7 @@ pub fn wait_ready(
 ) -> Result<(), ChekovError> {
     let url = format!("{}/health", target.base_url);
     for _ in 0..policy.max_polls {
-        if !crate::core::server::process_alive(target.pid) {
+        if !crate::core::server::child_alive(target.pid) {
             return Err(ChekovError::ServerDiedWhileLoading { pid: target.pid });
         }
         if http.get(&url).is_ok() {
