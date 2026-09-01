@@ -3049,6 +3049,46 @@ mod tests {
         );
     }
 
+    /// `run_fixture` now rides the same clock as `run_throughput`: a foreign
+    /// run's fixture crossings land on the streamed door, llama.cpp's stay
+    /// on the buffered one it always used — red until `run_fixture` reads
+    /// `pass.clock` instead of a hard-coded buffered key (spec §5, §7).
+    #[test]
+    fn a_foreign_fixture_row_is_streamed_and_resume_sees_it() {
+        use crate::core::bench::store::{TaskKey, Transport};
+        let spec = foreign_spec();
+        let local = super::TimingClock::of(None);
+        let foreign = super::TimingClock::of(Some(&spec));
+        assert_eq!(
+            local.transport(),
+            Transport::Buffered,
+            "llama.cpp's fixture door is unchanged"
+        );
+        assert_eq!(
+            foreign.transport(),
+            Transport::Streamed,
+            "a foreign run's fixture door is timed by chekov, exactly like throughput"
+        );
+
+        let recorded = vec![(
+            "fixture".to_owned(),
+            "probe-1".to_owned(),
+            Transport::Streamed,
+        )];
+        assert!(super::already_done(
+            &recorded,
+            &TaskKey {
+                suite: "fixture",
+                task_id: "probe-1",
+                transport: foreign.transport(),
+            }
+        ));
+        assert!(
+            !super::already_done(&recorded, &TaskKey::buffered("fixture", "probe-1")),
+            "today's buffered key would re-run every fixture probe a foreign resume holds"
+        );
+    }
+
     /// Whose clock measured the run is the stamp's own claim: chekov's on a
     /// foreign run, the server's on every run chekov launches (spec §6).
     #[test]
@@ -3108,6 +3148,61 @@ mod tests {
         let untouched: Result<(), ChekovError> = Err(ChekovError::BenchNoTimings);
         let local = super::row_outcome(untouched, None).expect_err("the crossing");
         assert_eq!(local.to_string(), ChekovError::BenchNoTimings.to_string());
+    }
+
+    fn timings_fixture() -> crate::core::bench::runner::Timings {
+        crate::core::bench::runner::Timings {
+            prompt_n: 10,
+            prompt_per_second: 100.0,
+            predicted_n: 20,
+            predicted_per_second: 50.0,
+            cache_n: 0,
+        }
+    }
+
+    /// The foreign agentic BUFFERED door: a crossing that succeeded but was
+    /// never timed appends the empty measure — never an invented zero
+    /// `Timings` — alongside its real grade. Red until `append_probe` widens
+    /// to `Option<Timings>` and an untimed success stops being impossible to
+    /// express (spec §7.2).
+    #[test]
+    fn a_graded_buffered_foreign_row_carries_the_empty_measure_and_a_real_grade() {
+        use crate::core::bench::store;
+        let outcome: Result<(Option<crate::core::bench::runner::Timings>, _), ChekovError> =
+            Ok((None, store::GradeRow::pass()));
+        let (measure, grade) = super::outcome_row(outcome);
+        assert_eq!(
+            measure.prompt_n, 0,
+            "no crossing was timed, so nothing is invented"
+        );
+        assert!(measure.decode_samples.is_empty());
+        assert!(measure.prefill_samples.is_empty());
+        assert_eq!(measure.cache_n, 0);
+        assert!(grade.pass, "grading never depends on whether timing ran");
+        assert!(
+            !grade.unavailable,
+            "an untimed success is graded, not unavailable"
+        );
+    }
+
+    /// The foreign agentic STREAMED door (and every llama.cpp door): a timed
+    /// crossing's real `Timings` become the row's real measure.
+    #[test]
+    fn a_graded_streamed_foreign_row_carries_derived_timings() {
+        use crate::core::bench::store;
+        let timings = timings_fixture();
+        let outcome: Result<(Option<crate::core::bench::runner::Timings>, _), ChekovError> =
+            Ok((Some(timings), store::GradeRow::pass()));
+        let (measure, grade) = super::outcome_row(outcome);
+        assert_eq!(measure.prompt_n, timings.prompt_n);
+        assert_eq!(measure.decode_samples, vec![timings.predicted_per_second]);
+        assert_eq!(measure.prefill_samples, vec![timings.prompt_per_second]);
+        assert_eq!(measure.cache_n, timings.cache_n);
+        assert!(
+            !measure.decode_samples.is_empty(),
+            "a timed crossing must never collapse to the untimed shape"
+        );
+        assert!(grade.pass);
     }
 
     /// `serves_line` reports what a foreign server names its weights on both
