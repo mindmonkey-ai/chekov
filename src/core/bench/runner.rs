@@ -220,19 +220,45 @@ fn cross_inner(
     req: &HttpRequest,
     forced: Option<&Forced>,
 ) -> Result<ProbeArtifact, ChekovError> {
-    let (path, body) = forward_of(wire, req)?;
-    let body = adjust_body(&body, wire.pins, forced)?;
-    let upstream_body = wire.http.post_json(&JsonRequest {
-        url: format!("{}{}", wire.upstream.base_url, path),
-        body,
-        bearer: Some(wire.upstream.api_key.clone()),
-    })?;
+    let upstream_body = post_upstream(wire, req, forced)?;
     let timings = read_timings(&upstream_body)?;
     let anthropic_body = wire.facade.translate_response(&upstream_body)?;
     Ok(ProbeArtifact {
         anthropic_body,
         timings,
     })
+}
+
+/// Route, pin, and POST — the half of a crossing every buffered door shares,
+/// whether or not it goes on to require a `timings` object (§7.2).
+fn post_upstream(
+    wire: &ProbeWire,
+    req: &HttpRequest,
+    forced: Option<&Forced>,
+) -> Result<String, ChekovError> {
+    let (path, body) = forward_of(wire, req)?;
+    let body = adjust_body(&body, wire.pins, forced)?;
+    wire.http.post_json(&JsonRequest {
+        url: format!("{}{}", wire.upstream.base_url, path),
+        body,
+        bearer: Some(wire.upstream.api_key.clone()),
+    })
+}
+
+/// Plain buffered POST through the translator, with no `timings` requirement.
+///
+/// The door a foreign runtime's buffered agentic and grammar-forced
+/// crossings ride: grading only needs the translated body, and an
+/// MLX-style server answers buffered chat requests fine — it just reports
+/// no llama.cpp `timings` object to read. Never invents one; the caller's
+/// row records the empty measure instead (spec §7.2).
+pub fn cross_untimed(
+    wire: &ProbeWire,
+    req: &HttpRequest,
+    forced: Option<&Forced>,
+) -> Result<String, ChekovError> {
+    let upstream_body = post_upstream(wire, req, forced)?;
+    wire.facade.translate_response(&upstream_body)
 }
 
 /// Route through the facade; the upstream path and the translated body.

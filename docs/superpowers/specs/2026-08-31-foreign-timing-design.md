@@ -136,6 +136,20 @@ stands):
   — their crossings still require timings and still fail per-row, but §7
   fixes their failure text. Extending them onto the timed path is a
   recorded follow-up riding the same mechanism.
+  SHIPPED 2026-09-01: `run_fixture` crosses via `pass.clock.cross`, exactly
+  like `run_throughput` — llama.cpp's buffered door untouched, a foreign
+  run's timed stream in its place, resume key matching `pass.clock
+  .transport()`. `run_agentic` keeps both doors' real transports (the
+  buffered/streamed comparison is the suite's own point); on a foreign run
+  its buffered door — which an MLX-style server answers fine but reports no
+  `timings` object for — crosses via a new untimed door
+  (`runner::cross_untimed`, a plain buffered POST through the translator
+  with no timings requirement) instead of failing `BenchNoTimings`, and its
+  row records the empty measure (`codebase::run::empty_measure()`) beside a
+  real grade rather than an invented zero `Timings`. The streamed door, and
+  the always-buffered grammar-forced probe on a foreign run, still derive
+  real timings via `cross_stream_timed`. `append_probe`'s outcome shape
+  widens from `(Timings, GradeRow)` to `(Option<Timings>, GradeRow)`.
 
 ## 6. Stamp, report, compare
 

@@ -253,12 +253,17 @@ overhead)`, printed only when it isn't `server-reported`; `--cross-runtime`
 now also permits `timing_source` to differ. The codebase mode's
 chat-completions FIM fallback rides the same timed crossing, so foreign
 codebase rows carry real timings too; the llama.cpp `/infill` arm and its
-timing path are untouched. Agentic and fixture suites are not yet on the
-timed path — their foreign-run row failures name the runtime and the exact
-reason instead of prescribing an engine rebuild, but riding the same timed
-mechanism is a recorded follow-up. Live-verified against mlx-lm 0.31.3
-serving Ornith-1.5-35B-A3B-MLX on this machine (see IDEAS.md); foreign
-agentic/fixture timing remains a follow-up.
+timing path are untouched. The fixture and agentic suites now run on a
+foreign runtime too. Fixture crossings ride the same clock as throughput:
+llama.cpp keeps its buffered door, a foreign run times the streamed one.
+Agentic keeps both its doors' real transports — buffered vs. streamed is
+the suite's own point — but on a foreign run the buffered door, which an
+MLX-style server answers fine yet reports no `timings` object for, crosses
+untimed instead of failing; its rows carry a real grade with **no speed
+numbers**, by design, rather than an invented zero. The streamed door still
+derives real timings. llama.cpp's agentic/fixture rows are unaffected on
+every path. Live-verified against mlx-lm 0.31.3 serving
+Ornith-1.5-35B-A3B-MLX on this machine (see IDEAS.md).
 
 ### The six doctor checks
 
