@@ -1331,19 +1331,21 @@ fn serves_line(spec: &RuntimeSpec, ids: &[String]) -> String {
     format!("chekov: runtime {} serves: {served}", spec.stored())
 }
 
-/// Foreign readiness: one `GET /v1/models`, the served ids printed, and a
-/// geometry chekov did not set left at zero rather than invented (§4, §5).
+/// Foreign readiness: one `GET /v1/models`, the served ids printed AND
+/// returned (the caller resolves which one is the subject — §4, §5, finding
+/// (a)), and a geometry chekov did not set left at zero rather than invented.
 fn foreign_props(
     ctx: &Ctx,
     upstream: &crate::core::proxy::serve::Upstream,
     spec: &RuntimeSpec,
-) -> Result<crate::core::bench::runner::PropsInfo, ChekovError> {
+) -> Result<(crate::core::bench::runner::PropsInfo, Vec<String>), ChekovError> {
     let ids = runtime::foreign_ready(ctx.http.as_ref(), &upstream.base_url)?;
     println!("{}", serves_line(spec, &ids));
-    Ok(crate::core::bench::runner::PropsInfo {
+    let props = crate::core::bench::runner::PropsInfo {
         n_ctx: 0,
         total_slots: 0,
-    })
+    };
+    Ok((props, ids))
 }
 
 /// The model name the request wire is built with — the resolved served id
@@ -1351,7 +1353,7 @@ fn foreign_props(
 /// the reverse: the registry name never reaches the request wire on a
 /// foreign run, and the served id never reaches the stamp (finding (a)).
 fn wire_model<'a>(served: Option<&'a str>, setup: &'a Candidate) -> &'a str {
-    unimplemented!("{served:?} {}", setup.eff.name)
+    served.unwrap_or(&setup.eff.name)
 }
 
 /// Which FIM transport the codebase suite rides: llama.cpp's own `/infill`,
@@ -1433,9 +1435,12 @@ fn measure_candidate(
         base_url: args.upstream.map_or_else(|| cfg.base_url(), str::to_owned),
         api_key: cfg.file.server.api_key.clone(),
     };
-    let props = match args.runtime.as_ref() {
-        Some(spec) => foreign_props(ctx, &upstream, spec)?,
-        None => candidate::ensure_ready(ctx, &upstream, setup)?,
+    let (props, served) = match args.runtime.as_ref() {
+        Some(spec) => {
+            let (props, ids) = foreign_props(ctx, &upstream, spec)?;
+            (props, Some(runtime::served_model(args.served_model, &ids)?))
+        }
+        None => (candidate::ensure_ready(ctx, &upstream, setup)?, None),
     };
     let plan: sweep::SweepPlan = (&cfg.file.bench).into();
     let head = build_head(ctx, setup, &head_inputs(props, &plan, inputs))?;
@@ -1449,7 +1454,7 @@ fn measure_candidate(
         &SuiteInputs {
             plan: &plan,
             upstream: &upstream,
-            model: &setup.eff.name,
+            model: wire_model(served.as_deref(), setup),
             fixture: args.fixture,
             suite: args.suite,
             prepared: inputs.prepared,

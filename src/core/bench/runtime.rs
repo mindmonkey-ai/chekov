@@ -101,7 +101,13 @@ pub fn foreign_ready(http: &dyn HttpClient, base_url: &str) -> Result<Vec<String
 /// A given `--served-model` wins verbatim; absent it, exactly one served id
 /// is unambiguous; zero or several is a refusal, never a guess.
 pub fn served_model(flag: Option<&str>, ids: &[String]) -> Result<String, ChekovError> {
-    unimplemented!("{flag:?} {ids:?}")
+    if let Some(name) = flag {
+        return Ok(name.to_owned());
+    }
+    match ids {
+        [only] => Ok(only.clone()),
+        _ => Err(ChekovError::RuntimeServedModelRequired { count: ids.len() }),
+    }
 }
 
 #[cfg(test)]
