@@ -69,6 +69,19 @@ pub fn process_alive(pid: i32) -> bool {
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
+/// True when `pid` is still RUNNING — a zombie reads as dead.
+///
+/// Unlike the signal-0 probe, a child of this process that has exited is
+/// reaped here (`waitpid` WNOHANG): bench and tune stay resident while their
+/// candidates die, and a zombie passes signal-0 forever. A pid that is not
+/// our child (ECHILD — e.g. a pidfile written by another chekov process)
+/// falls back to the signal-0 probe.
+#[must_use]
+pub fn child_alive(pid: i32) -> bool {
+    // TODO(red): not yet reap-aware — a zombie still reads as alive here.
+    process_alive(pid)
+}
+
 /// SIGTERM, wait up to `grace`, then SIGKILL with a warning to stderr.
 pub fn stop_pid(pid: i32, grace: Duration) -> Result<StopOutcome, ChekovError> {
     use nix::sys::signal::{Signal, kill};
@@ -223,7 +236,7 @@ pub fn run_foreground(
 mod tests {
     use std::time::Duration;
 
-    use super::{PidFile, StopOutcome, launch_args, process_alive, stop_pid};
+    use super::{PidFile, StopOutcome, child_alive, launch_args, process_alive, stop_pid};
     use crate::core::config::Config;
     use crate::core::registry::{ModelEntry, Registry};
 
@@ -273,6 +286,53 @@ mod tests {
         let own = i32::try_from(std::process::id()).expect("pid fits");
         assert!(process_alive(own));
         assert!(!process_alive(99_999_999));
+    }
+
+    #[test]
+    fn a_zombie_child_reads_as_dead() {
+        // `true` exits almost instantly; without a reap, the kernel keeps it
+        // as a zombie — signal-0 (`process_alive`) reports zombies as alive
+        // forever, which is exactly the bug: a candidate that died at load
+        // would poll as alive for the whole readiness budget.
+        let child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = i32::try_from(child.id()).expect("pid fits");
+        std::thread::sleep(Duration::from_millis(200)); // let it exit, unreaped
+        assert!(process_alive(pid), "a zombie still answers signal-0");
+        assert!(!child_alive(pid), "child_alive reaps it and reports dead");
+        assert!(
+            !process_alive(pid),
+            "once child_alive reaped it, signal-0 reports dead too"
+        );
+        drop(child); // already reaped above; Child::drop never waits (§ see spawn_daemon_with_env)
+    }
+
+    #[test]
+    fn a_foreign_pid_falls_back_to_signal_zero_without_panicking() {
+        // pid 1 is never a child of the test process — ECHILD must fall
+        // back to the signal-0 probe rather than panic.
+        assert_eq!(child_alive(1), process_alive(1));
+    }
+
+    #[test]
+    fn stop_reaps_a_cooperative_child_without_a_background_reaper() {
+        // Unlike `stop_terminates_a_cooperative_process` below, nothing here
+        // races a background `.wait()` — `stop_pid`'s own poll loop must
+        // reap the child itself, or the zombie both hangs onto the full
+        // grace period AND is misreported as having ignored SIGTERM.
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = i32::try_from(child.id()).expect("pid fits");
+        let outcome = stop_pid(pid, Duration::from_secs(5)).expect("stop");
+        assert_eq!(outcome, StopOutcome::Terminated);
+        assert!(
+            !process_alive(pid),
+            "stop_pid must reap the child itself, not leave a zombie behind"
+        );
+        drop(child); // already reaped by stop_pid's own poll loop
     }
 
     /// Reap `child` in the background so it never lingers as a zombie —
