@@ -92,10 +92,22 @@ winner — if any — becomes the incumbent for the next stage.
 
 | stage | flag rewritten on the incumbent argv | candidates (`[tune]` keys) | primary metric | why this metric |
 |---|---|---|---|---|
-| `fa` | `--flash-attn` | `flash_attn = ["on", "off"]` | decode | attention kernel choice moves per-token cost |
+| `fa` | `--flash-attn` | `flash_attn = ["on", "off"]` | decode | attention kernel choice moves per-token cost; `fa off` needs unquantized KV — an `off` candidate under a quantized-V incumbent is `Skipped("fa off requires unquantized KV — llama.cpp refuses the combination; skipped under a <v-cache> incumbent")` |
 | `kv` | `--cache-type-k` and `--cache-type-v` together | `cache_types = ["q8_0", "f16"]` | decode | cache width moves bytes read per token; `q8_0` needs FA on — a `q8_0` candidate under an FA-off incumbent is `Skipped("q8_0 KV needs flash attention on")` |
 | `batch` | `--batch-size` | `batch_sizes = [512, 1024, 2048, 4096]` | prefill | the logical batch bounds prompt processing |
 | `ubatch` | `--ubatch-size` | `ubatch_sizes = [256, 512, 1024, 2048]`, only values ≤ the incumbent batch | prefill | the physical batch is the Metal dispatch size |
+
+**The fa-off skip mirrors the kv-skip rule in the other direction (evidence 2026-09-01,
+IDEAS.md).** `chekov tune`'s own kv stage can leave the incumbent with a quantized V cache
+(`q8_0`, most commonly) once it wins; llama.cpp then refuses to start at all with
+`--flash-attn off`, exiting at load with "quantized V cache requires flash_attn to be
+enabled" — the engine names the V cache specifically, which is why the skip keys on
+`-ctv`/`--cache-type-v` (and would key on `-ctk` too if the engine ever required that
+instead — it currently does not). Like `kv_skip`, `fa_skip` runs before any spawn and costs
+nothing; also like `kv_skip`, it does not shrink `max_launches` or the printed estimate —
+`planned()` counts a stage's candidates against the argv the plan is drawn up with, not the
+incumbent that will actually be active once earlier stages have run, so a skip discovered at
+descent time is invisible to the upfront ceiling for both rules alike.
 
 Rewriting is by flag name: the incumbent's value for the flag (wherever it appears in the
 argv — `defaults.flags` or `extra_flags`; the engine's short spellings `-fa`, `-ctk`,

@@ -283,6 +283,27 @@ fn kv_skip(candidate: &tune::Candidate, incumbent: &[String]) -> Option<String> 
         .then(|| "q8_0 KV needs flash attention on".to_owned())
 }
 
+/// True for any V-cache spelling llama.cpp will refuse to pair with `fa
+/// off` — everything except absent/`f16`/`bf16`/`f32` (spec §4 mirror).
+fn quantized_v_cache(incumbent: &[String]) -> Option<String> {
+    let v_cache = tune::value_of(incumbent, tune::Flag::CacheTypeV)?;
+    (!matches!(v_cache.as_str(), "f16" | "bf16" | "f32")).then_some(v_cache)
+}
+
+/// The mirror of `kv_skip`: `fa off` needs unquantized KV, and llama.cpp
+/// exits at load naming the V cache when it is not — so under a quantized
+/// incumbent that trial is skipped before any spawn (evidence 2026-09-01,
+/// IDEAS.md; spec §4).
+fn fa_skip(candidate: &tune::Candidate, incumbent: &[String]) -> Option<String> {
+    let v_cache = quantized_v_cache(incumbent)?;
+    (candidate.stage == Stage::Fa && candidate.value == "off").then(|| {
+        format!(
+            "fa off requires unquantized KV — llama.cpp refuses the combination; \
+             skipped under a {v_cache} incumbent"
+        )
+    })
+}
+
 /// Who measured, and under what probe (spec §9's first line).
 fn header(record: &Record) -> String {
     let Record {
@@ -539,7 +560,8 @@ impl<'a> Session<'a> {
         candidate: tune::Candidate,
         incumbent: &Incumbent,
     ) -> Result<Completed, ChekovError> {
-        match kv_skip(&candidate, &incumbent.argv) {
+        match kv_skip(&candidate, &incumbent.argv).or_else(|| fa_skip(&candidate, &incumbent.argv))
+        {
             Some(reason) => Ok(Completed {
                 trial: TrialOutcome {
                     argv: candidate.argv.clone(),
@@ -1190,6 +1212,45 @@ mod tests {
             argv: vec![],
         };
         assert!(super::kv_skip(&batch_q8_0, &fa_off).is_none());
+    }
+
+    #[test]
+    fn fa_off_is_skipped_under_a_quantized_kv_incumbent_and_only_for_fa_candidates() {
+        let fa_off = Candidate {
+            stage: Stage::Fa,
+            value: "off".into(),
+            argv: vec![],
+        };
+        let reason = "fa off requires unquantized KV — llama.cpp refuses the combination; \
+                       skipped under a q8_0 incumbent";
+        let quantized_short = argv(&["-ctv", "q8_0"]);
+        assert_eq!(
+            super::fa_skip(&fa_off, &quantized_short).as_deref(),
+            Some(reason)
+        );
+        let quantized_long = argv(&["--cache-type-v", "q8_0"]);
+        assert_eq!(
+            super::fa_skip(&fa_off, &quantized_long).as_deref(),
+            Some(reason)
+        );
+
+        let f16 = argv(&["--cache-type-v", "f16"]);
+        assert!(super::fa_skip(&fa_off, &f16).is_none());
+        let absent = argv(&["--flash-attn", "on"]);
+        assert!(super::fa_skip(&fa_off, &absent).is_none());
+
+        let fa_on = Candidate {
+            stage: Stage::Fa,
+            value: "on".into(),
+            argv: vec![],
+        };
+        assert!(super::fa_skip(&fa_on, &quantized_short).is_none());
+        let kv_q8_0 = Candidate {
+            stage: Stage::Kv,
+            value: "q8_0".into(),
+            argv: vec![],
+        };
+        assert!(super::fa_skip(&kv_q8_0, &quantized_short).is_none());
     }
 
     #[test]

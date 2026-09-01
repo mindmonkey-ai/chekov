@@ -80,6 +80,31 @@ All notable changes to chekov are recorded here. The format follows
   registry name still names the run directory, the stamp's weights identity,
   and the report header.
 
+### Fixed
+- **A dead bench/tune candidate no longer reads as alive for the whole
+  readiness budget, and a cooperative teardown no longer burns the full
+  grace period on a corpse.** `spawn_daemon_with_env` never reaped its
+  child (correct for `chekov run`, where chekov exits and launchd adopts
+  it), so a candidate that died while loading became a zombie — and the
+  signal-0 liveness probe reports a zombie as alive forever. bench and tune
+  stay resident, so a candidate that died at load timed out after the full
+  600-poll readiness budget instead of reporting "died" in seconds, and
+  every teardown's SIGTERM looked "ignored" (the server was already dead,
+  but its zombie stayed visible), escalating to a SIGKILL that hit nothing.
+  `server::child_alive` reaps via `waitpid(WNOHANG)` before answering,
+  falling back to the signal-0 probe for a pid this process did not spawn
+  (e.g. a pidfile written by another chekov invocation), and now backs
+  `bench::runner::wait_ready`'s pid-watch and `server::stop_pid`'s
+  grace-period poll.
+- `tune`'s `fa` stage no longer launches a doomed `fa off` candidate under
+  a quantized KV incumbent (most commonly the `kv` stage's own `q8_0`
+  winner). `fa off` requires the incumbent's `-ctv`/`--cache-type-v` to be
+  unquantized, and llama.cpp exits at load naming exactly that when it
+  isn't ("quantized V cache requires flash_attn to be enabled"). The trial
+  is now skipped before any spawn, mirroring the existing kv-skip rule in
+  the other direction and naming the incumbent's actual V-cache spelling
+  in the reason.
+
 ### Changed
 - `[limits] wired_limit_mb` no longer has a built-in value. The old default,
   187000 MB, was one 256 GB desk's number: on any Mac below ~250 GB a fresh
