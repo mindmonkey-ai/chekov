@@ -557,3 +557,27 @@ even with the n-gram table on SSD — 96 GB+ machines) and GLM-5.3-Flash
 (320B-A18B; 1-bit ~93-100 GB, and still blocked upstream — see the BLOCKED
 entry above). Both remain Studio-class candidates only.
 Proposed 2026-08-30 — status: OPEN
+
+## tune's fa stage cannot measure `fa off` under quantized KV, and a dead candidate reads as a timeout (2026-09-01)
+Two full live tunes (ornith-1.5-35b-a3b 2026-08-30, qwen3.8-27b 2026-09-01,
+records in `tune/`) both marked the `fa off` trial degenerate "not ready
+after 600 polls". A `--stages fa` reproduction with the server log captured
+shows the real cause: llama.cpp exits at load with `quantized V cache
+requires flash_attn to be enabled` — the fa-off candidate keeps the
+incumbent's `--cache-type-v q8_0`, an engine-invalid combination, so with
+this machine's q8_0-KV defaults the fa stage can never measure `fa off` at
+all. Three fixes, in order of value: (a) tune should refuse-or-rewrite the
+combination — either skip the fa-off candidate with a named reason when the
+incumbent KV is quantized (the mirror of the spec's kv-skip rule) or trial
+it with f16 KV, a design choice to make deliberately; (b) the trial's
+server DIED at load yet tune burned the full 600-poll budget and reported a
+timeout — the runner's own creed says "a server that dies while loading
+must fail as 'died' (go read the log), never as a timeout", so the
+pid-watch is not seeing the daemonized child's death; (c) every teardown in
+both tunes — including the already-dead fa-off pid — logged "ignored
+SIGTERM for 20s — escalating to SIGKILL", so `stop_pid` is likely
+signalling a stale or wrong pid (probably the same daemonization gap as
+(b)). The degenerate rule kept both tunes honest, so nothing recorded is
+wrong — but ~5 min per tune is wasted and the reported reason mislabels a
+knowable refusal.
+Proposed 2026-09-01 — status: OPEN
