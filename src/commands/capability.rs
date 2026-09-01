@@ -1840,6 +1840,36 @@ struct AgenticPass<'a> {
     refusal: Option<String>,
 }
 
+/// One case's unconstrained crossing, and whether this run's clock could
+/// time it.
+///
+/// llama.cpp keeps real timings on both doors, exactly as today. A foreign
+/// run's streamed door derives real timings the same way the throughput
+/// probe does; its buffered door still crosses — grading needs only the
+/// translated body — but goes untimed rather than failing on the missing
+/// `timings` object, so its row honestly carries no measure (spec §5, §7.2).
+fn agentic_cross(
+    pass: &AgenticPass,
+    req: &crate::core::proxy::http::HttpRequest,
+) -> Result<(Option<crate::core::bench::runner::Timings>, String), ChekovError> {
+    use crate::core::bench::runner;
+    use crate::core::bench::store::Transport;
+    if pass.suite.clock == TimingClock::Server {
+        let artifact = runner::cross_via(pass.suite.wire, req, pass.transport)?;
+        return Ok((Some(artifact.timings), artifact.anthropic_body));
+    }
+    match pass.transport {
+        Transport::Streamed => {
+            let artifact = runner::cross_stream_timed(pass.suite.wire, req)?;
+            Ok((Some(artifact.timings), artifact.anthropic_body))
+        }
+        Transport::Buffered => {
+            let body = runner::cross_untimed(pass.suite.wire, req, None)?;
+            Ok((None, body))
+        }
+    }
+}
+
 /// One tool case: the unconstrained crossing through this door, and — for
 /// call cases, buffered only — the grammar-forced one. The gap between the
 /// two suites is the §7.2 point.
@@ -1849,20 +1879,15 @@ fn run_tool_case(
     case: &crate::core::bench::probeset::ToolCase,
 ) -> Result<(), ChekovError> {
     use crate::core::bench::store::{TaskKey, Transport};
-    use crate::core::bench::{grade, probes, probeset, runner};
+    use crate::core::bench::{grade, probes, probeset};
     let key = TaskKey {
         suite: "tool_emit",
         task_id: &case.id,
         transport: pass.transport,
     };
     if !sink.is_done(&key) {
-        let outcome = runner::cross_via(pass.suite.wire, &probes::tool_probe(case), pass.transport)
-            .map(|artifact| {
-                (
-                    artifact.timings,
-                    grade_row(grade::grade_tool_emit(&artifact.anthropic_body, case)),
-                )
-            });
+        let outcome = agentic_cross(pass, &probes::tool_probe(case))
+            .map(|(timings, body)| (timings, grade_row(grade::grade_tool_emit(&body, case))));
         append_probe(sink, key, row_outcome(outcome, pass.suite.runtime))?;
     }
     if case.expect != probeset::Expect::Call || pass.transport != Transport::Buffered {
@@ -1877,7 +1902,7 @@ fn run_instruction_case(
     case: &crate::core::bench::probeset::InstructionCase,
 ) -> Result<(), ChekovError> {
     use crate::core::bench::store::TaskKey;
-    use crate::core::bench::{grade, probes, runner};
+    use crate::core::bench::{grade, probes};
     let key = TaskKey {
         suite: "instruction",
         task_id: &case.id,
@@ -1886,14 +1911,9 @@ fn run_instruction_case(
     if sink.is_done(&key) {
         return Ok(());
     }
-    let outcome = runner::cross_via(
-        pass.suite.wire,
-        &probes::instruction_probe(case),
-        pass.transport,
-    )
-    .map(|artifact| {
-        let (strict, loose) = grade::grade_instruction(&artifact.anthropic_body, case);
-        (artifact.timings, instruction_row(strict, &loose))
+    let outcome = agentic_cross(pass, &probes::instruction_probe(case)).map(|(timings, body)| {
+        let (strict, loose) = grade::grade_instruction(&body, case);
+        (timings, instruction_row(strict, &loose))
     });
     append_probe(sink, key, row_outcome(outcome, pass.suite.runtime))
 }
@@ -1904,13 +1924,35 @@ fn run_instruction_case(
 /// not the model answering badly (grading failures arrive as `Ok`) — so it is
 /// recorded unavailable, and every later case is too rather than firing more
 /// doomed requests.
+/// The forced case's crossing, honoring the same untimed door as the
+/// unconstrained pass: llama.cpp keeps `cross_forced`'s real timings, and a
+/// foreign run's always-buffered forced probe rides `cross_untimed` instead
+/// of failing on the missing `timings` object (spec §5, §7.2).
+fn forced_cross(
+    pass: &AgenticPass,
+    req: &crate::core::proxy::http::HttpRequest,
+    schema: &serde_json::Value,
+) -> Result<(Option<crate::core::bench::runner::Timings>, String), ChekovError> {
+    use crate::core::bench::runner;
+    if pass.suite.clock == TimingClock::Server {
+        let artifact = runner::cross_forced(pass.suite.wire, req, schema)?;
+        return Ok((Some(artifact.timings), artifact.anthropic_body));
+    }
+    let forced = runner::Forced {
+        schema,
+        reasoning_effort: None,
+    };
+    let body = runner::cross_untimed(pass.suite.wire, req, Some(&forced))?;
+    Ok((None, body))
+}
+
 fn run_forced_case(
     sink: &mut TaskSink,
     forced: &mut AgenticPass,
     case: &crate::core::bench::probeset::ToolCase,
 ) -> Result<(), ChekovError> {
     use crate::core::bench::store::TaskKey;
-    use crate::core::bench::{grade, probes, probeset, runner};
+    use crate::core::bench::{grade, probes, probeset};
     let forced_id = format!("gg-{}", case.id);
     if sink.is_done(&TaskKey::buffered("grammar_gap", &forced_id)) {
         return Ok(());
@@ -1919,14 +1961,14 @@ fn run_forced_case(
         return append_unavailable(sink, &forced_id, reason);
     }
     let schema = probeset::forced_schema(case);
-    let crossed = runner::cross_forced(forced.suite.wire, &probes::forced_probe(case), &schema);
+    let crossed = forced_cross(forced, &probes::forced_probe(case), &schema);
     match row_outcome(crossed, forced.suite.runtime) {
-        Ok(artifact) => {
-            let verdict = grade_row(grade::grade_forced(&artifact.anthropic_body, case));
+        Ok((timings, body)) => {
+            let verdict = grade_row(grade::grade_forced(&body, case));
             append_probe(
                 sink,
                 TaskKey::buffered("grammar_gap", &forced_id),
-                Ok((artifact.timings, verdict)),
+                Ok((timings, verdict)),
             )
         }
         Err(e) => {
@@ -1988,6 +2030,30 @@ fn instruction_row(
     }
 }
 
+/// One crossing outcome reduced to the row it writes: real timings become a
+/// real measure, an honestly untimed success becomes the empty measure —
+/// never a zero-invented `Timings` — and a failure becomes `failed_probe`'s
+/// unavailable verdict (spec §7.2).
+fn outcome_row(
+    outcome: Result<
+        (
+            Option<crate::core::bench::runner::Timings>,
+            crate::core::bench::store::GradeRow,
+        ),
+        ChekovError,
+    >,
+) -> (
+    crate::core::bench::store::Measure,
+    crate::core::bench::store::GradeRow,
+) {
+    use crate::core::bench::codebase::run;
+    match outcome {
+        Ok((Some(timings), verdict)) => (run::probe_measure(&timings), verdict),
+        Ok((None, verdict)) => (run::empty_measure(), verdict),
+        Err(e) => failed_probe(&e),
+    }
+}
+
 /// Append one graded probe row; a crossing failure records a FAIL with its
 /// reason and no invented measurement.
 fn append_probe(
@@ -1995,20 +2061,14 @@ fn append_probe(
     key: crate::core::bench::store::TaskKey,
     outcome: Result<
         (
-            crate::core::bench::runner::Timings,
+            Option<crate::core::bench::runner::Timings>,
             crate::core::bench::store::GradeRow,
         ),
         ChekovError,
     >,
 ) -> Result<(), ChekovError> {
     use crate::core::bench::store;
-    let (measure, verdict) = match outcome {
-        Ok((timings, verdict)) => (
-            crate::core::bench::codebase::run::probe_measure(&timings),
-            verdict,
-        ),
-        Err(e) => failed_probe(&e),
-    };
+    let (measure, verdict) = outcome_row(outcome);
     sink.writer.append(store::Task {
         suite: key.suite.into(),
         task_id: key.task_id.into(),
@@ -2109,35 +2169,43 @@ fn run_throughput(
     Ok(())
 }
 
-/// Cross and grade every fixture probe. A crossing failure records a FAIL
-/// with its reason — a broken exchange must never look like an empty reply.
+/// Cross and grade every fixture probe under this run's clock — llama.cpp's
+/// buffered door unchanged, a foreign run's timed stream in its place,
+/// exactly like `run_throughput` selects (spec §5, §7). A crossing failure
+/// records a FAIL with its reason — a broken exchange must never look like
+/// an empty reply.
 fn run_fixture(
     sink: &mut TaskSink,
     pass: &SuitePass,
     path: &std::path::Path,
 ) -> Result<(), ChekovError> {
     use crate::core::bench::store::TaskKey;
-    use crate::core::bench::{fixture, grade, probes, runner};
+    use crate::core::bench::{fixture, grade, probes};
     let loaded = fixture::load(path)?;
+    let transport = pass.clock.transport();
     for probe in &loaded.probes {
-        if sink.is_done(&TaskKey::buffered("fixture", &probe.id)) {
+        let key = TaskKey {
+            suite: "fixture",
+            task_id: &probe.id,
+            transport,
+        };
+        if sink.is_done(&key) {
             eprintln!(
                 "chekov: fixture {} already recorded — skipped (--resume)",
                 probe.id
             );
             continue;
         }
-        let outcome = runner::cross(pass.wire, &probes::fixture_probe(probe)).map(|artifact| {
-            (
-                artifact.timings,
-                grade_row(grade::grade(&artifact.anthropic_body, probe)),
-            )
-        });
-        append_probe(
-            sink,
-            TaskKey::buffered("fixture", &probe.id),
-            row_outcome(outcome, pass.runtime),
-        )?;
+        let outcome = pass
+            .clock
+            .cross(pass.wire, &probes::fixture_probe(probe))
+            .map(|artifact| {
+                (
+                    Some(artifact.timings),
+                    grade_row(grade::grade(&artifact.anthropic_body, probe)),
+                )
+            });
+        append_probe(sink, key, row_outcome(outcome, pass.runtime))?;
     }
     Ok(())
 }
