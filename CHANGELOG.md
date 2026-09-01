@@ -63,12 +63,25 @@ All notable changes to chekov are recorded here. The format follows
   chekov-streamed (client wall-clock over SSE; includes wire overhead)` only
   when it isn't `server-reported`. `capability compare --cross-runtime` now
   also permits `timing_source` to differ (the allow-list grows to 12).
-  Agentic and fixture suites are not yet on the timed path — their
-  foreign-run row failures name the runtime and the exact reason instead of
-  `BenchNoTimings`'s engine-rebuild advice, but extending them onto the same
-  streamed mechanism is a recorded follow-up. Live verification against a
-  real MLX/MTPLX server is approval-gated and has not run yet; the plumbing
-  is unit-tested against fakes on the existing `HttpClient` seam.
+  Live verification against a real MLX/MTPLX server is approval-gated and
+  has not run yet; the plumbing is unit-tested against fakes on the existing
+  `HttpClient` seam.
+- The fixture and agentic suites now ride the same foreign-timing clock as
+  throughput. `run_fixture` crosses via `pass.clock.cross` — llama.cpp's
+  buffered door unchanged, a foreign run's timed stream in its place — and
+  its resume key now matches `pass.clock.transport()` instead of a
+  hard-coded buffered one. `run_agentic` keeps both doors' real transports
+  (comparing them is the suite's own point), but on a foreign run the
+  buffered door — where an MLX-style server answers buffered chat fine yet
+  reports no llama.cpp `timings` object — now crosses via a new
+  `runner::cross_untimed` instead of failing `BenchNoTimings`; its row
+  records the empty measure (`codebase::run::empty_measure()`) beside a real
+  grade, by design, rather than an invented zero `Timings`. The streamed
+  door, and the always-buffered grammar-forced probe on a foreign run, still
+  derive real timings via `cross_stream_timed`. `append_probe`'s outcome
+  shape widens from `(Timings, GradeRow)` to `(Option<Timings>, GradeRow)`;
+  llama.cpp's agentic/fixture rows are byte-for-byte unchanged on every
+  path.
 - `capability bench NAME --runtime ... --served-model <id>` names which of a
   foreign server's served ids is the bench subject on the request wire's
   OpenAI `model` field — chekov's own registry name never reaches it on a

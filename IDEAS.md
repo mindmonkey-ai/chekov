@@ -475,8 +475,17 @@ window) still fails loudly per probe, naming the runtime and the exact
 reason. `Stamp` gains `timing_source` (`server-reported` default; every run
 already on disk reads unaffected), the report prints a `timing source:` line
 only when it isn't the default, and `--cross-runtime` permits it to differ.
-Remaining: agentic and fixture suites are still not on the timed path
-(recorded follow-up riding the same streamed mechanism).
+SHIPPED 2026-09-01: agentic and fixture suites now ride the same clock.
+Fixture crosses via `pass.clock.cross` exactly like throughput — llama.cpp's
+buffered door unchanged, a foreign run timed over the stream. Agentic keeps
+both doors' real transports (comparing them is the suite's point), but a
+foreign run's buffered door — where an MLX-style server answers chat fine
+yet reports no `timings` object — now rides a new untimed crossing
+(`runner::cross_untimed`) instead of failing `BenchNoTimings`; its row
+records the empty measure (`codebase::run::empty_measure()`) beside a real
+grade, never an invented zero. The streamed door, and the grammar-forced
+probe on a foreign run, still derive real timings via `cross_stream_timed`.
+llama.cpp's agentic/fixture rows are byte-for-byte unchanged.
 LIVE VERIFICATION DONE 2026-08-31 against mlx-lm 0.31.3 serving
 ornith-ai/Ornith-1.5-35B-A3B-MLX (bf16) on this machine: stream-timed
 throughput measured 55.5/56.0/54.4 tok/s decode at depths 1024/4096/16384
@@ -502,8 +511,9 @@ section now says so — still owed: growing the chat-FIM arm its own
 thinking-budget strategy instead of relying on the operator to disable it.
 Proposed 2026-08-30 — status: SHIPPED; foreign-timing measurement SHIPPED
 2026-08-31; live MLX verification DONE 2026-08-31; finding (a) SHIPPED and
-finding (b) documented 2026-08-31 — remaining: foreign agentic/fixture
-timing, a thinking-budget strategy for the chat-FIM arm (finding (b))
+finding (b) documented 2026-08-31; foreign agentic/fixture timing SHIPPED
+2026-09-01 — remaining: a thinking-budget strategy for the chat-FIM arm
+(finding (b))
 
 ## MTP-head awareness: `explain` reports it, bench measures it (2026-08-30)
 Qwen 3.5+/3.8, Gemma 4 and GLM-5.x ship native MTP heads in their weights
