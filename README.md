@@ -256,9 +256,9 @@ codebase rows carry real timings too; the llama.cpp `/infill` arm and its
 timing path are untouched. Agentic and fixture suites are not yet on the
 timed path — their foreign-run row failures name the runtime and the exact
 reason instead of prescribing an engine rebuild, but riding the same timed
-mechanism is a recorded follow-up. No live foreign server has been benched
-yet; the plumbing ships unit-tested against fakes on the existing
-`HttpClient` seam.
+mechanism is a recorded follow-up. Live-verified against mlx-lm 0.31.3
+serving Ornith-1.5-35B-A3B-MLX on this machine (see IDEAS.md); foreign
+agentic/fixture timing remains a follow-up.
 
 ### The six doctor checks
 
