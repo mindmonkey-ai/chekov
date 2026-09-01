@@ -906,6 +906,29 @@ mod tests {
     }
 
     #[test]
+    fn a_stage_line_renders_the_fa_off_quantized_kv_skip() {
+        let skipped = super::stage_line(
+            &super::CandidateLabel {
+                stage: super::Stage::Fa,
+                value: "off",
+            },
+            &super::Outcome::Skipped(
+                "fa off requires unquantized KV — llama.cpp refuses the combination; \
+                 skipped under a q8_0 incumbent"
+                    .into(),
+            ),
+            &super::LineContext {
+                verdict: None,
+                dirty: None,
+            },
+        );
+        assert_eq!(
+            skipped,
+            "  fa         off      skipped: fa off requires unquantized KV — llama.cpp refuses the combination; skipped under a q8_0 incumbent"
+        );
+    }
+
+    #[test]
     fn a_stage_line_names_the_degenerate_branch() {
         let degenerate = super::stage_line(
             &super::CandidateLabel {
