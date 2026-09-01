@@ -580,4 +580,24 @@ signalling a stale or wrong pid (probably the same daemonization gap as
 (b)). The degenerate rule kept both tunes honest, so nothing recorded is
 wrong — but ~5 min per tune is wasted and the reported reason mislabels a
 knowable refusal.
-Proposed 2026-09-01 — status: OPEN
+
+**(a) SHIPPED 2026-08-31** — `fa_skip` (src/commands/tune.rs, mirroring
+`kv_skip`) skips the `fa off` candidate before any spawn when the
+incumbent's V-cache (`-ctv`/`--cache-type-v`) is quantized, naming the
+incumbent's actual spelling in the reason. Not (b) as speculated: never
+trials with f16 KV substituted, since that would silently measure a
+different configuration than the one the descent is actually running.
+
+**(b) and (c) SHIPPED 2026-08-31** — root cause was neither pid-watch nor
+`stop_pid` picking the wrong pid: `spawn_daemon_with_env` spawns
+llama-server as a direct child and never reaps it, so a dead child sits as
+a ZOMBIE, and a zombie passes the signal-0 probe (`process_alive`)
+forever — for `chekov run` this is correct (chekov exits and launchd
+adopts the child), but bench/tune stay resident and never see the death.
+`server::child_alive` reaps via `waitpid(WNOHANG)` before answering (with
+a signal-0 fallback for a pid this process did not spawn), and now backs
+both `bench::runner::wait_ready`'s readiness poll and `server::stop_pid`'s
+grace-period poll — a candidate that dies at load now reports "died" in
+seconds instead of after 600 polls, and a cooperative teardown reports
+`Terminated` promptly instead of burning the full 20s grace on a corpse.
+Proposed 2026-09-01 — status: (a)/(b)/(c) SHIPPED 2026-08-31
