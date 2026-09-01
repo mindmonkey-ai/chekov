@@ -232,6 +232,13 @@ pub enum ChekovError {
     RuntimeNeedsRunningServer { runtime: String },
 
     #[error(
+        "--served-model is required: the foreign server lists {count} model \
+         id(s) — name the one to bench (chekov addresses a foreign server by \
+         its served id, never by guessing)"
+    )]
+    RuntimeServedModelRequired { count: usize },
+
+    #[error(
         "the server is running '{running}' but bench was asked for '{resolved}' \
          — bench never stops a server it did not start, and never records one \
          model's numbers under another's name; `chekov stop` first, or bench \

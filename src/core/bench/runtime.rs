@@ -94,6 +94,16 @@ pub fn foreign_ready(http: &dyn HttpClient, base_url: &str) -> Result<Vec<String
         .collect())
 }
 
+/// Which served id names the subject on the wire (finding (a) —
+/// chekov addresses a foreign server by what it serves, never by its own
+/// registry name, which mlx-lm routes on and 404s trying to download).
+///
+/// A given `--served-model` wins verbatim; absent it, exactly one served id
+/// is unambiguous; zero or several is a refusal, never a guess.
+pub fn served_model(flag: Option<&str>, ids: &[String]) -> Result<String, ChekovError> {
+    unimplemented!("{flag:?} {ids:?}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::RuntimeSpec;
@@ -187,6 +197,54 @@ mod tests {
             matches!(&err, ChekovError::EndpointDown { url, reason }
                 if url == "http://h:1/v1/models" && reason.contains("connection refused")),
             "{err}"
+        );
+    }
+
+    fn ids(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_given_flag_wins_over_a_single_different_served_id() {
+        let served = ids(&["other-id"]);
+        assert_eq!(
+            super::served_model(Some("wanted-id"), &served).unwrap(),
+            "wanted-id"
+        );
+    }
+
+    #[test]
+    fn a_single_served_id_is_auto_selected_without_a_flag() {
+        let served = ids(&["only-id"]);
+        assert_eq!(super::served_model(None, &served).unwrap(), "only-id");
+    }
+
+    #[test]
+    fn zero_served_ids_without_a_flag_refuses_naming_the_count() {
+        let err = super::served_model(None, &[]).unwrap_err();
+        assert!(
+            matches!(err, ChekovError::RuntimeServedModelRequired { count: 0 }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("0 model id(s)"), "{err}");
+    }
+
+    #[test]
+    fn two_served_ids_without_a_flag_refuses_naming_both() {
+        let served = ids(&["a", "b"]);
+        let err = super::served_model(None, &served).unwrap_err();
+        assert!(
+            matches!(err, ChekovError::RuntimeServedModelRequired { count: 2 }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_flag_wins_even_over_many_served_ids() {
+        let served = ids(&["a", "b", "c"]);
+        assert_eq!(
+            super::served_model(Some("wanted-id"), &served).unwrap(),
+            "wanted-id"
         );
     }
 }

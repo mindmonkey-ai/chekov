@@ -153,6 +153,13 @@ pub struct BenchOpts {
     /// Base URL of the foreign server (default: the configured endpoint).
     #[arg(long, requires = "runtime")]
     pub upstream: Option<String>,
+    /// Which served id names the subject on the request wire (default: the
+    /// single id `/v1/models` lists; required when it lists zero or several).
+    /// chekov addresses a foreign server by what it serves, never by its own
+    /// registry name — mlx-lm routes on the `model` field and 404s trying to
+    /// download chekov's name (finding (a)).
+    #[arg(long, requires = "runtime")]
+    pub served_model: Option<String>,
 }
 
 /// Human-readable scan. Pure so tests pin the contract.
@@ -895,6 +902,9 @@ struct BenchArgs<'a> {
     runtime: Option<RuntimeSpec>,
     /// `--upstream`, overriding the configured endpoint for this run only.
     upstream: Option<&'a str>,
+    /// `--served-model`, naming which of the foreign server's served ids is
+    /// the subject (spec finding (a)).
+    served_model: Option<&'a str>,
 }
 
 /// The parsed invocation. Fallible where `From` could not be: a malformed
@@ -917,6 +927,7 @@ fn bench_args(opts: &BenchOpts) -> Result<BenchArgs<'_>, ChekovError> {
             .map(RuntimeSpec::parse)
             .transpose()?,
         upstream: opts.upstream.as_deref(),
+        served_model: opts.served_model.as_deref(),
     })
 }
 
@@ -1333,6 +1344,14 @@ fn foreign_props(
         n_ctx: 0,
         total_slots: 0,
     })
+}
+
+/// The model name the request wire is built with — the resolved served id
+/// on a foreign run, chekov's own registry name on every other run. Never
+/// the reverse: the registry name never reaches the request wire on a
+/// foreign run, and the served id never reaches the stamp (finding (a)).
+fn wire_model<'a>(served: Option<&'a str>, setup: &'a Candidate) -> &'a str {
+    unimplemented!("{served:?} {}", setup.eff.name)
 }
 
 /// Which FIM transport the codebase suite rides: llama.cpp's own `/infill`,
@@ -2853,6 +2872,53 @@ mod tests {
             super::bench_args(&bad.opts),
             Err(ChekovError::RuntimeFlagInvalid { .. })
         ));
+    }
+
+    /// `--served-model` is meaningless without a declared runtime, and
+    /// parses alongside it (spec finding (a)).
+    #[test]
+    fn served_model_parses_with_runtime_and_is_refused_alone() {
+        use clap::Parser;
+
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            opts: super::BenchOpts,
+        }
+
+        let w = Wrap::parse_from([
+            "cap",
+            "--runtime",
+            "mtplx@0.4.1",
+            "--served-model",
+            "served-id",
+        ]);
+        assert_eq!(w.opts.served_model.as_deref(), Some("served-id"));
+        let args = super::bench_args(&w.opts).expect("well-formed");
+        assert_eq!(args.served_model, Some("served-id"));
+
+        assert!(
+            Wrap::try_parse_from(["cap", "--served-model", "served-id"]).is_err(),
+            "--served-model alone declares no runtime"
+        );
+    }
+
+    /// The binding fact: a foreign run's facade is built with the resolved
+    /// served id, never the registry name, while the run/stamp naming keeps
+    /// the registry name (finding (a)).
+    #[test]
+    fn the_wire_model_is_the_served_id_on_a_foreign_run_and_the_registry_name_otherwise() {
+        let setup = foreign_candidate();
+        assert_eq!(
+            super::wire_model(Some("served-id"), &setup),
+            "served-id",
+            "the registry name never reaches the request wire on a foreign run"
+        );
+        assert_eq!(
+            super::wire_model(None, &setup),
+            "mtplx-model",
+            "with nothing served to resolve, the registry name is what's left"
+        );
     }
 
     /// The foreign path never launches the subject, so it can only ever
