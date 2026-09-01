@@ -1193,6 +1193,39 @@ mod tests {
     }
 
     #[test]
+    fn fa_off_is_skipped_under_a_quantized_kv_incumbent_and_only_for_fa_candidates() {
+        let fa_off = Candidate {
+            stage: Stage::Fa,
+            value: "off".into(),
+            argv: vec![],
+        };
+        let reason = "fa off requires unquantized KV — llama.cpp refuses the combination; \
+                       skipped under a q8_0 incumbent";
+        let quantized_short = argv(&["-ctv", "q8_0"]);
+        assert_eq!(super::fa_skip(&fa_off, &quantized_short).as_deref(), Some(reason));
+        let quantized_long = argv(&["--cache-type-v", "q8_0"]);
+        assert_eq!(super::fa_skip(&fa_off, &quantized_long).as_deref(), Some(reason));
+
+        let f16 = argv(&["--cache-type-v", "f16"]);
+        assert!(super::fa_skip(&fa_off, &f16).is_none());
+        let absent = argv(&["--flash-attn", "on"]);
+        assert!(super::fa_skip(&fa_off, &absent).is_none());
+
+        let fa_on = Candidate {
+            stage: Stage::Fa,
+            value: "on".into(),
+            argv: vec![],
+        };
+        assert!(super::fa_skip(&fa_on, &quantized_short).is_none());
+        let kv_q8_0 = Candidate {
+            stage: Stage::Kv,
+            value: "q8_0".into(),
+            argv: vec![],
+        };
+        assert!(super::fa_skip(&kv_q8_0, &quantized_short).is_none());
+    }
+
+    #[test]
     fn settle_threads_the_winner_into_the_record_only_when_it_beats_the_baseline() {
         let ctx = scratch_ctx("chekov-test-tune-settle");
         let tune = TuneSection::default();
