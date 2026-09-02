@@ -1,4 +1,4 @@
-//! The 23-field configuration stamp (spec §7.4).
+//! The 25-field configuration stamp (spec §7.4).
 //!
 //! llama.cpp does not guarantee bit-identical results across configurations:
 //! GPU reduction kernels pick different accumulation orders and float
@@ -42,6 +42,15 @@ pub struct Stamp {
     pub type_k: String,
     pub type_v: String,
     pub flash_attn: String,
+    /// `--spec-type` as the argv said it, "engine-default" when absent (no
+    /// speculative decoding), "unmanaged" on a foreign run. A run decoded with
+    /// the MTP head and a run decoded without it are different environments.
+    #[serde(default = "engine_default_flag")]
+    pub spec_type: String,
+    /// `--spec-draft-n-max` likewise — only meaningful beside a draft
+    /// `spec_type`, recorded regardless so two runs never differ silently.
+    #[serde(default = "engine_default_flag")]
+    pub spec_draft_n_max: String,
     /// Whether `--allow-exec` was given. Runs that executed the repository and
     /// runs that only read it are not the same environment: tiers 6-7 exist in
     /// one and are absent from the other, so `compare` refuses across it.
@@ -118,10 +127,75 @@ pub const TIMING_SERVER: &str = "server-reported";
 /// reply from a foreign runtime that reports no `timings` object.
 pub const TIMING_CHEKOV_STREAMED: &str = "chekov-streamed";
 
+/// A flag the argv does not set: the engine's own default applies, whatever
+/// it is under this engine commit — comparable, never invented.
+pub const FLAG_ENGINE_DEFAULT: &str = "engine-default";
+/// A flag on a server chekov did not launch: not observed, not invented — a
+/// third spelling distinct from "engine-default" (foreign-runtime spec §5).
+pub const FLAG_UNMANAGED: &str = "unmanaged";
+
+/// A stamp or record written before the speculative fields existed was
+/// decoded without speculation.
+fn engine_default_flag() -> String {
+    FLAG_ENGINE_DEFAULT.to_owned()
+}
+
+/// The eight flag-sourced values a launch argv pins.
+///
+/// Read the same way for a bench stamp and a tune trial so the two describe a
+/// configuration in the same words (tune spec-stage design §6). The two
+/// speculative fields default so every tune record under `tune/` written
+/// before them still loads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchFlags {
+    pub kv_unified: String,
+    pub n_batch: String,
+    pub n_ubatch: String,
+    pub type_k: String,
+    pub type_v: String,
+    pub flash_attn: String,
+    #[serde(default = "engine_default_flag")]
+    pub spec_type: String,
+    #[serde(default = "engine_default_flag")]
+    pub spec_draft_n_max: String,
+}
+
+/// Read the launch flags off an argv, each spelling covered.
+#[must_use]
+pub fn launch_flags(argv: &[String]) -> LaunchFlags {
+    LaunchFlags {
+        kv_unified: flag_value_either(argv, &["-kvu", "--kv-unified"]),
+        n_batch: flag_value_either(argv, &["-b", "--batch-size"]),
+        n_ubatch: flag_value_either(argv, &["-ub", "--ubatch-size"]),
+        type_k: flag_value_either(argv, &["-ctk", "--cache-type-k"]),
+        type_v: flag_value_either(argv, &["-ctv", "--cache-type-v"]),
+        flash_attn: flag_value_either(argv, &["-fa", "--flash-attn"]),
+        spec_type: flag_value_either(argv, &["--spec-type"]),
+        spec_draft_n_max: flag_value_either(argv, &["--spec-draft-n-max"]),
+    }
+}
+
+/// Every launch flag of a foreign server, all eight unobservable.
+#[must_use]
+pub fn unmanaged_flags() -> LaunchFlags {
+    let sentinel = || FLAG_UNMANAGED.to_owned();
+    LaunchFlags {
+        kv_unified: sentinel(),
+        n_batch: sentinel(),
+        n_ubatch: sentinel(),
+        type_k: sentinel(),
+        type_v: sentinel(),
+        flash_attn: sentinel(),
+        spec_type: sentinel(),
+        spec_draft_n_max: sentinel(),
+    }
+}
+
 /// The FIRST differing field name, in declaration order — or `None` if equal.
 #[must_use]
 pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
-    let pairs: [(&'static str, bool); 23] = [
+    let pairs: [(&'static str, bool); 25] = [
         ("machine_id", a.machine_id != b.machine_id),
         ("runtime", a.runtime != b.runtime),
         ("timing_source", a.timing_source != b.timing_source),
@@ -139,6 +213,8 @@ pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
         ("type_k", a.type_k != b.type_k),
         ("type_v", a.type_v != b.type_v),
         ("flash_attn", a.flash_attn != b.flash_attn),
+        ("spec_type", a.spec_type != b.spec_type),
+        ("spec_draft_n_max", a.spec_draft_n_max != b.spec_draft_n_max),
         ("allow_exec", a.allow_exec != b.allow_exec),
         ("cargo_version", a.cargo_version != b.cargo_version),
         ("exec_target", a.exec_target != b.exec_target),
@@ -181,7 +257,7 @@ pub fn mismatch_error(a: &Stamp, b: &Stamp) -> Option<crate::error::ChekovError>
 #[must_use]
 pub fn flag_value(args: &[String], flag: &str) -> String {
     let Some(position) = args.iter().position(|a| a == flag) else {
-        return "engine-default".to_owned();
+        return FLAG_ENGINE_DEFAULT.to_owned();
     };
     match args.get(position + 1) {
         Some(next) if !next.starts_with('-') => next.clone(),
@@ -195,8 +271,8 @@ pub fn flag_value_either(args: &[String], names: &[&str]) -> String {
     names
         .iter()
         .map(|name| flag_value(args, name))
-        .find(|value| value != "engine-default")
-        .unwrap_or_else(|| "engine-default".to_owned())
+        .find(|value| value != FLAG_ENGINE_DEFAULT)
+        .unwrap_or_else(|| FLAG_ENGINE_DEFAULT.to_owned())
 }
 
 #[cfg(test)]
@@ -222,6 +298,8 @@ mod tests {
             type_k: "q8_0".into(),
             type_v: "q8_0".into(),
             flash_attn: "on".into(),
+            spec_type: "engine-default".into(),
+            spec_draft_n_max: "engine-default".into(),
             allow_exec: false,
             cargo_version: None,
             exec_target: "none".into(),
@@ -432,26 +510,15 @@ mod tests {
         assert_eq!(parsed.spec_draft_n_max, "engine-default");
     }
 
-    /// One reader for the eight flag-sourced values, each spelling covered;
-    /// the foreign sentinel is eight of the same word (spec §6).
+    /// One reader for the eight flag-sourced values, each spelling covered
+    /// (spec §6).
     #[test]
-    fn launch_flags_read_all_eight_and_unmanaged_is_eight_sentinels() {
-        let argv: Vec<String> = [
-            "-fa",
-            "on",
-            "--cache-type-k",
-            "q8_0",
-            "-ctv",
-            "q8_0",
-            "-b",
-            "4096",
-            "--spec-type",
-            "draft-mtp",
-            "--spec-draft-n-max",
-            "1",
-        ]
-        .map(String::from)
-        .to_vec();
+    fn launch_flags_read_all_eight() {
+        let argv: Vec<String> =
+            "-fa on --cache-type-k q8_0 -ctv q8_0 -b 4096 --spec-type draft-mtp --spec-draft-n-max 1"
+                .split(' ')
+                .map(String::from)
+                .collect();
         let flags = launch_flags(&argv);
         assert_eq!(
             (
@@ -477,6 +544,12 @@ mod tests {
         );
         let plain = launch_flags(&[]);
         assert_eq!(plain.spec_type, "engine-default");
+    }
+
+    /// The foreign sentinel is eight of the same word, and a six-field record
+    /// from before the speculative fields still loads (spec §6).
+    #[test]
+    fn unmanaged_is_eight_sentinels_and_a_six_field_record_loads() {
         let sentinel = unmanaged_flags();
         for value in [
             &sentinel.kv_unified,

@@ -416,7 +416,7 @@ fn trial_row(trial: &TrialOutcome, verdict: Option<&Verdict>) -> Trial {
             .map_or("baseline", |p| p.stage.label())
             .to_owned(),
         value: trial.picked.as_ref().map(|p| p.value.clone()),
-        stamp: tune::sextet(&trial.argv),
+        stamp: crate::core::bench::stamp::launch_flags(&trial.argv),
         argv: trial.argv.clone(),
         outcome: outcome.to_owned(),
         decode: measured.map(|m| m.decode.clone()),

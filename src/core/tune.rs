@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::bench::stamp::flag_value_either;
 use crate::core::bench::sweep::DepthResult;
 use crate::core::clock::utc_compact_now;
 use crate::core::config::TuneSection;
@@ -485,33 +484,6 @@ pub fn thermal_note(before: Option<u32>, after: Option<u32>) -> Option<u32> {
         .min()
 }
 
-/// The bench stamp's flag sextet, read straight off a trial's argv so a
-/// tune trial and a bench run describe a configuration in the same words.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FlagSextet {
-    pub kv_unified: String,
-    pub n_batch: String,
-    pub n_ubatch: String,
-    pub type_k: String,
-    pub type_v: String,
-    pub flash_attn: String,
-}
-
-/// Read the flag sextet off a launch argv (spec §8 — same name pairs as
-/// `build_head`).
-#[must_use]
-pub fn sextet(argv: &[String]) -> FlagSextet {
-    FlagSextet {
-        kv_unified: flag_value_either(argv, &["-kvu", "--kv-unified"]),
-        n_batch: flag_value_either(argv, &["-b", "--batch-size"]),
-        n_ubatch: flag_value_either(argv, &["-ub", "--ubatch-size"]),
-        type_k: flag_value_either(argv, &["-ctk", "--cache-type-k"]),
-        type_v: flag_value_either(argv, &["-ctv", "--cache-type-v"]),
-        flash_attn: flag_value_either(argv, &["-fa", "--flash-attn"]),
-    }
-}
-
 /// The probe geometry a run measured under (spec §8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -528,7 +500,10 @@ pub struct Trial {
     pub stage: String,
     pub value: Option<String>,
     pub argv: Vec<String>,
-    pub stamp: FlagSextet,
+    /// The bench stamp's flag set, read off `argv` the same way `build_head`
+    /// reads a run's, so a trial and a run describe a configuration in the
+    /// same words (spec §8).
+    pub stamp: crate::core::bench::stamp::LaunchFlags,
     pub outcome: String,
     pub decode: Option<Summary>,
     pub prefill: Option<Summary>,
