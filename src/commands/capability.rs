@@ -470,16 +470,17 @@ fn render_geometry(g: &crate::core::gguf::Geometry) -> String {
         g.block_count.map_or_else(unknown, |v| v.to_string())
     );
     // The nextn layers are a native multi-token-prediction draft head baked
-    // into the weights. llama.cpp loads past them — `kv_layers` subtracts
-    // them for exactly that reason — so the note says what the number IS and
-    // that the engine leaves it idle, rather than printing a bare count only
-    // the KV arithmetic understands.
+    // into the weights; `kv_layers` subtracts them because they hold no KV.
+    // The engine CAN decode with the head (`--spec-type draft-mtp`), and
+    // whether that pays is `chekov tune`'s measurement — so the note names
+    // the measurement rather than making a claim about the engine, and
+    // rather than printing a bare count only the KV arithmetic understands.
     let nextn = g.nextn_predict_layers.unwrap_or(0);
     let _ = writeln!(
         out,
         "  nextn_predict_layers    {nextn}{}",
         if nextn > 0 {
-            "   (a native MTP draft head; this engine decodes without it)"
+            "   (a native MTP draft head; `chekov tune --stages spec` measures whether it pays)"
         } else {
             ""
         }
@@ -2619,8 +2620,8 @@ mod tests {
         });
         assert!(
             out.contains(
-                "nextn_predict_layers    1   (a native MTP draft head; this engine \
-                 decodes without it)"
+                "nextn_predict_layers    1   (a native MTP draft head; `chekov tune --stages \
+                 spec` measures whether it pays)"
             ),
             "{out}"
         );

@@ -7,6 +7,25 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `chekov tune` gains a fifth stage, `spec`, run first: llama.cpp's native
+  MTP draft head (`--spec-type draft-mtp`, on the model's own weights — no
+  draft file) trialed at each `[tune] spec_drafts` length (`off`, `mtp:1`,
+  `mtp:2`, `mtp:3` by default) against the incumbent on decode, prefill not
+  slower, at `[bench] significance_pct`; `off` strips both flags. Three
+  named pre-launch skips: no head in the GGUF (`nextn_predict_layers 0`), an
+  engine whose `--help` has no `--spec-type`, an incumbent already running
+  another speculative type. `--apply` writes or strips the two flags. The
+  bench `Stamp` gains `spec_type` and `spec_draft_n_max` after `flash_attn`
+  (`#[serde(default)]` to `engine-default`; every stored run reads as before),
+  so `compare` refuses a draft-decoded run against a plain one by name;
+  `--cross-runtime` masks them like the other flags; the report prints
+  `speculative: draft-mtp, draft length N` only on such a run. One
+  `stamp::LaunchFlags` now reads the flag set for bench stamps and tune
+  records alike (the record's six fields are unchanged on disk).
+  `capability explain`'s nextn note points at the tune stage instead of
+  claiming the engine leaves the head idle. Spike 2026-09-01 on
+  `ornith-1.5-35b-a3b`: `mtp:1` +20–25% decode, the engine default of 3 a
+  15% loss — the reason this is measured per machine, never defaulted.
 - `capability bench NAME --runtime <name>@<version> [--upstream <url>]` — an
   OpenAI-compatible server you already started (MTPLX, MLX, anything on the
   same wire) becomes a first-class bench subject. `--runtime` is
