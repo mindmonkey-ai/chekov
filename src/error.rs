@@ -435,8 +435,15 @@ pub enum ChekovError {
     )]
     TuneNothingToApply { name: String },
 
-    #[error("tune: unknown stage '{stage}' — the stages are fa, kv, batch, ubatch (in that order)")]
+    #[error(
+        "tune: unknown stage '{stage}' — the stages are spec, fa, kv, batch, ubatch (in that order)"
+    )]
     TuneUnknownStage { stage: String },
+
+    #[error(
+        "tune: [tune] spec_drafts entry '{value}' — expected \"off\" or \"mtp:<n>\" with n ≥ 1"
+    )]
+    TuneBadSpecCandidate { value: String },
 
     #[error("{context}: {source} — check the path exists and is writable, then retry")]
     Io {

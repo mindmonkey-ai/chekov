@@ -195,14 +195,17 @@ impl Default for BenchSection {
     }
 }
 
-/// `chekov tune` sweep parameters (spec §10): a probe depth plus the four
-/// candidate lists staged one dimension at a time (fa, then kv, then batch,
-/// then ubatch).
+/// `chekov tune` sweep parameters (spec §10): a probe depth plus the five
+/// candidate lists staged one dimension at a time (spec, then fa, then kv,
+/// then batch, then ubatch).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TuneSection {
     /// Probe prompt depth, in tokens, used to measure every candidate.
     pub depth: u32,
+    /// Stage spec: `off`, or `mtp:<n>` — llama.cpp's native MTP draft head
+    /// at draft length `n`. Validated at plan time, not here.
+    pub spec_drafts: Vec<String>,
     /// Stage fa: `--flash-attn` candidates, tried in order.
     pub flash_attn: Vec<String>,
     /// Stage kv: `--cache-type-k`/`--cache-type-v` candidates, applied to K
@@ -218,6 +221,9 @@ impl Default for TuneSection {
     fn default() -> Self {
         Self {
             depth: 4096,
+            spec_drafts: ["off", "mtp:1", "mtp:2", "mtp:3"]
+                .map(String::from)
+                .to_vec(),
             flash_attn: vec!["on".to_string(), "off".to_string()],
             cache_types: vec!["q8_0".to_string(), "f16".to_string()],
             batch_sizes: vec![512, 1024, 2048, 4096],

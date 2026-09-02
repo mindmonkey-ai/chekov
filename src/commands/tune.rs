@@ -106,6 +106,7 @@ fn defaults_won_line(significance_pct: f64) -> String {
 /// cannot drift apart on what llama-server actually defaults to.
 fn engine_default(stage: Stage) -> String {
     match stage {
+        Stage::Spec => "off".to_owned(),
         Stage::Fa => "auto".to_owned(),
         Stage::Kv => "f16".to_owned(),
         Stage::Batch => tune::ENGINE_DEFAULT_BATCH.to_string(),
@@ -117,6 +118,7 @@ fn engine_default(stage: Stage) -> String {
 /// reads K — they never diverge, because `candidates` rewrites both.
 const fn flag_of(stage: Stage) -> tune::Flag {
     match stage {
+        Stage::Spec => tune::Flag::SpecType,
         Stage::Fa => tune::Flag::FlashAttn,
         Stage::Kv => tune::Flag::CacheTypeK,
         Stage::Batch => tune::Flag::BatchSize,
@@ -190,6 +192,7 @@ fn stage_plan_line(plan: &Plan, stage: Stage) -> String {
         "none is the incumbent"
     };
     let note = match stage {
+        Stage::Spec => "; needs an MTP head in the GGUF",
         Stage::Kv => "; the f16 KV is footprint-gated per trial",
         Stage::Ubatch => "; values ≤ the incumbent batch",
         Stage::Fa | Stage::Batch => "",
@@ -978,8 +981,8 @@ mod tests {
         );
         assert_eq!(
             super::max_launches(&plan),
-            9,
-            "baseline + 1 + 1 + 3 + 3 with the default lists"
+            12,
+            "baseline + 3 + 1 + 1 + 3 + 3 with the default lists"
         );
         let text = super::plan_text(&plan, Some(35 * 1024 * 1024 * 1024), None);
         assert!(
@@ -996,7 +999,7 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(text.contains("  ≤ 9 launches, ~"), "{text}");
+        assert!(text.contains("  ≤ 12 launches, ~"), "{text}");
         let with_running = super::plan_text(&plan, None, Some("m"));
         assert!(
             with_running.contains("will stop the running 'm' first"),
@@ -1012,11 +1015,11 @@ mod tests {
         let borrowed: Vec<&str> = flags.iter().map(String::as_str).collect();
         let plan = plan_for(&tune, &borrowed);
         // Counted against the baseline's own 512, ubatch lists only 256 and
-        // 512 and the bound would print 7 — which a batch stage that wins
+        // 512 and the bound would print 10 — which a batch stage that wins
         // 4096 then exceeds. The ceiling has to hold for every outcome.
         assert_eq!(
             super::max_launches(&plan),
-            9,
+            12,
             "ubatch is counted against 4096, the largest configured batch"
         );
         let text = super::plan_text(&plan, None, None);
