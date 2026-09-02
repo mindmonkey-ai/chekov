@@ -3030,6 +3030,8 @@ mod tests {
             &flags.type_k,
             &flags.type_v,
             &flags.flash_attn,
+            &flags.spec_type,
+            &flags.spec_draft_n_max,
         ] {
             assert_eq!(value, "unmanaged", "not observed, and never invented");
         }
@@ -3040,12 +3042,34 @@ mod tests {
         assert_eq!(stamp.runtime, "mtplx 0.4.1");
     }
 
+    /// The stamp's two speculative fields are read off the same argv as the
+    /// other six, and a plain launch stamps them engine-default (spec §6).
+    #[test]
+    fn a_local_stamp_names_its_speculative_flags() {
+        let argv: Vec<String> = [
+            "--flash-attn",
+            "on",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "1",
+        ]
+        .map(String::from)
+        .to_vec();
+        let flags = crate::core::bench::stamp::launch_flags(&argv);
+        let plan = plan_fixture();
+        let spec = foreign_spec();
+        let stamp = foreign_stamp(&spec, &plan, ("0.4.1".to_owned(), flags));
+        assert_eq!(stamp.spec_type, "draft-mtp");
+        assert_eq!(stamp.spec_draft_n_max, "1");
+    }
+
     /// The stamp `build_head`'s foreign branch assembles, given the parts its
     /// own helper produced — the geometry chekov never observed stays zero.
     fn foreign_stamp(
         spec: &super::RuntimeSpec,
         plan: &crate::core::bench::sweep::SweepPlan,
-        parts: (String, super::StampedFlags),
+        parts: (String, crate::core::bench::stamp::LaunchFlags),
     ) -> crate::core::bench::stamp::Stamp {
         let (engine, flags) = parts;
         let inputs = super::HeadInputs {

@@ -833,7 +833,6 @@ mod tests {
     use crate::core::stats::Summary;
     use crate::core::tune::{
         Candidate, DEFAULTS_WON, Measured, Outcome, Probe, Record, Stage, THERMAL_SOURCE, Trial,
-        sextet,
     };
     use crate::error::ChekovError;
 
@@ -888,7 +887,7 @@ mod tests {
         Trial {
             stage: stage.to_owned(),
             value: value.map(str::to_owned),
-            stamp: sextet(&argv),
+            stamp: crate::core::bench::stamp::launch_flags(&argv),
             argv,
             outcome: "measured".into(),
             decode: Some(summary(31.2, 0.4)),

@@ -202,7 +202,8 @@ pub fn flag_value_either(args: &[String], names: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        RUNTIME_LLAMA_CPP, Stamp, TIMING_CHEKOV_STREAMED, TIMING_SERVER, first_mismatch, flag_value,
+        LaunchFlags, RUNTIME_LLAMA_CPP, Stamp, TIMING_CHEKOV_STREAMED, TIMING_SERVER,
+        first_mismatch, flag_value, launch_flags, unmanaged_flags,
     };
 
     fn stamp() -> Stamp {
@@ -397,5 +398,101 @@ mod tests {
         assert_eq!(first_mismatch(&a, &b), Some("timing_source"));
         a.runtime = "mtplx 1".into();
         assert_eq!(first_mismatch(&a, &b), Some("runtime"));
+    }
+
+    /// The two speculative fields sit after `flash_attn` and before
+    /// `allow_exec` in comparison order (spec §6).
+    #[test]
+    fn spec_type_differs_after_flash_attn_and_before_allow_exec() {
+        let mut b = stamp();
+        b.spec_type = "draft-mtp".into();
+        b.allow_exec = true;
+        assert_eq!(first_mismatch(&stamp(), &b), Some("spec_type"));
+        let mut b = stamp();
+        b.spec_draft_n_max = "1".into();
+        b.seed = 43;
+        assert_eq!(first_mismatch(&stamp(), &b), Some("spec_draft_n_max"));
+        let mut b = stamp();
+        b.spec_type = "draft-mtp".into();
+        b.flash_attn = "off".into();
+        assert_eq!(first_mismatch(&stamp(), &b), Some("flash_attn"));
+    }
+
+    /// Every stored run predates the fields and was decoded without
+    /// speculation, which is what the default says (spec §6).
+    #[test]
+    fn a_stamp_without_the_spec_fields_reads_as_engine_default() {
+        let json = r#"{"machine_id":"m","engine_build_commit":"e","weights_revision":"w",
+            "quant":"Q8_0","ctx":4096,"n_parallel":1,"kv_unified":"engine-default",
+            "n_batch":"engine-default","n_ubatch":"engine-default","type_k":"q8_0",
+            "type_v":"q8_0","flash_attn":"on","seed":42,"temperature_milli":0,
+            "chekov_version":"0.1.0","prompt_set_hash":"e19a","corpus_id":"throughput-v1"}"#;
+        let parsed: Stamp = serde_json::from_str(json).expect("a pre-spec stamp loads");
+        assert_eq!(parsed.spec_type, "engine-default");
+        assert_eq!(parsed.spec_draft_n_max, "engine-default");
+    }
+
+    /// One reader for the eight flag-sourced values, each spelling covered;
+    /// the foreign sentinel is eight of the same word (spec §6).
+    #[test]
+    fn launch_flags_read_all_eight_and_unmanaged_is_eight_sentinels() {
+        let argv: Vec<String> = [
+            "-fa",
+            "on",
+            "--cache-type-k",
+            "q8_0",
+            "-ctv",
+            "q8_0",
+            "-b",
+            "4096",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "1",
+        ]
+        .map(String::from)
+        .to_vec();
+        let flags = launch_flags(&argv);
+        assert_eq!(
+            (
+                flags.flash_attn.as_str(),
+                flags.type_k.as_str(),
+                flags.type_v.as_str(),
+                flags.n_batch.as_str(),
+                flags.n_ubatch.as_str(),
+                flags.kv_unified.as_str(),
+                flags.spec_type.as_str(),
+                flags.spec_draft_n_max.as_str(),
+            ),
+            (
+                "on",
+                "q8_0",
+                "q8_0",
+                "4096",
+                "engine-default",
+                "engine-default",
+                "draft-mtp",
+                "1"
+            )
+        );
+        let plain = launch_flags(&[]);
+        assert_eq!(plain.spec_type, "engine-default");
+        let sentinel = unmanaged_flags();
+        for value in [
+            &sentinel.kv_unified,
+            &sentinel.n_batch,
+            &sentinel.n_ubatch,
+            &sentinel.type_k,
+            &sentinel.type_v,
+            &sentinel.flash_attn,
+            &sentinel.spec_type,
+            &sentinel.spec_draft_n_max,
+        ] {
+            assert_eq!(value, "unmanaged");
+        }
+        let json = r#"{"kv_unified":"engine-default","n_batch":"4096","n_ubatch":"engine-default",
+            "type_k":"q8_0","type_v":"q8_0","flash_attn":"on"}"#;
+        let old: LaunchFlags = serde_json::from_str(json).expect("a six-field record loads");
+        assert_eq!(old.spec_type, "engine-default");
     }
 }

@@ -963,7 +963,10 @@ mod tests {
         assert_eq!(super::thermal_note(Some(100), Some(100)), None);
     }
 
-    fn sample_record(argv: Vec<String>, stamp: super::FlagSextet) -> super::Record {
+    fn sample_record(
+        argv: Vec<String>,
+        stamp: crate::core::bench::stamp::LaunchFlags,
+    ) -> super::Record {
         super::Record {
             model: "m".into(),
             quant: "Q8_0".into(),
@@ -997,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_round_trips_and_names_its_flag_sextet() {
+    fn a_record_round_trips_and_names_its_launch_flags() {
         let argv = argv(&[
             "--flash-attn",
             "on",
@@ -1008,17 +1011,18 @@ mod tests {
             "--batch-size",
             "4096",
         ]);
-        let sextet = super::sextet(&argv);
+        let flags = crate::core::bench::stamp::launch_flags(&argv);
         assert_eq!(
             (
-                sextet.n_batch.as_str(),
-                sextet.n_ubatch.as_str(),
-                sextet.type_k.as_str(),
-                sextet.flash_attn.as_str()
+                flags.n_batch.as_str(),
+                flags.n_ubatch.as_str(),
+                flags.type_k.as_str(),
+                flags.flash_attn.as_str(),
+                flags.spec_type.as_str()
             ),
-            ("4096", "engine-default", "q8_0", "on")
+            ("4096", "engine-default", "q8_0", "on", "engine-default")
         );
-        let record = sample_record(argv, sextet);
+        let record = sample_record(argv, flags);
         let dir = std::env::temp_dir().join(format!("chekov-tune-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = super::record_path(&dir, "m");
