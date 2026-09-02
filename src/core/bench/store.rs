@@ -506,6 +506,7 @@ pub fn render_run(log: &RunLog) -> String {
         log.head.model, stamp.ctx, stamp.engine_build_commit, stamp.machine_id
     );
     out.push_str(&timing_source_line(stamp));
+    out.push_str(&speculative_line(stamp));
     out.push_str(&throughput_table(log));
     let probes: String = log
         .rows
@@ -926,6 +927,19 @@ fn timing_source_line(stamp: &crate::core::bench::stamp::Stamp) -> String {
     format!(
         "timing source: {} (client wall-clock over SSE; includes wire overhead)\n",
         stamp.timing_source
+    )
+}
+
+/// How the run decoded, said out loud exactly when it was not plain
+/// autoregressive decoding (spec-stage design §6): the speculative type and
+/// its draft length. A run without `--spec-type` prints nothing here.
+fn speculative_line(stamp: &crate::core::bench::stamp::Stamp) -> String {
+    if stamp.spec_type == crate::core::bench::stamp::FLAG_ENGINE_DEFAULT {
+        return String::new();
+    }
+    format!(
+        "speculative: {}, draft length {}\n",
+        stamp.spec_type, stamp.spec_draft_n_max
     )
 }
 

@@ -145,7 +145,7 @@ pub struct CompareOpts {
 }
 
 /// The fields `--cross-runtime` permits to differ, and no others.
-const CROSS_RUNTIME_ALLOWED: [&str; 12] = [
+const CROSS_RUNTIME_ALLOWED: [&str; 14] = [
     "runtime",
     "timing_source",
     "engine_build_commit",
@@ -157,6 +157,8 @@ const CROSS_RUNTIME_ALLOWED: [&str; 12] = [
     "type_k",
     "type_v",
     "flash_attn",
+    "spec_type",
+    "spec_draft_n_max",
     "prompt_set_hash",
 ];
 
@@ -224,8 +226,10 @@ fn assert_same_environment(pair: &RunPair, opts: &CompareOpts) -> Result<(), Che
     stamp::mismatch_error(a, &b_env).map_or(Ok(()), Err)
 }
 
-/// Masks exactly the `--cross-runtime` allow-list (spec §7) onto `b_env` —
-/// the fields a foreign runtime is permitted to differ on, and no others.
+/// Masks exactly the 14-entry `--cross-runtime` allow-list (spec §7) onto
+/// `b_env` — the fields a foreign runtime is permitted to differ on, and no
+/// others. A foreign server's speculative flags are as unobservable as its
+/// KV flags, which is why the two ride along.
 fn mask_cross_runtime(b_env: &mut Stamp, a: &Stamp) {
     b_env.runtime.clone_from(&a.runtime);
     b_env.timing_source.clone_from(&a.timing_source);
@@ -238,6 +242,8 @@ fn mask_cross_runtime(b_env: &mut Stamp, a: &Stamp) {
     b_env.type_k.clone_from(&a.type_k);
     b_env.type_v.clone_from(&a.type_v);
     b_env.flash_attn.clone_from(&a.flash_attn);
+    b_env.spec_type.clone_from(&a.spec_type);
+    b_env.spec_draft_n_max.clone_from(&a.spec_draft_n_max);
     b_env.prompt_set_hash.clone_from(&a.prompt_set_hash);
 }
 
