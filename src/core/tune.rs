@@ -21,13 +21,16 @@ use crate::error::ChekovError;
 pub(crate) const ENGINE_DEFAULT_BATCH: u32 = 2048;
 
 /// llama-server's default `--spec-draft-n-max` when the flag is absent, per
-/// `llama-server --help` — the draft length the 2026-09-01 spike found to be
-/// a net loss on a 3B-active MoE.
+/// `llama-server --help`.
+///
+/// The draft length the 2026-09-01 spike found to be a net loss on a
+/// 3B-active mixture-of-experts model.
 pub(crate) const ENGINE_DEFAULT_SPEC_DRAFT_N_MAX: u32 = 3;
 
-/// One dimension `chekov tune` sweeps, in the fixed order they run. `Spec`
-/// runs first because the other four tune the kernel and batch geometry
-/// around whatever decode path is active (spec-stage design §3).
+/// One dimension `chekov tune` sweeps, in the fixed order they run.
+///
+/// `Spec` runs first because the other four tune the kernel and batch
+/// geometry around whatever decode path is active (spec-stage design §3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stage {
     Spec,
@@ -158,9 +161,10 @@ pub fn rewrite(argv: &[String], flag: Flag, value: &str) -> Vec<String> {
     out
 }
 
-/// `argv` without `flag` and its value, wherever and however often it
-/// appears — the one tune rewrite that removes a flag, because "no
-/// speculative decoding" is the absence of `--spec-type`, not a value of it.
+/// `argv` without `flag` and its value, wherever and however often it appears.
+///
+/// The one tune rewrite that removes a flag, because "no speculative
+/// decoding" is the absence of `--spec-type`, not a value of it.
 #[must_use]
 pub fn strip(argv: &[String], flag: Flag) -> Vec<String> {
     let names = flag.names();
@@ -213,7 +217,10 @@ impl SpecDraft {
 
 /// Every `[tune] spec_drafts` entry parsed, or the first bad one named.
 pub fn spec_values(cfg: &TuneSection) -> Result<Vec<SpecDraft>, ChekovError> {
-    cfg.spec_drafts.iter().map(|v| SpecDraft::parse(v)).collect()
+    cfg.spec_drafts
+        .iter()
+        .map(|v| SpecDraft::parse(v))
+        .collect()
 }
 
 /// `incumbent` carrying `value` for the spec stage: both flags rewritten
@@ -254,8 +261,9 @@ const APPLIED_FLAGS: [Flag; 7] = [
 ];
 
 /// `current` with every flag the winner carries rewritten to the winner's
-/// value; a flag the winner does not carry is left untouched (spec §8) —
-/// except the speculative pair: a winner without `--spec-type` is one the
+/// value; a flag the winner does not carry is left untouched (spec §8).
+///
+/// Except the speculative pair: a winner without `--spec-type` is one the
 /// spec stage switched off, and the current flags must lose theirs too
 /// (spec-stage design §5).
 #[must_use]
@@ -664,8 +672,8 @@ pub fn write_record(path: &Path, record: &Record) -> Result<(), ChekovError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Candidate, Flag, Metric, SpecDraft, Stage, candidates, rewrite, spec_values, stages,
-        strip, value_of,
+        Candidate, Flag, Metric, SpecDraft, Stage, candidates, rewrite, spec_values, stages, strip,
+        value_of,
     };
     use crate::core::config::TuneSection;
     use crate::error::ChekovError;
@@ -762,7 +770,13 @@ mod tests {
         assert!(stages(Some(&argv(&["threads"]))).is_err());
         assert_eq!(
             Stage::ORDER,
-            [Stage::Spec, Stage::Fa, Stage::Kv, Stage::Batch, Stage::Ubatch]
+            [
+                Stage::Spec,
+                Stage::Fa,
+                Stage::Kv,
+                Stage::Batch,
+                Stage::Ubatch
+            ]
         );
         assert_eq!(Stage::parse("spec"), Some(Stage::Spec));
         assert_eq!(
@@ -1170,11 +1184,25 @@ mod tests {
         let plain = argv(&["--flash-attn", "on", "--cache-type-k", "q8_0"]);
         let spec = candidates(Stage::Spec, &plain, &cfg);
         let values: Vec<&str> = spec.iter().map(|c| c.value.as_str()).collect();
-        assert_eq!(values, vec!["mtp:1", "mtp:2", "mtp:3"], "off IS the incumbent");
-        let mut drafted_one = plain.clone();
-        drafted_one.extend(argv(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]));
+        assert_eq!(
+            values,
+            vec!["mtp:1", "mtp:2", "mtp:3"],
+            "off IS the incumbent"
+        );
+        let mut drafted_one = plain;
+        drafted_one.extend(argv(&[
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "1",
+        ]));
         assert_eq!(spec[0].argv, drafted_one);
+    }
 
+    #[test]
+    fn off_strips_both_flags_wherever_they_sit() {
+        let cfg = TuneSection::default();
+        let plain = argv(&["--flash-attn", "on", "--cache-type-k", "q8_0"]);
         let drafted = argv(&[
             "--flash-attn",
             "on",
@@ -1187,12 +1215,26 @@ mod tests {
         ]);
         let spec = candidates(Stage::Spec, &drafted, &cfg);
         let values: Vec<&str> = spec.iter().map(|c| c.value.as_str()).collect();
-        assert_eq!(values, vec!["off", "mtp:1", "mtp:2"], "mtp:3 IS the incumbent");
-        assert_eq!(spec[0].argv, plain, "off strips both flags wherever they sit");
-        let mut rewritten = drafted.clone();
+        assert_eq!(
+            values,
+            vec!["off", "mtp:1", "mtp:2"],
+            "mtp:3 IS the incumbent"
+        );
+        assert_eq!(
+            spec[0].argv, plain,
+            "off strips both flags wherever they sit"
+        );
+        let mut rewritten = drafted;
         rewritten[5] = "1".into();
-        assert_eq!(spec[1].argv, rewritten, "a rewrite keeps the flags where they were");
-        assert_eq!(strip(&plain, Flag::SpecType), plain, "nothing to strip returns the argv");
+        assert_eq!(
+            spec[1].argv, rewritten,
+            "a rewrite keeps the flags where they were"
+        );
+        assert_eq!(
+            strip(&plain, Flag::SpecType),
+            plain,
+            "nothing to strip returns the argv"
+        );
         let stray = argv(&["--spec-draft-n-max", "2"]);
         assert_eq!(strip(&stray, Flag::SpecDraftNMax), argv(&[]));
     }

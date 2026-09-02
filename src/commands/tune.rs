@@ -1445,8 +1445,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gated_spec_stage_is_skipped_per_candidate_before_any_spawn_and_counts_no_launches() {
-        let ctx = scratch_ctx("chekov-test-tune-spec-gate");
+    fn a_gated_spec_stage_counts_no_launches_and_says_why_on_the_plan() {
         let tune = TuneSection::default();
         let mut plan = plan_for(&tune, &[]);
         plan.spec_skip = Some("no MTP head in the GGUF (nextn_predict_layers 0)".into());
@@ -1462,7 +1461,22 @@ mod tests {
             10,
             "baseline + 0 + 2 + 1 + 3 + 3: the three mtp candidates cost nothing"
         );
+        let ungated = plan_for(&tune, &[]);
+        let text = super::plan_text(&ungated, None, None);
+        assert!(
+            text.contains(
+                "  spec       4 candidates   (1 is the incumbent; needs an MTP head in the GGUF)\n"
+            ),
+            "{text}"
+        );
+    }
 
+    #[test]
+    fn a_gated_spec_candidate_is_skipped_before_any_spawn() {
+        let ctx = scratch_ctx("chekov-test-tune-spec-skip");
+        let tune = TuneSection::default();
+        let mut plan = plan_for(&tune, &[]);
+        plan.spec_skip = Some("no MTP head in the GGUF (nextn_predict_layers 0)".into());
         let session = super::Session {
             ctx: &ctx,
             plan: &plan,
@@ -1483,21 +1497,15 @@ mod tests {
             value: "mtp:1".into(),
             argv: argv(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]),
         };
-        let completed = session.trial(mtp1, &incumbent).expect("a skip, not an error");
+        let completed = session
+            .trial(mtp1, &incumbent)
+            .expect("a skip, not an error");
         match completed.trial.outcome {
             Outcome::Skipped(reason) => {
                 assert_eq!(reason, "no MTP head in the GGUF (nextn_predict_layers 0)");
             }
             _ => panic!("expected a skipped trial"),
         }
-        let ungated = plan_for(&tune, &[]);
-        let text = super::plan_text(&ungated, None, None);
-        assert!(
-            text.contains(
-                "  spec       4 candidates   (1 is the incumbent; needs an MTP head in the GGUF)\n"
-            ),
-            "{text}"
-        );
     }
 
     #[test]
