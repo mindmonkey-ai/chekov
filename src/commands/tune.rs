@@ -866,6 +866,7 @@ mod tests {
         super::Plan {
             eff: effective(flags),
             stages: Stage::ORDER.to_vec(),
+            spec_skip: None,
             tune,
             sweep: SweepPlan {
                 depths: vec![4096],
@@ -1253,6 +1254,143 @@ mod tests {
             argv: vec![],
         };
         assert!(super::fa_skip(&kv_q8_0, &quantized_short).is_none());
+    }
+
+    #[test]
+    fn the_spec_incumbent_reads_off_mtp_n_and_the_engine_default_length() {
+        assert_eq!(super::incumbent_value(Stage::Spec, &[]), "off");
+        let drafted = argv(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]);
+        assert_eq!(super::incumbent_value(Stage::Spec, &drafted), "mtp:1");
+        let default_len = argv(&["--spec-type", "draft-mtp"]);
+        assert_eq!(super::incumbent_value(Stage::Spec, &default_len), "mtp:3");
+        let ngram = argv(&["--spec-type", "ngram-mod"]);
+        assert_eq!(
+            super::incumbent_value(Stage::Spec, &ngram),
+            "off",
+            "not ours to read; skip 3 names it"
+        );
+    }
+
+    #[test]
+    fn the_head_gate_names_a_missing_head_and_an_unreadable_shard() {
+        use crate::core::gguf::Geometry;
+        let shard = Path::new("/models/m/m.gguf");
+        let headed = Geometry {
+            nextn_predict_layers: Some(1),
+            ..Geometry::default()
+        };
+        assert!(super::head_gate(Ok(headed), shard).is_none());
+        let headless = Geometry {
+            nextn_predict_layers: Some(0),
+            ..Geometry::default()
+        };
+        assert_eq!(
+            super::head_gate(Ok(headless), shard).as_deref(),
+            Some("no MTP head in the GGUF (nextn_predict_layers 0)")
+        );
+        assert_eq!(
+            super::head_gate(Ok(Geometry::default()), shard).as_deref(),
+            Some("no MTP head in the GGUF (nextn_predict_layers 0)")
+        );
+        let unreadable = super::head_gate(Err(ChekovError::ServerNotRunning), shard);
+        assert_eq!(
+            unreadable.as_deref(),
+            Some("the first shard's header could not be read (/models/m/m.gguf)")
+        );
+    }
+
+    #[test]
+    fn the_engine_gate_names_an_engine_without_the_flag_and_trusts_an_unreadable_help() {
+        assert!(super::engine_gate(Some("--spec-type none,draft-mtp"), "0f194b907").is_none());
+        assert_eq!(
+            super::engine_gate(Some("--flash-attn"), "d7bd3bfca").as_deref(),
+            Some("engine d7bd3bfca has no --spec-type — chekov update --engine")
+        );
+        assert!(
+            super::engine_gate(None, "0f194b907").is_none(),
+            "an uncapturable --help is the launch-time assertion's problem, as today"
+        );
+    }
+
+    #[test]
+    fn a_foreign_speculative_incumbent_skips_every_spec_candidate_and_only_those() {
+        let mtp1 = Candidate {
+            stage: Stage::Spec,
+            value: "mtp:1".into(),
+            argv: vec![],
+        };
+        let ngram = argv(&["--spec-type", "ngram-mod"]);
+        assert_eq!(
+            super::foreign_spec_skip(&mtp1, &ngram).as_deref(),
+            Some("the spec stage tunes draft-mtp only; the incumbent runs --spec-type ngram-mod")
+        );
+        let listed = argv(&["--spec-type", "draft-mtp,ngram-mod"]);
+        assert!(super::foreign_spec_skip(&mtp1, &listed).is_some());
+        let ours = argv(&["--spec-type", "draft-mtp"]);
+        assert!(super::foreign_spec_skip(&mtp1, &ours).is_none());
+        assert!(super::foreign_spec_skip(&mtp1, &[]).is_none());
+        let fa = Candidate {
+            stage: Stage::Fa,
+            value: "off".into(),
+            argv: vec![],
+        };
+        assert!(super::foreign_spec_skip(&fa, &ngram).is_none());
+    }
+
+    #[test]
+    fn a_gated_spec_stage_is_skipped_per_candidate_before_any_spawn_and_counts_no_launches() {
+        let ctx = scratch_ctx("chekov-test-tune-spec-gate");
+        let tune = TuneSection::default();
+        let mut plan = plan_for(&tune, &[]);
+        plan.spec_skip = Some("no MTP head in the GGUF (nextn_predict_layers 0)".into());
+        let text = super::plan_text(&plan, None, None);
+        assert!(
+            text.contains(
+                "  spec       4 candidates   (skipped: no MTP head in the GGUF (nextn_predict_layers 0))\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            super::max_launches(&plan),
+            10,
+            "baseline + 0 + 2 + 1 + 3 + 3: the three mtp candidates cost nothing"
+        );
+
+        let session = super::Session {
+            ctx: &ctx,
+            plan: &plan,
+            path: PathBuf::from("unused"),
+            record: record_of(vec![], None),
+            lines: Vec::new(),
+        };
+        let incumbent = super::Incumbent {
+            argv: vec![],
+            measured: Measured {
+                decode: summary(31.2, 0.4),
+                prefill: summary(402.0, 4.0),
+                prompt_n: 4101,
+            },
+        };
+        let mtp1 = Candidate {
+            stage: Stage::Spec,
+            value: "mtp:1".into(),
+            argv: argv(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]),
+        };
+        let completed = session.trial(mtp1, &incumbent).expect("a skip, not an error");
+        match completed.trial.outcome {
+            Outcome::Skipped(reason) => {
+                assert_eq!(reason, "no MTP head in the GGUF (nextn_predict_layers 0)");
+            }
+            _ => panic!("expected a skipped trial"),
+        }
+        let ungated = plan_for(&tune, &[]);
+        let text = super::plan_text(&ungated, None, None);
+        assert!(
+            text.contains(
+                "  spec       4 candidates   (1 is the incumbent; needs an MTP head in the GGUF)\n"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
