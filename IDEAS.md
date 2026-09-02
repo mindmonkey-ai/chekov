@@ -526,7 +526,17 @@ latent speed. When llama.cpp lands an MTP decode path, bench grows a
 speculative row (accept rate by depth, measured speedup vs the AR baseline);
 until then it is an honest "engine has no MTP path" skip in the existing
 skip-with-reason machinery, never a zero.
-Proposed 2026-08-30 — status: OPEN
+SHIPPED 2026-09-01 (spec `docs/superpowers/specs/2026-09-01-tune-spec-stage-design.md`):
+the engine gained `--spec-type draft-mtp` (runs on the main weights' nextn
+tensors; no draft file) in August, so the "engine has no MTP path" skip never
+had to exist — the measurement landed as `chekov tune`'s first stage instead
+of a bench row. Spike on ornith-1.5-35b-a3b Q8_0 @ ctx 262144: baseline 71
+tok/s; draft length 3 (engine default) 61–63; length 2 70–77; length 1 85–89
+at 58–81% acceptance — a 3B-active MoE trunk is cheap, so only a one-token
+draft pays. `explain` now points at the stage; the stamp names `spec_type`
+and `spec_draft_n_max`; compare refuses across them. A bench-side accept-rate
+row (from `/metrics` `spec_decode_*`) is a possible later slice.
+Proposed 2026-08-30 — status: SHIPPED 2026-09-01
 
 ## `chekov tune`: per-machine launch-flag autotune with an honest verdict (2026-08-30)
 Sweep `n_batch`/`n_ubatch`/KV cache types/`flash_attn` against a fixed probe on

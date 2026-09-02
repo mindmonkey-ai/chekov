@@ -470,16 +470,17 @@ fn render_geometry(g: &crate::core::gguf::Geometry) -> String {
         g.block_count.map_or_else(unknown, |v| v.to_string())
     );
     // The nextn layers are a native multi-token-prediction draft head baked
-    // into the weights. llama.cpp loads past them — `kv_layers` subtracts
-    // them for exactly that reason — so the note says what the number IS and
-    // that the engine leaves it idle, rather than printing a bare count only
-    // the KV arithmetic understands.
+    // into the weights; `kv_layers` subtracts them because they hold no KV.
+    // The engine CAN decode with the head (`--spec-type draft-mtp`), and
+    // whether that pays is `chekov tune`'s measurement — so the note names
+    // the measurement rather than making a claim about the engine, and
+    // rather than printing a bare count only the KV arithmetic understands.
     let nextn = g.nextn_predict_layers.unwrap_or(0);
     let _ = writeln!(
         out,
         "  nextn_predict_layers    {nextn}{}",
         if nextn > 0 {
-            "   (a native MTP draft head; this engine decodes without it)"
+            "   (a native MTP draft head; `chekov tune --stages spec` measures whether it pays)"
         } else {
             ""
         }
@@ -2347,7 +2348,7 @@ struct StampParts {
     engine: String,
     prompt_set_hash: String,
     corpus_id: String,
-    flags: StampedFlags,
+    flags: crate::core::bench::stamp::LaunchFlags,
     seed: u32,
 }
 
@@ -2379,6 +2380,8 @@ fn assemble_stamp(
         type_k: parts.flags.type_k,
         type_v: parts.flags.type_v,
         flash_attn: parts.flags.flash_attn,
+        spec_type: parts.flags.spec_type,
+        spec_draft_n_max: parts.flags.spec_draft_n_max,
         allow_exec: inputs.allow_exec(),
         cargo_version: inputs.cargo_version().map(str::to_owned),
         // The scratch target exists exactly when a toolchain answered the
@@ -2405,7 +2408,7 @@ struct HeadIdentity {
     machine_brand: Option<String>,
     engine: String,
     launch_args: Vec<String>,
-    flags: StampedFlags,
+    flags: crate::core::bench::stamp::LaunchFlags,
     runtime: String,
 }
 
@@ -2415,7 +2418,7 @@ fn local_identity(ctx: &Ctx, setup: &Candidate) -> Result<HeadIdentity, ChekovEr
     let cfg = &ctx.config;
     let (machine_id, machine_brand, engine) = stamp_identity(cfg)?;
     let launch_args = crate::core::server::launch_args(cfg, &setup.eff);
-    let flags = stamped_flags(&launch_args);
+    let flags = crate::core::bench::stamp::launch_flags(&launch_args);
     Ok(HeadIdentity {
         machine_id,
         machine_brand,
@@ -2442,10 +2445,13 @@ fn foreign_identity(ctx: &Ctx, spec: &RuntimeSpec) -> Result<HeadIdentity, Cheko
     })
 }
 
-/// The declared runtime's build identity and its sentinel flag sextet — the
+/// The declared runtime's build identity and its sentinel flag set — the
 /// pure half of the foreign head, so it can be pinned without a machine.
-fn foreign_stamp_parts(spec: &RuntimeSpec) -> (String, StampedFlags) {
-    (spec.version.clone(), unmanaged_flags())
+fn foreign_stamp_parts(spec: &RuntimeSpec) -> (String, crate::core::bench::stamp::LaunchFlags) {
+    (
+        spec.version.clone(),
+        crate::core::bench::stamp::unmanaged_flags(),
+    )
 }
 
 fn build_head(
@@ -2485,45 +2491,6 @@ fn build_head(
         forced_reasoning_format,
         stamp: head_stamp,
     })
-}
-
-/// The stamp's flag-sourced sextet, each spelling covered (§7.4).
-struct StampedFlags {
-    kv_unified: String,
-    n_batch: String,
-    n_ubatch: String,
-    type_k: String,
-    type_v: String,
-    flash_attn: String,
-}
-
-/// A flag on a server chekov did not launch: not observed, not invented —
-/// a third spelling distinct from "engine-default" (spec §5).
-const FLAG_UNMANAGED: &str = "unmanaged";
-
-/// Every launch flag of a foreign server, all six unobservable (spec §5).
-fn unmanaged_flags() -> StampedFlags {
-    let sentinel = || FLAG_UNMANAGED.to_owned();
-    StampedFlags {
-        kv_unified: sentinel(),
-        n_batch: sentinel(),
-        n_ubatch: sentinel(),
-        type_k: sentinel(),
-        type_v: sentinel(),
-        flash_attn: sentinel(),
-    }
-}
-
-fn stamped_flags(launch_args: &[String]) -> StampedFlags {
-    use crate::core::bench::stamp::flag_value_either as flags;
-    StampedFlags {
-        kv_unified: flags(launch_args, &["-kvu", "--kv-unified"]),
-        n_batch: flags(launch_args, &["-b", "--batch-size"]),
-        n_ubatch: flags(launch_args, &["-ub", "--ubatch-size"]),
-        type_k: flags(launch_args, &["-ctk", "--cache-type-k"]),
-        type_v: flags(launch_args, &["-ctv", "--cache-type-v"]),
-        flash_attn: flags(launch_args, &["-fa", "--flash-attn"]),
-    }
 }
 
 /// The task-set identity, from what the run actually measures — runs over
@@ -2653,8 +2620,8 @@ mod tests {
         });
         assert!(
             out.contains(
-                "nextn_predict_layers    1   (a native MTP draft head; this engine \
-                 decodes without it)"
+                "nextn_predict_layers    1   (a native MTP draft head; `chekov tune --stages \
+                 spec` measures whether it pays)"
             ),
             "{out}"
         );
@@ -3030,6 +2997,8 @@ mod tests {
             &flags.type_k,
             &flags.type_v,
             &flags.flash_attn,
+            &flags.spec_type,
+            &flags.spec_draft_n_max,
         ] {
             assert_eq!(value, "unmanaged", "not observed, and never invented");
         }
@@ -3040,12 +3009,60 @@ mod tests {
         assert_eq!(stamp.runtime, "mtplx 0.4.1");
     }
 
+    /// The stamp's two speculative fields are read off the same argv as the
+    /// other six, and a plain launch stamps them engine-default (spec §6).
+    #[test]
+    fn a_local_stamp_names_its_speculative_flags() {
+        let argv: Vec<String> = [
+            "--flash-attn",
+            "on",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "1",
+        ]
+        .map(String::from)
+        .to_vec();
+        let flags = crate::core::bench::stamp::launch_flags(&argv);
+        let plan = plan_fixture();
+        let spec = foreign_spec();
+        let stamp = foreign_stamp(&spec, &plan, ("0.4.1".to_owned(), flags));
+        assert_eq!(stamp.spec_type, "draft-mtp");
+        assert_eq!(stamp.spec_draft_n_max, "1");
+    }
+
+    /// `explain` reads only the GGUF and must not claim what the engine does
+    /// with the head: it points at the measurement (spec-stage design §7).
+    #[test]
+    fn the_nextn_note_points_at_the_tune_stage_and_is_absent_without_a_head() {
+        use crate::core::gguf::Geometry;
+        let headed = Geometry {
+            block_count: Some(41),
+            nextn_predict_layers: Some(1),
+            ..Geometry::default()
+        };
+        let text = super::render_geometry(&headed);
+        assert!(
+            text.contains(
+                "  nextn_predict_layers    1   (a native MTP draft head; `chekov tune --stages \
+                 spec` measures whether it pays)\n"
+            ),
+            "{text}"
+        );
+        let headless = Geometry {
+            block_count: Some(40),
+            ..Geometry::default()
+        };
+        let plain = super::render_geometry(&headless);
+        assert!(plain.contains("  nextn_predict_layers    0\n"), "{plain}");
+    }
+
     /// The stamp `build_head`'s foreign branch assembles, given the parts its
     /// own helper produced — the geometry chekov never observed stays zero.
     fn foreign_stamp(
         spec: &super::RuntimeSpec,
         plan: &crate::core::bench::sweep::SweepPlan,
-        parts: (String, super::StampedFlags),
+        parts: (String, crate::core::bench::stamp::LaunchFlags),
     ) -> crate::core::bench::stamp::Stamp {
         let (engine, flags) = parts;
         let inputs = super::HeadInputs {
@@ -3195,7 +3212,7 @@ mod tests {
                 engine: "dda1b0d67".to_owned(),
                 prompt_set_hash: "h".to_owned(),
                 corpus_id: "c".to_owned(),
-                flags: super::unmanaged_flags(),
+                flags: crate::core::bench::stamp::unmanaged_flags(),
                 seed: 7,
             },
         )
@@ -3604,6 +3621,8 @@ mod tests {
             type_k: "q8_0".into(),
             type_v: "q8_0".into(),
             flash_attn: "on".into(),
+            spec_type: "engine-default".into(),
+            spec_draft_n_max: "engine-default".into(),
             allow_exec: false,
             cargo_version: None,
             exec_target: "none".into(),

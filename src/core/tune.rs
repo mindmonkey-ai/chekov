@@ -1,14 +1,14 @@
 //! `chekov tune` stages, candidate lists, and argv rewriting (spec §4, §10).
 //!
-//! Pure, side-effect-free helpers: naming the four tune stages in their fixed
+//! Pure, side-effect-free helpers: naming the five tune stages in their fixed
 //! run order, listing the launch-flag values each stage tries, and rewriting
-//! a launch argv to carry one candidate value under either flag spelling.
+//! a launch argv to carry one candidate value under either flag spelling —
+//! or, for the spec stage's `off`, to carry none.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::bench::stamp::flag_value_either;
 use crate::core::bench::sweep::DepthResult;
 use crate::core::clock::utc_compact_now;
 use crate::core::config::TuneSection;
@@ -20,9 +20,20 @@ use crate::error::ChekovError;
 /// `llama-server --help` on this machine.
 pub(crate) const ENGINE_DEFAULT_BATCH: u32 = 2048;
 
+/// llama-server's default `--spec-draft-n-max` when the flag is absent, per
+/// `llama-server --help`.
+///
+/// The draft length the 2026-09-01 spike found to be a net loss on a
+/// 3B-active mixture-of-experts model.
+pub(crate) const ENGINE_DEFAULT_SPEC_DRAFT_N_MAX: u32 = 3;
+
 /// One dimension `chekov tune` sweeps, in the fixed order they run.
+///
+/// `Spec` runs first because the other four tune the kernel and batch
+/// geometry around whatever decode path is active (spec-stage design §3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stage {
+    Spec,
     Fa,
     Kv,
     Batch,
@@ -30,11 +41,12 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ORDER: [Self; 4] = [Self::Fa, Self::Kv, Self::Batch, Self::Ubatch];
+    pub const ORDER: [Self; 5] = [Self::Spec, Self::Fa, Self::Kv, Self::Batch, Self::Ubatch];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Spec => "spec",
             Self::Fa => "fa",
             Self::Kv => "kv",
             Self::Batch => "batch",
@@ -50,7 +62,7 @@ impl Stage {
     #[must_use]
     pub const fn metric(self) -> Metric {
         match self {
-            Self::Fa | Self::Kv => Metric::Decode,
+            Self::Spec | Self::Fa | Self::Kv => Metric::Decode,
             Self::Batch | Self::Ubatch => Metric::Prefill,
         }
     }
@@ -97,17 +109,23 @@ pub enum Flag {
     CacheTypeV,
     BatchSize,
     UbatchSize,
+    SpecType,
+    SpecDraftNMax,
 }
 
 impl Flag {
+    /// Every spelling the engine accepts, short first; the LAST entry is the
+    /// long spelling `rewrite` appends under.
     #[must_use]
-    pub const fn names(self) -> [&'static str; 2] {
+    pub const fn names(self) -> &'static [&'static str] {
         match self {
-            Self::FlashAttn => ["-fa", "--flash-attn"],
-            Self::CacheTypeK => ["-ctk", "--cache-type-k"],
-            Self::CacheTypeV => ["-ctv", "--cache-type-v"],
-            Self::BatchSize => ["-b", "--batch-size"],
-            Self::UbatchSize => ["-ub", "--ubatch-size"],
+            Self::FlashAttn => &["-fa", "--flash-attn"],
+            Self::CacheTypeK => &["-ctk", "--cache-type-k"],
+            Self::CacheTypeV => &["-ctv", "--cache-type-v"],
+            Self::BatchSize => &["-b", "--batch-size"],
+            Self::UbatchSize => &["-ub", "--ubatch-size"],
+            Self::SpecType => &["--spec-type"],
+            Self::SpecDraftNMax => &["--spec-draft-n-max"],
         }
     }
 }
@@ -137,10 +155,90 @@ pub fn rewrite(argv: &[String], flag: Flag, value: &str) -> Vec<String> {
         index += if skip_value { 2 } else { 1 };
     }
     if !replaced {
-        out.push(names[1].to_owned());
+        out.extend(names.last().map(|name| (*name).to_owned()));
         out.push(value.to_owned());
     }
     out
+}
+
+/// `argv` without `flag` and its value, wherever and however often it appears.
+///
+/// The one tune rewrite that removes a flag, because "no speculative
+/// decoding" is the absence of `--spec-type`, not a value of it.
+#[must_use]
+pub fn strip(argv: &[String], flag: Flag) -> Vec<String> {
+    let names = flag.names();
+    let mut out = Vec::with_capacity(argv.len());
+    let mut index = 0;
+    while index < argv.len() {
+        if names.contains(&argv[index].as_str()) {
+            index += if argv.get(index + 1).is_some() { 2 } else { 1 };
+            continue;
+        }
+        out.push(argv[index].clone());
+        index += 1;
+    }
+    out
+}
+
+/// One `[tune] spec_drafts` entry, parsed at the plan boundary (spec-stage
+/// design §3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpecDraft {
+    Off,
+    Mtp(u32),
+}
+
+impl SpecDraft {
+    /// `off`, or `mtp:<n>` with `n ≥ 1`; anything else is the named error.
+    pub fn parse(value: &str) -> Result<Self, ChekovError> {
+        let bad = || ChekovError::TuneBadSpecCandidate {
+            value: value.to_owned(),
+        };
+        if value == "off" {
+            return Ok(Self::Off);
+        }
+        let length = value.strip_prefix("mtp:").ok_or_else(bad)?;
+        match length.parse::<u32>() {
+            Ok(n) if n >= 1 => Ok(Self::Mtp(n)),
+            _ => Err(bad()),
+        }
+    }
+
+    /// The spelling `stage_line` and the record carry.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::Off => "off".to_owned(),
+            Self::Mtp(n) => format!("mtp:{n}"),
+        }
+    }
+}
+
+/// Every `[tune] spec_drafts` entry parsed, or the first bad one named.
+pub fn spec_values(cfg: &TuneSection) -> Result<Vec<SpecDraft>, ChekovError> {
+    cfg.spec_drafts
+        .iter()
+        .map(|v| SpecDraft::parse(v))
+        .collect()
+}
+
+/// `incumbent` carrying `value` for the spec stage: both flags rewritten
+/// together for `mtp:<n>`, both stripped for `off` (spec-stage design §3).
+fn apply_spec(incumbent: &[String], value: &str) -> Vec<String> {
+    match SpecDraft::parse(value) {
+        Ok(SpecDraft::Mtp(n)) => {
+            let typed = rewrite(incumbent, Flag::SpecType, "draft-mtp");
+            rewrite(&typed, Flag::SpecDraftNMax, &n.to_string())
+        }
+        // `off`, or a value `spec_values` already refused at plan time.
+        Ok(SpecDraft::Off) | Err(_) => strip_spec(incumbent),
+    }
+}
+
+/// `argv` without either speculative flag.
+fn strip_spec(argv: &[String]) -> Vec<String> {
+    strip(&strip(argv, Flag::SpecType), Flag::SpecDraftNMax)
 }
 
 /// The value `flag` currently carries in `argv`, under either spelling.
@@ -151,22 +249,33 @@ pub fn value_of(argv: &[String], flag: Flag) -> Option<String> {
     argv.get(position + 1).cloned()
 }
 
+/// The flags `applied_extra_flags` copies from a winner.
+const APPLIED_FLAGS: [Flag; 7] = [
+    Flag::FlashAttn,
+    Flag::CacheTypeK,
+    Flag::CacheTypeV,
+    Flag::BatchSize,
+    Flag::UbatchSize,
+    Flag::SpecType,
+    Flag::SpecDraftNMax,
+];
+
 /// `current` with every flag the winner carries rewritten to the winner's
 /// value; a flag the winner does not carry is left untouched (spec §8).
+///
+/// Except the speculative pair: a winner without `--spec-type` is one the
+/// spec stage switched off, and the current flags must lose theirs too
+/// (spec-stage design §5).
 #[must_use]
 pub fn applied_extra_flags(current: &[String], winner: &[String]) -> Vec<String> {
-    const FLAGS: [Flag; 5] = [
-        Flag::FlashAttn,
-        Flag::CacheTypeK,
-        Flag::CacheTypeV,
-        Flag::BatchSize,
-        Flag::UbatchSize,
-    ];
     let mut out = current.to_vec();
-    for flag in FLAGS {
+    for flag in APPLIED_FLAGS {
         if let Some(value) = value_of(winner, flag) {
             out = rewrite(&out, flag, &value);
         }
+    }
+    if value_of(winner, Flag::SpecType).is_none() {
+        out = strip_spec(&out);
     }
     out
 }
@@ -201,6 +310,7 @@ fn incumbent_batch(incumbent: &[String]) -> u32 {
 /// incumbent, which is what the plan says out loud.
 pub(crate) fn values_for(stage: Stage, incumbent: &[String], cfg: &TuneSection) -> Vec<String> {
     match stage {
+        Stage::Spec => cfg.spec_drafts.clone(),
         Stage::Fa => cfg.flash_attn.clone(),
         Stage::Kv => cfg.cache_types.clone(),
         Stage::Batch => cfg.batch_sizes.iter().map(u32::to_string).collect(),
@@ -216,9 +326,10 @@ pub(crate) fn values_for(stage: Stage, incumbent: &[String], cfg: &TuneSection) 
 }
 
 /// `incumbent` rewritten to carry `value` for `stage`'s flag(s); `Kv`
-/// rewrites K and V together.
+/// rewrites K and V together, `Spec` rewrites or strips its pair.
 fn apply(stage: Stage, incumbent: &[String], value: &str) -> Vec<String> {
     match stage {
+        Stage::Spec => apply_spec(incumbent, value),
         Stage::Fa => rewrite(incumbent, Flag::FlashAttn, value),
         Stage::Kv => {
             let with_k = rewrite(incumbent, Flag::CacheTypeK, value);
@@ -485,33 +596,6 @@ pub fn thermal_note(before: Option<u32>, after: Option<u32>) -> Option<u32> {
         .min()
 }
 
-/// The bench stamp's flag sextet, read straight off a trial's argv so a
-/// tune trial and a bench run describe a configuration in the same words.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FlagSextet {
-    pub kv_unified: String,
-    pub n_batch: String,
-    pub n_ubatch: String,
-    pub type_k: String,
-    pub type_v: String,
-    pub flash_attn: String,
-}
-
-/// Read the flag sextet off a launch argv (spec §8 — same name pairs as
-/// `build_head`).
-#[must_use]
-pub fn sextet(argv: &[String]) -> FlagSextet {
-    FlagSextet {
-        kv_unified: flag_value_either(argv, &["-kvu", "--kv-unified"]),
-        n_batch: flag_value_either(argv, &["-b", "--batch-size"]),
-        n_ubatch: flag_value_either(argv, &["-ub", "--ubatch-size"]),
-        type_k: flag_value_either(argv, &["-ctk", "--cache-type-k"]),
-        type_v: flag_value_either(argv, &["-ctv", "--cache-type-v"]),
-        flash_attn: flag_value_either(argv, &["-fa", "--flash-attn"]),
-    }
-}
-
 /// The probe geometry a run measured under (spec §8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -528,7 +612,10 @@ pub struct Trial {
     pub stage: String,
     pub value: Option<String>,
     pub argv: Vec<String>,
-    pub stamp: FlagSextet,
+    /// The bench stamp's flag set, read off `argv` the same way `build_head`
+    /// reads a run's, so a trial and a run describe a configuration in the
+    /// same words (spec §8).
+    pub stamp: crate::core::bench::stamp::LaunchFlags,
     pub outcome: String,
     pub decode: Option<Summary>,
     pub prefill: Option<Summary>,
@@ -584,8 +671,12 @@ pub fn write_record(path: &Path, record: &Record) -> Result<(), ChekovError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Candidate, Flag, Metric, Stage, candidates, rewrite, stages, value_of};
+    use super::{
+        Candidate, Flag, Metric, SpecDraft, Stage, candidates, rewrite, spec_values, stages, strip,
+        value_of,
+    };
     use crate::core::config::TuneSection;
+    use crate::error::ChekovError;
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| (*p).to_owned()).collect()
@@ -615,6 +706,12 @@ mod tests {
         );
         assert_eq!(value_of(&short, Flag::BatchSize).as_deref(), Some("2048"));
         assert_eq!(value_of(&short, Flag::UbatchSize), None);
+        let appended = rewrite(&argv(&["-fa", "on"]), Flag::SpecType, "draft-mtp");
+        assert_eq!(
+            appended,
+            argv(&["-fa", "on", "--spec-type", "draft-mtp"]),
+            "a one-spelling flag appends itself"
+        );
     }
 
     #[test]
@@ -672,8 +769,19 @@ mod tests {
         );
         assert!(stages(Some(&argv(&["threads"]))).is_err());
         assert_eq!(
-            (Stage::Fa.metric(), Stage::Kv.metric()),
-            (Metric::Decode, Metric::Decode)
+            Stage::ORDER,
+            [
+                Stage::Spec,
+                Stage::Fa,
+                Stage::Kv,
+                Stage::Batch,
+                Stage::Ubatch
+            ]
+        );
+        assert_eq!(Stage::parse("spec"), Some(Stage::Spec));
+        assert_eq!(
+            (Stage::Spec.metric(), Stage::Fa.metric(), Stage::Kv.metric()),
+            (Metric::Decode, Metric::Decode, Metric::Decode)
         );
         assert_eq!(
             (Stage::Batch.metric(), Stage::Ubatch.metric()),
@@ -963,7 +1071,10 @@ mod tests {
         assert_eq!(super::thermal_note(Some(100), Some(100)), None);
     }
 
-    fn sample_record(argv: Vec<String>, stamp: super::FlagSextet) -> super::Record {
+    fn sample_record(
+        argv: Vec<String>,
+        stamp: crate::core::bench::stamp::LaunchFlags,
+    ) -> super::Record {
         super::Record {
             model: "m".into(),
             quant: "Q8_0".into(),
@@ -997,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_round_trips_and_names_its_flag_sextet() {
+    fn a_record_round_trips_and_names_its_launch_flags() {
         let argv = argv(&[
             "--flash-attn",
             "on",
@@ -1008,17 +1119,18 @@ mod tests {
             "--batch-size",
             "4096",
         ]);
-        let sextet = super::sextet(&argv);
+        let flags = crate::core::bench::stamp::launch_flags(&argv);
         assert_eq!(
             (
-                sextet.n_batch.as_str(),
-                sextet.n_ubatch.as_str(),
-                sextet.type_k.as_str(),
-                sextet.flash_attn.as_str()
+                flags.n_batch.as_str(),
+                flags.n_ubatch.as_str(),
+                flags.type_k.as_str(),
+                flags.flash_attn.as_str(),
+                flags.spec_type.as_str()
             ),
-            ("4096", "engine-default", "q8_0", "on")
+            ("4096", "engine-default", "q8_0", "on", "engine-default")
         );
-        let record = sample_record(argv, sextet);
+        let record = sample_record(argv, flags);
         let dir = std::env::temp_dir().join(format!("chekov-tune-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = super::record_path(&dir, "m");
@@ -1036,5 +1148,120 @@ mod tests {
         assert_eq!(back.trials[0].speed_limit_pct, [None, Some(87)]);
         assert!(back.winner.is_none());
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn the_spec_grammar_is_off_or_mtp_n() {
+        assert_eq!(SpecDraft::parse("off").expect("off"), SpecDraft::Off);
+        assert_eq!(SpecDraft::parse("mtp:1").expect("mtp:1"), SpecDraft::Mtp(1));
+        assert_eq!(SpecDraft::Mtp(2).label(), "mtp:2");
+        assert_eq!(SpecDraft::Off.label(), "off");
+        for bad in ["mtp", "mtp:0", "mtp:x", "ngram", "on", ""] {
+            let err = SpecDraft::parse(bad).expect_err(bad);
+            assert!(
+                matches!(&err, ChekovError::TuneBadSpecCandidate { value } if value == bad),
+                "{bad}: {err}"
+            );
+        }
+        let cfg = TuneSection {
+            spec_drafts: vec!["off".into(), "mtp:1".into()],
+            ..TuneSection::default()
+        };
+        assert_eq!(
+            spec_values(&cfg).expect("valid"),
+            vec![SpecDraft::Off, SpecDraft::Mtp(1)]
+        );
+        let bad = TuneSection {
+            spec_drafts: vec!["mtp:1".into(), "eagle".into()],
+            ..TuneSection::default()
+        };
+        assert!(spec_values(&bad).is_err());
+    }
+
+    #[test]
+    fn mtp_candidates_rewrite_both_flags_and_off_strips_them() {
+        let cfg = TuneSection::default();
+        let plain = argv(&["--flash-attn", "on", "--cache-type-k", "q8_0"]);
+        let spec = candidates(Stage::Spec, &plain, &cfg);
+        let values: Vec<&str> = spec.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["mtp:1", "mtp:2", "mtp:3"],
+            "off IS the incumbent"
+        );
+        let mut drafted_one = plain;
+        drafted_one.extend(argv(&[
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "1",
+        ]));
+        assert_eq!(spec[0].argv, drafted_one);
+    }
+
+    #[test]
+    fn off_strips_both_flags_wherever_they_sit() {
+        let cfg = TuneSection::default();
+        let plain = argv(&["--flash-attn", "on", "--cache-type-k", "q8_0"]);
+        let drafted = argv(&[
+            "--flash-attn",
+            "on",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "3",
+            "--cache-type-k",
+            "q8_0",
+        ]);
+        let spec = candidates(Stage::Spec, &drafted, &cfg);
+        let values: Vec<&str> = spec.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(
+            values,
+            vec!["off", "mtp:1", "mtp:2"],
+            "mtp:3 IS the incumbent"
+        );
+        assert_eq!(
+            spec[0].argv, plain,
+            "off strips both flags wherever they sit"
+        );
+        let mut rewritten = drafted;
+        rewritten[5] = "1".into();
+        assert_eq!(
+            spec[1].argv, rewritten,
+            "a rewrite keeps the flags where they were"
+        );
+        assert_eq!(
+            strip(&plain, Flag::SpecType),
+            plain,
+            "nothing to strip returns the argv"
+        );
+        let stray = argv(&["--spec-draft-n-max", "2"]);
+        assert_eq!(strip(&stray, Flag::SpecDraftNMax), argv(&[]));
+    }
+
+    #[test]
+    fn apply_strips_the_spec_flags_when_the_winner_dropped_them() {
+        let current = argv(&[
+            "--temp",
+            "0.6",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "3",
+        ]);
+        let off_won = argv(&["--temp", "0.6", "--flash-attn", "on"]);
+        assert_eq!(
+            super::applied_extra_flags(&current, &off_won),
+            argv(&["--temp", "0.6", "--flash-attn", "on"])
+        );
+        let mut one_won = current.clone();
+        one_won[5] = "1".into();
+        assert_eq!(super::applied_extra_flags(&current, &one_won), one_won);
+        let untouched = argv(&["--temp", "0.6"]);
+        assert_eq!(
+            super::applied_extra_flags(&untouched, &off_won),
+            argv(&["--temp", "0.6", "--flash-attn", "on"]),
+            "nothing to strip, nothing stripped"
+        );
     }
 }

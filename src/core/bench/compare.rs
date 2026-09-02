@@ -145,7 +145,7 @@ pub struct CompareOpts {
 }
 
 /// The fields `--cross-runtime` permits to differ, and no others.
-const CROSS_RUNTIME_ALLOWED: [&str; 12] = [
+const CROSS_RUNTIME_ALLOWED: [&str; 14] = [
     "runtime",
     "timing_source",
     "engine_build_commit",
@@ -157,6 +157,8 @@ const CROSS_RUNTIME_ALLOWED: [&str; 12] = [
     "type_k",
     "type_v",
     "flash_attn",
+    "spec_type",
+    "spec_draft_n_max",
     "prompt_set_hash",
 ];
 
@@ -224,8 +226,10 @@ fn assert_same_environment(pair: &RunPair, opts: &CompareOpts) -> Result<(), Che
     stamp::mismatch_error(a, &b_env).map_or(Ok(()), Err)
 }
 
-/// Masks exactly the `--cross-runtime` allow-list (spec §7) onto `b_env` —
-/// the fields a foreign runtime is permitted to differ on, and no others.
+/// Masks exactly the 14-entry `--cross-runtime` allow-list (spec §7) onto
+/// `b_env` — the fields a foreign runtime is permitted to differ on, and no
+/// others. A foreign server's speculative flags are as unobservable as its
+/// KV flags, which is why the two ride along.
 fn mask_cross_runtime(b_env: &mut Stamp, a: &Stamp) {
     b_env.runtime.clone_from(&a.runtime);
     b_env.timing_source.clone_from(&a.timing_source);
@@ -238,6 +242,8 @@ fn mask_cross_runtime(b_env: &mut Stamp, a: &Stamp) {
     b_env.type_k.clone_from(&a.type_k);
     b_env.type_v.clone_from(&a.type_v);
     b_env.flash_attn.clone_from(&a.flash_attn);
+    b_env.spec_type.clone_from(&a.spec_type);
+    b_env.spec_draft_n_max.clone_from(&a.spec_draft_n_max);
     b_env.prompt_set_hash.clone_from(&a.prompt_set_hash);
 }
 
@@ -1152,6 +1158,8 @@ mod tests {
             type_k: "q8_0".into(),
             type_v: "q8_0".into(),
             flash_attn: "on".into(),
+            spec_type: "engine-default".into(),
+            spec_draft_n_max: "engine-default".into(),
             allow_exec: false,
             cargo_version: None,
             exec_target: "none".into(),
@@ -1286,7 +1294,7 @@ mod tests {
 
     #[test]
     fn timing_source_is_allow_listed_only_under_cross_runtime() {
-        assert_eq!(super::CROSS_RUNTIME_ALLOWED.len(), 12);
+        assert_eq!(super::CROSS_RUNTIME_ALLOWED.len(), 14);
 
         let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
         let mut foreign = stamp("dda1b0d67", "r1/s1");
@@ -1312,6 +1320,43 @@ mod tests {
                 .lines()
                 .any(|line| line.starts_with("timing_source: ")),
             "banner missing timing_source: {banner}"
+        );
+    }
+
+    /// A run decoded with the MTP head and one decoded without it are
+    /// different environments: refused by name, masked only under
+    /// `--cross-runtime`, and named in the banner (spec-stage design §6).
+    #[test]
+    fn a_differing_spec_type_is_refused_and_allow_listed_only_under_cross_runtime() {
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut drafted = stamp("dda1b0d67", "r1/s1");
+        drafted.spec_type = "draft-mtp".into();
+        drafted.spec_draft_n_max = "1".into();
+        let b = run("m2", drafted, &[19.0, 21.0, 22.0]);
+        let err = compare_runs(&a, &b, &opts(5.0)).expect_err("the head is an environment");
+        match err {
+            ChekovError::BenchStampMismatch { field, a, b } => {
+                assert_eq!(field, "spec_type");
+                assert_eq!(
+                    (a.as_str(), b.as_str()),
+                    ("\"engine-default\"", "\"draft-mtp\"")
+                );
+            }
+            other => panic!("expected stamp mismatch, got {other}"),
+        }
+        let cross = CompareOpts {
+            cross_runtime: true,
+            ..opts(5.0)
+        };
+        assert!(compare_runs(&a, &b, &cross).is_ok());
+        let banner = cross_runtime_banner(&a.head.stamp, &b.head.stamp);
+        assert!(
+            banner.contains("spec_type: \"engine-default\" vs \"draft-mtp\""),
+            "{banner}"
+        );
+        assert!(
+            banner.contains("spec_draft_n_max: \"engine-default\" vs \"1\""),
+            "{banner}"
         );
     }
 

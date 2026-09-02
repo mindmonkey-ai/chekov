@@ -37,7 +37,7 @@ pub struct TuneCmd {
     /// Write the winning flags into the model's `extra_flags`.
     #[arg(long)]
     pub apply: bool,
-    /// Restrict the descent to these stages: fa, kv, batch, ubatch.
+    /// Restrict the descent to these stages: spec, fa, kv, batch, ubatch.
     #[arg(long, value_delimiter = ',')]
     pub stages: Vec<String>,
 }
@@ -47,6 +47,9 @@ pub struct TuneCmd {
 struct Plan<'a> {
     eff: Effective,
     stages: Vec<Stage>,
+    /// Why the spec stage cannot measure on this machine, decided once at
+    /// plan time (spec-stage design §4, skips 1 and 2); `None` when it can.
+    spec_skip: Option<String>,
     tune: &'a TuneSection,
     sweep: SweepPlan,
     significance_pct: f64,
@@ -106,6 +109,7 @@ fn defaults_won_line(significance_pct: f64) -> String {
 /// cannot drift apart on what llama-server actually defaults to.
 fn engine_default(stage: Stage) -> String {
     match stage {
+        Stage::Spec => "off".to_owned(),
         Stage::Fa => "auto".to_owned(),
         Stage::Kv => "f16".to_owned(),
         Stage::Batch => tune::ENGINE_DEFAULT_BATCH.to_string(),
@@ -117,6 +121,7 @@ fn engine_default(stage: Stage) -> String {
 /// reads K — they never diverge, because `candidates` rewrites both.
 const fn flag_of(stage: Stage) -> tune::Flag {
     match stage {
+        Stage::Spec => tune::Flag::SpecType,
         Stage::Fa => tune::Flag::FlashAttn,
         Stage::Kv => tune::Flag::CacheTypeK,
         Stage::Batch => tune::Flag::BatchSize,
@@ -126,7 +131,24 @@ const fn flag_of(stage: Stage) -> tune::Flag {
 
 /// The value the incumbent already runs for `stage`'s flag.
 fn incumbent_value(stage: Stage, incumbent: &[String]) -> String {
+    if stage == Stage::Spec {
+        return spec_incumbent(incumbent);
+    }
     tune::value_of(incumbent, flag_of(stage)).unwrap_or_else(|| engine_default(stage))
+}
+
+/// `off` without `--spec-type draft-mtp`; otherwise `mtp:<n>` with the
+/// engine's own draft length when the flag is absent (spec-stage design §3).
+/// Any other `--spec-type` reads as `off` here and is named by
+/// `foreign_spec_skip`.
+fn spec_incumbent(incumbent: &[String]) -> String {
+    if tune::value_of(incumbent, tune::Flag::SpecType).as_deref() != Some("draft-mtp") {
+        return engine_default(Stage::Spec);
+    }
+    let length = tune::value_of(incumbent, tune::Flag::SpecDraftNMax)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(tune::ENGINE_DEFAULT_SPEC_DRAFT_N_MAX);
+    tune::SpecDraft::Mtp(length).label()
 }
 
 /// The candidates a stage actually launches: its value list minus the one the
@@ -170,11 +192,13 @@ fn counted_against(plan: &Plan, stage: Stage) -> Vec<String> {
 
 /// The launch ceiling: the baseline plus one launch per non-incumbent
 /// candidate. An upper bound for every descent outcome — a stage's winner can
-/// only shrink what follows, and a skip costs nothing (spec §7).
+/// only shrink what follows, and a skip costs nothing (spec §7). A spec stage
+/// gated at plan time launches nothing, so it counts nothing.
 fn max_launches(plan: &Plan) -> usize {
     1 + plan
         .stages
         .iter()
+        .filter(|&&stage| !(stage == Stage::Spec && plan.spec_skip.is_some()))
         .map(|&stage| planned(stage, &counted_against(plan, stage), plan.tune).len())
         .sum::<usize>()
 }
@@ -184,12 +208,17 @@ fn max_launches(plan: &Plan) -> usize {
 fn stage_plan_line(plan: &Plan, stage: Stage) -> String {
     let argv = counted_against(plan, stage);
     let listed = tune::values_for(stage, &argv, plan.tune).len();
+    if let (Stage::Spec, Some(reason)) = (stage, plan.spec_skip.as_deref()) {
+        let label = stage.label();
+        return format!("  {label:<10} {listed} candidates   (skipped: {reason})\n");
+    }
     let held = if listed > planned(stage, &argv, plan.tune).len() {
         "1 is the incumbent"
     } else {
         "none is the incumbent"
     };
     let note = match stage {
+        Stage::Spec => "; needs an MTP head in the GGUF",
         Stage::Kv => "; the f16 KV is footprint-gated per trial",
         Stage::Ubatch => "; values ≤ the incumbent batch",
         Stage::Fa | Stage::Batch => "",
@@ -304,6 +333,75 @@ fn fa_skip(candidate: &tune::Candidate, incumbent: &[String]) -> Option<String> 
     })
 }
 
+/// Skip 1's pure half: a head the GGUF does not carry, or a header that
+/// could not be read at all — said which, never guessed (spec-stage design
+/// §4).
+fn head_gate(
+    geometry: Result<crate::core::gguf::Geometry, ChekovError>,
+    shard: &std::path::Path,
+) -> Option<String> {
+    match geometry {
+        Ok(g) if g.nextn_predict_layers.unwrap_or(0) > 0 => None,
+        Ok(g) => Some(format!(
+            "no MTP head in the GGUF (nextn_predict_layers {})",
+            g.nextn_predict_layers.unwrap_or(0)
+        )),
+        Err(_) => Some(format!(
+            "the first shard's header could not be read ({})",
+            shard.display()
+        )),
+    }
+}
+
+/// Skip 2's pure half: the engine's own `--help` — the same text the
+/// flag-hygiene assertion reads — has no `--spec-type`. An uncapturable
+/// help is not a skip: the launch-time assertion states that loudly.
+fn engine_gate(help: Option<&str>, commit: &str) -> Option<String> {
+    let help = help?;
+    (!help.contains("--spec-type"))
+        .then(|| format!("engine {commit} has no --spec-type — chekov update --engine"))
+}
+
+/// Skips 1 and 2, decided once per run before the confirm gate.
+fn spec_gate(ctx: &Ctx, eff: &Effective) -> Option<String> {
+    let cfg = &ctx.config;
+    let shard = crate::core::server::shard_path(cfg, eff);
+    if let Some(reason) = head_gate(crate::core::gguf::read_geometry(&shard), &shard) {
+        return Some(reason);
+    }
+    let help = lifecycle::server_help(&cfg.engine_dir());
+    let commit = crate::core::engine::current_commit(&cfg.engine_dir())
+        .unwrap_or_else(|| "unknown".to_owned());
+    engine_gate(help.as_deref(), &commit)
+}
+
+/// Skip 3: `--spec-type` set to anything but `draft-mtp` alone — chekov does
+/// not guess what a user's ngram or separate-draft configuration is worth.
+fn foreign_spec_skip(candidate: &tune::Candidate, incumbent: &[String]) -> Option<String> {
+    if candidate.stage != Stage::Spec {
+        return None;
+    }
+    let value = tune::value_of(incumbent, tune::Flag::SpecType)?;
+    (value != "draft-mtp").then(|| {
+        format!("the spec stage tunes draft-mtp only; the incumbent runs --spec-type {value}")
+    })
+}
+
+/// Every pre-launch skip the spec stage names, in order (spec-stage design
+/// §4). A gated stage still launches an `off` candidate: switching the head
+/// off needs no head.
+fn spec_skip(plan: &Plan, candidate: &tune::Candidate, incumbent: &[String]) -> Option<String> {
+    if candidate.stage != Stage::Spec {
+        return None;
+    }
+    let gated = plan
+        .spec_skip
+        .as_ref()
+        .filter(|_| candidate.value != "off")
+        .cloned();
+    gated.or_else(|| foreign_spec_skip(candidate, incumbent))
+}
+
 /// Who measured, and under what probe (spec §9's first line).
 fn header(record: &Record) -> String {
     let Record {
@@ -416,7 +514,7 @@ fn trial_row(trial: &TrialOutcome, verdict: Option<&Verdict>) -> Trial {
             .map_or("baseline", |p| p.stage.label())
             .to_owned(),
         value: trial.picked.as_ref().map(|p| p.value.clone()),
-        stamp: tune::sextet(&trial.argv),
+        stamp: crate::core::bench::stamp::launch_flags(&trial.argv),
         argv: trial.argv.clone(),
         outcome: outcome.to_owned(),
         decode: measured.map(|m| m.decode.clone()),
@@ -560,8 +658,10 @@ impl<'a> Session<'a> {
         candidate: tune::Candidate,
         incumbent: &Incumbent,
     ) -> Result<Completed, ChekovError> {
-        match kv_skip(&candidate, &incumbent.argv).or_else(|| fa_skip(&candidate, &incumbent.argv))
-        {
+        let skipped = spec_skip(self.plan, &candidate, &incumbent.argv)
+            .or_else(|| kv_skip(&candidate, &incumbent.argv))
+            .or_else(|| fa_skip(&candidate, &incumbent.argv));
+        match skipped {
             Some(reason) => Ok(Completed {
                 trial: TrialOutcome {
                     argv: candidate.argv.clone(),
@@ -759,9 +859,19 @@ impl TuneCmd {
         };
         let bench = &ctx.config.file.bench;
         let requested = (!self.stages.is_empty()).then_some(self.stages.as_slice());
+        let eff = registry.effective(&name)?;
+        let stages = tune::stages(requested)?;
+        // The grammar is checked before anything prints, and the GGUF is
+        // read only when the stage will run.
+        tune::spec_values(&ctx.config.file.tune)?;
+        let spec_skip = stages
+            .contains(&Stage::Spec)
+            .then(|| spec_gate(ctx, &eff))
+            .flatten();
         Ok(Plan {
-            eff: registry.effective(&name)?,
-            stages: tune::stages(requested)?,
+            eff,
+            stages,
+            spec_skip,
             tune: &ctx.config.file.tune,
             sweep: SweepPlan {
                 depths: vec![ctx.config.file.tune.depth],
@@ -833,7 +943,6 @@ mod tests {
     use crate::core::stats::Summary;
     use crate::core::tune::{
         Candidate, DEFAULTS_WON, Measured, Outcome, Probe, Record, Stage, THERMAL_SOURCE, Trial,
-        sextet,
     };
     use crate::error::ChekovError;
 
@@ -864,6 +973,7 @@ mod tests {
         super::Plan {
             eff: effective(flags),
             stages: Stage::ORDER.to_vec(),
+            spec_skip: None,
             tune,
             sweep: SweepPlan {
                 depths: vec![4096],
@@ -888,7 +998,7 @@ mod tests {
         Trial {
             stage: stage.to_owned(),
             value: value.map(str::to_owned),
-            stamp: sextet(&argv),
+            stamp: crate::core::bench::stamp::launch_flags(&argv),
             argv,
             outcome: "measured".into(),
             decode: Some(summary(31.2, 0.4)),
@@ -979,8 +1089,8 @@ mod tests {
         );
         assert_eq!(
             super::max_launches(&plan),
-            9,
-            "baseline + 1 + 1 + 3 + 3 with the default lists"
+            12,
+            "baseline + 3 + 1 + 1 + 3 + 3 with the default lists"
         );
         let text = super::plan_text(&plan, Some(35 * 1024 * 1024 * 1024), None);
         assert!(
@@ -997,7 +1107,7 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(text.contains("  ≤ 9 launches, ~"), "{text}");
+        assert!(text.contains("  ≤ 12 launches, ~"), "{text}");
         let with_running = super::plan_text(&plan, None, Some("m"));
         assert!(
             with_running.contains("will stop the running 'm' first"),
@@ -1013,11 +1123,11 @@ mod tests {
         let borrowed: Vec<&str> = flags.iter().map(String::as_str).collect();
         let plan = plan_for(&tune, &borrowed);
         // Counted against the baseline's own 512, ubatch lists only 256 and
-        // 512 and the bound would print 7 — which a batch stage that wins
+        // 512 and the bound would print 10 — which a batch stage that wins
         // 4096 then exceeds. The ceiling has to hold for every outcome.
         assert_eq!(
             super::max_launches(&plan),
-            9,
+            12,
             "ubatch is counted against 4096, the largest configured batch"
         );
         let text = super::plan_text(&plan, None, None);
@@ -1251,6 +1361,151 @@ mod tests {
             argv: vec![],
         };
         assert!(super::fa_skip(&kv_q8_0, &quantized_short).is_none());
+    }
+
+    #[test]
+    fn the_spec_incumbent_reads_off_mtp_n_and_the_engine_default_length() {
+        assert_eq!(super::incumbent_value(Stage::Spec, &[]), "off");
+        let drafted = argv(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]);
+        assert_eq!(super::incumbent_value(Stage::Spec, &drafted), "mtp:1");
+        let default_len = argv(&["--spec-type", "draft-mtp"]);
+        assert_eq!(super::incumbent_value(Stage::Spec, &default_len), "mtp:3");
+        let ngram = argv(&["--spec-type", "ngram-mod"]);
+        assert_eq!(
+            super::incumbent_value(Stage::Spec, &ngram),
+            "off",
+            "not ours to read; skip 3 names it"
+        );
+    }
+
+    #[test]
+    fn the_head_gate_names_a_missing_head_and_an_unreadable_shard() {
+        use crate::core::gguf::Geometry;
+        let shard = Path::new("/models/m/m.gguf");
+        let headed = Geometry {
+            nextn_predict_layers: Some(1),
+            ..Geometry::default()
+        };
+        assert!(super::head_gate(Ok(headed), shard).is_none());
+        let headless = Geometry {
+            nextn_predict_layers: Some(0),
+            ..Geometry::default()
+        };
+        assert_eq!(
+            super::head_gate(Ok(headless), shard).as_deref(),
+            Some("no MTP head in the GGUF (nextn_predict_layers 0)")
+        );
+        assert_eq!(
+            super::head_gate(Ok(Geometry::default()), shard).as_deref(),
+            Some("no MTP head in the GGUF (nextn_predict_layers 0)")
+        );
+        let unreadable = super::head_gate(Err(ChekovError::ServerNotRunning), shard);
+        assert_eq!(
+            unreadable.as_deref(),
+            Some("the first shard's header could not be read (/models/m/m.gguf)")
+        );
+    }
+
+    #[test]
+    fn the_engine_gate_names_an_engine_without_the_flag_and_trusts_an_unreadable_help() {
+        assert!(super::engine_gate(Some("--spec-type none,draft-mtp"), "0f194b907").is_none());
+        assert_eq!(
+            super::engine_gate(Some("--flash-attn"), "d7bd3bfca").as_deref(),
+            Some("engine d7bd3bfca has no --spec-type — chekov update --engine")
+        );
+        assert!(
+            super::engine_gate(None, "0f194b907").is_none(),
+            "an uncapturable --help is the launch-time assertion's problem, as today"
+        );
+    }
+
+    #[test]
+    fn a_foreign_speculative_incumbent_skips_every_spec_candidate_and_only_those() {
+        let mtp1 = Candidate {
+            stage: Stage::Spec,
+            value: "mtp:1".into(),
+            argv: vec![],
+        };
+        let ngram = argv(&["--spec-type", "ngram-mod"]);
+        assert_eq!(
+            super::foreign_spec_skip(&mtp1, &ngram).as_deref(),
+            Some("the spec stage tunes draft-mtp only; the incumbent runs --spec-type ngram-mod")
+        );
+        let listed = argv(&["--spec-type", "draft-mtp,ngram-mod"]);
+        assert!(super::foreign_spec_skip(&mtp1, &listed).is_some());
+        let ours = argv(&["--spec-type", "draft-mtp"]);
+        assert!(super::foreign_spec_skip(&mtp1, &ours).is_none());
+        assert!(super::foreign_spec_skip(&mtp1, &[]).is_none());
+        let fa = Candidate {
+            stage: Stage::Fa,
+            value: "off".into(),
+            argv: vec![],
+        };
+        assert!(super::foreign_spec_skip(&fa, &ngram).is_none());
+    }
+
+    #[test]
+    fn a_gated_spec_stage_counts_no_launches_and_says_why_on_the_plan() {
+        let tune = TuneSection::default();
+        let mut plan = plan_for(&tune, &[]);
+        plan.spec_skip = Some("no MTP head in the GGUF (nextn_predict_layers 0)".into());
+        let text = super::plan_text(&plan, None, None);
+        assert!(
+            text.contains(
+                "  spec       4 candidates   (skipped: no MTP head in the GGUF (nextn_predict_layers 0))\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            super::max_launches(&plan),
+            10,
+            "baseline + 0 + 2 + 1 + 3 + 3: the three mtp candidates cost nothing"
+        );
+        let ungated = plan_for(&tune, &[]);
+        let text = super::plan_text(&ungated, None, None);
+        assert!(
+            text.contains(
+                "  spec       4 candidates   (1 is the incumbent; needs an MTP head in the GGUF)\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_gated_spec_candidate_is_skipped_before_any_spawn() {
+        let ctx = scratch_ctx("chekov-test-tune-spec-skip");
+        let tune = TuneSection::default();
+        let mut plan = plan_for(&tune, &[]);
+        plan.spec_skip = Some("no MTP head in the GGUF (nextn_predict_layers 0)".into());
+        let session = super::Session {
+            ctx: &ctx,
+            plan: &plan,
+            path: PathBuf::from("unused"),
+            record: record_of(vec![], None),
+            lines: Vec::new(),
+        };
+        let incumbent = super::Incumbent {
+            argv: vec![],
+            measured: Measured {
+                decode: summary(31.2, 0.4),
+                prefill: summary(402.0, 4.0),
+                prompt_n: 4101,
+            },
+        };
+        let mtp1 = Candidate {
+            stage: Stage::Spec,
+            value: "mtp:1".into(),
+            argv: argv(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]),
+        };
+        let completed = session
+            .trial(mtp1, &incumbent)
+            .expect("a skip, not an error");
+        match completed.trial.outcome {
+            Outcome::Skipped(reason) => {
+                assert_eq!(reason, "no MTP head in the GGUF (nextn_predict_layers 0)");
+            }
+            _ => panic!("expected a skipped trial"),
+        }
     }
 
     #[test]
