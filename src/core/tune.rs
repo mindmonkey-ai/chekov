@@ -559,8 +559,12 @@ pub fn write_record(path: &Path, record: &Record) -> Result<(), ChekovError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Candidate, Flag, Metric, Stage, candidates, rewrite, stages, value_of};
+    use super::{
+        Candidate, Flag, Metric, SpecDraft, Stage, candidates, rewrite, spec_values, stages,
+        strip, value_of,
+    };
     use crate::core::config::TuneSection;
+    use crate::error::ChekovError;
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| (*p).to_owned()).collect()
@@ -590,6 +594,12 @@ mod tests {
         );
         assert_eq!(value_of(&short, Flag::BatchSize).as_deref(), Some("2048"));
         assert_eq!(value_of(&short, Flag::UbatchSize), None);
+        let appended = rewrite(&argv(&["-fa", "on"]), Flag::SpecType, "draft-mtp");
+        assert_eq!(
+            appended,
+            argv(&["-fa", "on", "--spec-type", "draft-mtp"]),
+            "a one-spelling flag appends itself"
+        );
     }
 
     #[test]
@@ -647,8 +657,13 @@ mod tests {
         );
         assert!(stages(Some(&argv(&["threads"]))).is_err());
         assert_eq!(
-            (Stage::Fa.metric(), Stage::Kv.metric()),
-            (Metric::Decode, Metric::Decode)
+            Stage::ORDER,
+            [Stage::Spec, Stage::Fa, Stage::Kv, Stage::Batch, Stage::Ubatch]
+        );
+        assert_eq!(Stage::parse("spec"), Some(Stage::Spec));
+        assert_eq!(
+            (Stage::Spec.metric(), Stage::Fa.metric(), Stage::Kv.metric()),
+            (Metric::Decode, Metric::Decode, Metric::Decode)
         );
         assert_eq!(
             (Stage::Batch.metric(), Stage::Ubatch.metric()),
@@ -1015,5 +1030,92 @@ mod tests {
         assert_eq!(back.trials[0].speed_limit_pct, [None, Some(87)]);
         assert!(back.winner.is_none());
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn the_spec_grammar_is_off_or_mtp_n() {
+        assert_eq!(SpecDraft::parse("off").expect("off"), SpecDraft::Off);
+        assert_eq!(SpecDraft::parse("mtp:1").expect("mtp:1"), SpecDraft::Mtp(1));
+        assert_eq!(SpecDraft::Mtp(2).label(), "mtp:2");
+        assert_eq!(SpecDraft::Off.label(), "off");
+        for bad in ["mtp", "mtp:0", "mtp:x", "ngram", "on", ""] {
+            let err = SpecDraft::parse(bad).expect_err(bad);
+            assert!(
+                matches!(&err, ChekovError::TuneBadSpecCandidate { value } if value == bad),
+                "{bad}: {err}"
+            );
+        }
+        let cfg = TuneSection {
+            spec_drafts: vec!["off".into(), "mtp:1".into()],
+            ..TuneSection::default()
+        };
+        assert_eq!(
+            spec_values(&cfg).expect("valid"),
+            vec![SpecDraft::Off, SpecDraft::Mtp(1)]
+        );
+        let bad = TuneSection {
+            spec_drafts: vec!["mtp:1".into(), "eagle".into()],
+            ..TuneSection::default()
+        };
+        assert!(spec_values(&bad).is_err());
+    }
+
+    #[test]
+    fn mtp_candidates_rewrite_both_flags_and_off_strips_them() {
+        let cfg = TuneSection::default();
+        let plain = argv(&["--flash-attn", "on", "--cache-type-k", "q8_0"]);
+        let spec = candidates(Stage::Spec, &plain, &cfg);
+        let values: Vec<&str> = spec.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, vec!["mtp:1", "mtp:2", "mtp:3"], "off IS the incumbent");
+        let mut drafted_one = plain.clone();
+        drafted_one.extend(argv(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]));
+        assert_eq!(spec[0].argv, drafted_one);
+
+        let drafted = argv(&[
+            "--flash-attn",
+            "on",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "3",
+            "--cache-type-k",
+            "q8_0",
+        ]);
+        let spec = candidates(Stage::Spec, &drafted, &cfg);
+        let values: Vec<&str> = spec.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, vec!["off", "mtp:1", "mtp:2"], "mtp:3 IS the incumbent");
+        assert_eq!(spec[0].argv, plain, "off strips both flags wherever they sit");
+        let mut rewritten = drafted.clone();
+        rewritten[5] = "1".into();
+        assert_eq!(spec[1].argv, rewritten, "a rewrite keeps the flags where they were");
+        assert_eq!(strip(&plain, Flag::SpecType), plain, "nothing to strip returns the argv");
+        let stray = argv(&["--spec-draft-n-max", "2"]);
+        assert_eq!(strip(&stray, Flag::SpecDraftNMax), argv(&[]));
+    }
+
+    #[test]
+    fn apply_strips_the_spec_flags_when_the_winner_dropped_them() {
+        let current = argv(&[
+            "--temp",
+            "0.6",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "3",
+        ]);
+        let off_won = argv(&["--temp", "0.6", "--flash-attn", "on"]);
+        assert_eq!(
+            super::applied_extra_flags(&current, &off_won),
+            argv(&["--temp", "0.6", "--flash-attn", "on"])
+        );
+        let mut one_won = current.clone();
+        one_won[5] = "1".into();
+        assert_eq!(super::applied_extra_flags(&current, &one_won), one_won);
+        let untouched = argv(&["--temp", "0.6"]);
+        assert_eq!(
+            super::applied_extra_flags(&untouched, &off_won),
+            argv(&["--temp", "0.6", "--flash-attn", "on"]),
+            "nothing to strip, nothing stripped"
+        );
     }
 }

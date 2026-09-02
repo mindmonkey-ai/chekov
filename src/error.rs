@@ -700,8 +700,16 @@ mod tests {
         }
         .to_string();
         assert!(
-            stage.contains("threads") && stage.contains("fa, kv, batch, ubatch"),
+            stage.contains("threads") && stage.contains("spec, fa, kv, batch, ubatch"),
             "{stage}"
+        );
+        let bad = ChekovError::TuneBadSpecCandidate {
+            value: "mtp".into(),
+        }
+        .to_string();
+        assert_eq!(
+            bad,
+            "tune: [tune] spec_drafts entry 'mtp' — expected \"off\" or \"mtp:<n>\" with n ≥ 1"
         );
     }
 }
