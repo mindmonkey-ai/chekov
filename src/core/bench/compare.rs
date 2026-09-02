@@ -1288,7 +1288,7 @@ mod tests {
 
     #[test]
     fn timing_source_is_allow_listed_only_under_cross_runtime() {
-        assert_eq!(super::CROSS_RUNTIME_ALLOWED.len(), 12);
+        assert_eq!(super::CROSS_RUNTIME_ALLOWED.len(), 14);
 
         let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
         let mut foreign = stamp("dda1b0d67", "r1/s1");
@@ -1314,6 +1314,43 @@ mod tests {
                 .lines()
                 .any(|line| line.starts_with("timing_source: ")),
             "banner missing timing_source: {banner}"
+        );
+    }
+
+    /// A run decoded with the MTP head and one decoded without it are
+    /// different environments: refused by name, masked only under
+    /// `--cross-runtime`, and named in the banner (spec-stage design §6).
+    #[test]
+    fn a_differing_spec_type_is_refused_and_allow_listed_only_under_cross_runtime() {
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut drafted = stamp("dda1b0d67", "r1/s1");
+        drafted.spec_type = "draft-mtp".into();
+        drafted.spec_draft_n_max = "1".into();
+        let b = run("m2", drafted, &[19.0, 21.0, 22.0]);
+        let err = compare_runs(&a, &b, &opts(5.0)).expect_err("the head is an environment");
+        match err {
+            ChekovError::BenchStampMismatch { field, a, b } => {
+                assert_eq!(field, "spec_type");
+                assert_eq!(
+                    (a.as_str(), b.as_str()),
+                    ("\"engine-default\"", "\"draft-mtp\"")
+                );
+            }
+            other => panic!("expected stamp mismatch, got {other}"),
+        }
+        let cross = CompareOpts {
+            cross_runtime: true,
+            ..opts(5.0)
+        };
+        assert!(compare_runs(&a, &b, &cross).is_ok());
+        let banner = cross_runtime_banner(&a.head.stamp, &b.head.stamp);
+        assert!(
+            banner.contains("spec_type: \"engine-default\" vs \"draft-mtp\""),
+            "{banner}"
+        );
+        assert!(
+            banner.contains("spec_draft_n_max: \"engine-default\" vs \"1\""),
+            "{banner}"
         );
     }
 

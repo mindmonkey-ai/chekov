@@ -2781,6 +2781,32 @@ mod tests {
         );
     }
 
+    /// The header names speculative decoding exactly when the run used it: a
+    /// plain run's render is what it always was (spec-stage design §6).
+    #[test]
+    fn the_header_names_the_draft_only_when_the_run_was_decoded_with_it() {
+        let eval = scratch("speculative");
+        let plain = rendered_with(&eval, "r-plain", &head());
+        assert!(!plain.contains("speculative:"), "{plain}");
+
+        let mut drafted = head();
+        drafted.stamp.spec_type = "draft-mtp".into();
+        drafted.stamp.spec_draft_n_max = "1".into();
+        let with_head = rendered_with(&eval, "r-draft", &drafted);
+        assert!(
+            with_head.contains("speculative: draft-mtp, draft length 1\n"),
+            "{with_head}"
+        );
+
+        let mut default_len = head();
+        default_len.stamp.spec_type = "draft-mtp".into();
+        let engine_len = rendered_with(&eval, "r-draft-default", &default_len);
+        assert!(
+            engine_len.contains("speculative: draft-mtp, draft length engine-default\n"),
+            "{engine_len}"
+        );
+    }
+
     /// One depth recorded under the given head, rendered.
     fn rendered_with(eval: &std::path::Path, run_id: &str, head: &RunHead) -> String {
         let mut writer = RunWriter::create(eval, run_id, head).expect("create");
