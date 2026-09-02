@@ -3030,6 +3030,32 @@ mod tests {
         assert_eq!(stamp.spec_draft_n_max, "1");
     }
 
+    /// `explain` reads only the GGUF and must not claim what the engine does
+    /// with the head: it points at the measurement (spec-stage design §7).
+    #[test]
+    fn the_nextn_note_points_at_the_tune_stage_and_is_absent_without_a_head() {
+        use crate::core::gguf::Geometry;
+        let headed = Geometry {
+            block_count: Some(41),
+            nextn_predict_layers: Some(1),
+            ..Geometry::default()
+        };
+        let text = super::render_geometry(&headed);
+        assert!(
+            text.contains(
+                "  nextn_predict_layers    1   (a native MTP draft head; `chekov tune --stages \
+                 spec` measures whether it pays)\n"
+            ),
+            "{text}"
+        );
+        let headless = Geometry {
+            block_count: Some(40),
+            ..Geometry::default()
+        };
+        let plain = super::render_geometry(&headless);
+        assert!(plain.contains("  nextn_predict_layers    0\n"), "{plain}");
+    }
+
     /// The stamp `build_head`'s foreign branch assembles, given the parts its
     /// own helper produced — the geometry chekov never observed stays zero.
     fn foreign_stamp(
