@@ -566,6 +566,19 @@ Qwen3.8-Flash-Next (125B-A6B + 51B n-gram; 1-bit GGUF ~73 GB, ~83 GB resident
 even with the n-gram table on SSD — 96 GB+ machines) and GLM-5.3-Flash
 (320B-A18B; 1-bit ~93-100 GB, and still blocked upstream — see the BLOCKED
 entry above). Both remain Studio-class candidates only.
+HEAD-TO-HEAD DONE 2026-09-01 (runs 20260901T070018Z-ornith-1.5-35b-a3b vs
+20260901T064618Z-qwen3.8-27b — same engine 0f194b907, ctx 131072, flags,
+seed, corpus, exec tiers, judge gpt-oss-20b at 100% swap consistency;
+ornith re-benched at qwen's ctx because compare correctly refuses a ctx
+mismatch): decode 80.7/79.8/74.3 vs 23.3/23.2/22.3 tok/s at depths
+1024/4096/16384 — ornith 3.5x faster everywhere, as MoE 3B-active vs 27B
+dense predicts. Quality tied: tool_emit 8/10 both, grammar_gap 6/7 both,
+instruction 12/12 vs 11/12 (one separating case, if-009, both doors), and
+NO codebase metric separates at p < 5% under the paired sign test (qwen
+ahead on in_file exact 0.42 vs 0.25, ornith ahead on cross-file
+parse/symbols — none significant at n = 6-12). Verdict: ornith-1.5-35b-a3b
+stays the daily driver; qwen3.8-27b buys no measured quality for 3.5x
+slower decode. The 9B small-lane face-off remains unrun.
 Proposed 2026-08-30 — status: OPEN
 
 ## tune's fa stage cannot measure `fa off` under quantized KV, and a dead candidate reads as a timeout (2026-09-01)
