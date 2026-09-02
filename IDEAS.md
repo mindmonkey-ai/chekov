@@ -589,7 +589,34 @@ ahead on in_file exact 0.42 vs 0.25, ornith ahead on cross-file
 parse/symbols — none significant at n = 6-12). Verdict: ornith-1.5-35b-a3b
 stays the daily driver; qwen3.8-27b buys no measured quality for 3.5x
 slower decode. The 9B small-lane face-off remains unrun.
-Proposed 2026-08-30 — status: OPEN
+9B FACE-OFF DONE 2026-09-02 — first, a correction to the survey: Qwen
+never released a Qwen3.8-9B. The repos by that name are `empero-ai`'s
+community distill of Qwen3.8-27B into the official `Qwen/Qwen3.5-9B` base
+(~350K downloads, so it is what the small lane actually runs), and the
+official small model is Qwen3.5-9B itself. All three were benched, Q8_0
+each, ctx 131072, engine 0f194b907, same corpus (chekov @ 00874d1), exec
+tiers, judge gpt-oss-20b (runs 20260902T214520Z-ornith-1.5-9b,
+20260902T215041Z-qwen3.5-9b, 20260902T215800Z-qwen3.8-9b-distill):
+SPEED is a three-way tie — 55.9 / 55.3 / 55.6 tok/s decode at depth
+1024, 53.3 / 53.0 / 52.4 at 16384, no pair separates (dense 9B is dense
+9B). AGENTIC splits by axis: tool_emit 8/10 (ornith: te-003 read_file for
+edit_file, te-010 a fabricated call) vs 10/10 (qwen3.5) vs 9/10
+(distill); grammar_gap 6/7 vs 7/7 vs 7/7; instruction 11/12 (ornith) vs
+6/12 (qwen3.5 — five `fenced_rust_only` failures, one `contains`) vs 9/12
+(distill), both doors agreeing on every case. CODEBASE: ornith-1.5-9b
+leads in_file exact 0.42 vs 0.17 vs 0.17 and edit_sim 0.71 vs 0.61 vs
+0.56, ties or trails on function_body and cross-file symbols — nothing
+significant at n = 6-12 under the paired sign test, and the judge column
+is n/a (0-1 eligible crossings per run). Verdict: no 9B wins outright.
+ornith-1.5-9b is the small-lane pick for instruction-bound coding work
+(constraints, in-file fills); qwen3.5-9b is the pick when tool selection
+is the whole job; the distill sits between them on both axes and buys
+nothing the official base does not. Note that ornith-1.5-9b's in_file
+exact (0.42) matches qwen3.8-27b's and beats ornith-1.5-35b-a3b's 0.25
+from the 2026-09-01 pair — a dense 9B fills a masked line as well as the
+big models on this corpus; what the 35B buys is the 3.5x decode speed and
+the agentic ceiling (12/12 instruction, 8/10 tool_emit at 80 tok/s).
+Proposed 2026-08-30 — status: DONE (both face-offs measured)
 
 ## tune's fa stage cannot measure `fa off` under quantized KV, and a dead candidate reads as a timeout (2026-09-01)
 Two full live tunes (ornith-1.5-35b-a3b 2026-08-30, qwen3.8-27b 2026-09-01,
