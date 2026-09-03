@@ -618,6 +618,42 @@ big models on this corpus; what the 35B buys is the 3.5x decode speed and
 the agentic ceiling (12/12 instruction, 8/10 tool_emit at 80 tok/s).
 Proposed 2026-08-30 — status: DONE (both face-offs measured)
 
+## The MTP draft head on real code: +21-31% decode, identical output — and tune's prefill guard says no (2026-09-03)
+Measured 2026-09-03 on `ornith-1.5-35b-a3b` Q8_0 @ ctx 262144, chekov's own
+codebase at 6a6458a as the corpus, exec tiers, judge gpt-oss-20b. First the
+full five-stage `chekov tune --apply`: **defaults won** — `kv f16`, every
+`batch` and every `ubatch` candidate is "no significant difference", `fa off`
+is the named skip under q8_0 KV, and the only candidate that moved anything,
+`spec mtp:1`, was rejected by the stage's own rule: decode 75.4 vs 69.3 but
+prefill 128 vs 147 ("faster on decode but slower on prefill — incumbent
+kept"). Then `--spec-type draft-mtp --spec-draft-n-max 1` hand-applied to
+`extra_flags` and the same bench again (runs
+`20260903T031503Z-ornith-1.5-35b-a3b` untuned vs
+`20260903T044019Z-ornith-1.5-35b-a3b` drafted; `compare --cross-runtime` to
+mask the two flag fields the stamp now carries): decode 86.2 / 88.6 / 76.4
+vs 66.8 / 67.5 / 63.2 tok/s at depths 1024 / 4096 / 16384 (+29 / +31 /
++21%, every depth significant); prefill 145 / 144 / 113 vs 147 / 137 / 125
+(a cost only at 16K, and a wash at 4K); and EVERY quality metric identical —
+tool_emit 8/10, grammar_gap 6/7, instruction 11/12 with no disagreements on
+any case, and all 30 codebase crossings tie on every tier including compile
+and test. The head is a free 21-31% on the daily driver's actual work.
+Two follow-ups this exposes. (a) `tune`'s spec stage judges "not slower on
+prefill" at one depth (4096) and rejects a candidate the workload wants —
+the guard is right in spirit (a second graph does cost prefill) but wrong in
+threshold: proposal, judge the spec stage's prefill on a tolerance
+(`[tune] prefill_tolerance_pct`, default maybe 15) rather than on
+significance alone, or on a combined tokens-per-second-at-workload figure —
+a design choice to make deliberately, not a default to flip. (b)
+`compare --cross-runtime` is the only way to compare two llama.cpp runs that
+differ on a launch flag, and its banner then reads "cross-runtime
+comparison: llama.cpp vs llama.cpp … this measures the runtimes, not the
+model", which is the wrong sentence for a flag experiment: proposal, a
+`--cross-flags` mask (the six flag fields plus the two speculative ones,
+nothing else) with a banner that names the flags and says "this measures
+the launch flags, not the model". The flags were LEFT APPLIED on
+`ornith-1.5-35b-a3b` after this measurement.
+Proposed 2026-09-03 — status: MEASURED; (a) and (b) OPEN
+
 ## tune's fa stage cannot measure `fa off` under quantized KV, and a dead candidate reads as a timeout (2026-09-01)
 Two full live tunes (ornith-1.5-35b-a3b 2026-08-30, qwen3.8-27b 2026-09-01,
 records in `tune/`) both marked the `fa off` trial degenerate "not ready
