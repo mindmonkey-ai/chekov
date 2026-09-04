@@ -54,3 +54,4 @@ flash_attn = ["on", "off"]                # stage fa: --flash-attn candidates
 cache_types = ["q8_0", "f16"]             # stage kv: --cache-type-k/-v candidates
 batch_sizes = [512, 1024, 2048, 4096]     # stage batch: --batch-size candidates
 ubatch_sizes = [256, 512, 1024, 2048]     # stage ubatch: --ubatch-size candidates (<= incumbent batch)
+guard_tolerance_pct = 15                  # a stage winner may lose this much (%) on the other metric; 0 = strict

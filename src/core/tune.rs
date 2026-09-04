@@ -423,47 +423,73 @@ pub struct Verdict {
     pub phrase: String,
 }
 
+/// What the other metric did, and what the guard allows it to do: the
+/// incumbent's primary median (for the no-difference phrase), the candidate's
+/// loss on the other metric in percent of the incumbent's median (negative
+/// when it lost), and the tolerance the run was configured with.
+struct Guard {
+    incumbent_median: f64,
+    other_delta_pct: f64,
+    tolerance_pct: f64,
+}
+
 /// The verdict phrase for one stage's primary/other comparison, and whether
 /// it wins. `comparisons` is `(primary, other)` — bundled so the helper stays
 /// at this crate's clippy argument floor (`clippy.toml`, §3.4).
-fn phrase(
-    comparisons: (Comparison, Comparison),
-    stage: Stage,
-    incumbent_median: f64,
-) -> (bool, String) {
+fn phrase(comparisons: (Comparison, Comparison), stage: Stage, guard: &Guard) -> (bool, String) {
     let (primary, other) = comparisons;
     let primary_label = stage.metric().label();
     let other_label = stage.metric().other().label();
+    let lost = guard.other_delta_pct;
+    let tolerance = guard.tolerance_pct;
     match primary {
         Comparison::Faster if other != Comparison::Slower => (
             true,
             format!("faster on {primary_label}, {other_label} not slower — new incumbent"),
         ),
+        Comparison::Faster if -lost <= tolerance => (
+            true,
+            format!(
+                "faster on {primary_label}, {other_label} {lost:+.0}% is within the \
+                 {tolerance:.0}% guard — new incumbent"
+            ),
+        ),
         Comparison::Faster => (
             false,
-            format!("faster on {primary_label} but slower on {other_label} — incumbent kept"),
+            format!(
+                "faster on {primary_label} but {other_label} {lost:+.0}% is beyond the \
+                 {tolerance:.0}% guard — incumbent kept"
+            ),
         ),
         Comparison::Slower => (false, format!("slower on {primary_label} — incumbent kept")),
         Comparison::NoSignificantDifference => (
             false,
-            format!("no significant difference vs {incumbent_median:.1} — incumbent kept"),
+            format!(
+                "no significant difference vs {:.1} — incumbent kept",
+                guard.incumbent_median
+            ),
         ),
     }
 }
 
-/// `stage` plus the significance threshold `judge` compares under.
+/// `stage` plus the two thresholds `judge` compares under: the significance
+/// a difference must reach, and how much of the other metric a winner may
+/// give up.
 ///
 /// Bundled so `judge` stays at this crate's clippy argument floor
-/// (`clippy.toml`, §3.4) despite the spec's four logically independent
-/// inputs.
+/// (`clippy.toml`, §3.4) despite the spec's logically independent inputs.
 #[derive(Clone, Copy)]
 pub struct JudgeCriteria {
     pub stage: Stage,
     pub significance_pct: f64,
+    pub guard_tolerance_pct: f64,
 }
 
 /// Judges `candidate` against `incumbent` on `criteria.stage`'s primary
-/// metric, winning only when the other metric does not regress (spec §4).
+/// metric (spec §4).
+///
+/// It wins when the other metric does not regress — or regresses by no more
+/// than the guard tolerance (2026-09-03).
 #[must_use]
 pub fn judge(candidate: &Measured, incumbent: &Measured, criteria: JudgeCriteria) -> Verdict {
     let metric = criteria.stage.metric();
@@ -478,9 +504,25 @@ pub fn judge(candidate: &Measured, incumbent: &Measured, criteria: JudgeCriteria
         incumbent.by_metric(other),
         criteria.significance_pct,
     );
-    let incumbent_median = incumbent.by_metric(metric).median;
-    let (wins, text) = phrase((primary_cmp, other_cmp), criteria.stage, incumbent_median);
+    let guard = Guard {
+        incumbent_median: incumbent.by_metric(metric).median,
+        other_delta_pct: delta_pct(
+            candidate.by_metric(other).median,
+            incumbent.by_metric(other).median,
+        ),
+        tolerance_pct: criteria.guard_tolerance_pct,
+    };
+    let (wins, text) = phrase((primary_cmp, other_cmp), criteria.stage, &guard);
     Verdict { wins, phrase: text }
+}
+
+/// `candidate` relative to `incumbent` in percent, negative for a loss; an
+/// incumbent median of zero has no percentage and reads as no loss.
+fn delta_pct(candidate: f64, incumbent: f64) -> f64 {
+    if incumbent <= 0.0 {
+        return 0.0;
+    }
+    (candidate - incumbent) / incumbent * 100.0
 }
 
 /// The stage's winning candidate: the highest primary median among those
@@ -643,6 +685,11 @@ pub struct Record {
     /// probe geometry because a verdict is only as strong as its threshold,
     /// and the report reads it rather than restating a default.
     pub significance_pct: f64,
+    /// The `[tune] guard_tolerance_pct` this run judged under — how much of
+    /// the other metric a winner was allowed to give up. A record from before
+    /// the knob was judged on the strict rule, which is what `0` says.
+    #[serde(default)]
+    pub guard_tolerance_pct: f64,
     pub thermal_source: String,
     pub trials: Vec<Trial>,
     /// The final incumbent's argv, when it beat the baseline; `None` means
@@ -892,18 +939,6 @@ mod tests {
             faster_prefill.phrase,
             "faster on prefill, decode not slower — new incumbent"
         );
-        let costs_decode = judge(&measured(24.0, 466.0), super::Stage::Batch, 5.0);
-        assert!(!costs_decode.wins);
-        assert_eq!(
-            costs_decode.phrase,
-            "faster on prefill but decode -23% is beyond the 15% guard — incumbent kept"
-        );
-        let within = judge(&measured(28.0, 466.0), super::Stage::Batch, 5.0);
-        assert!(within.wins, "a loss inside the guard is a trade the stage may make");
-        assert_eq!(
-            within.phrase,
-            "faster on prefill, decode -10% is within the 15% guard — new incumbent"
-        );
         let slower = judge(&measured(24.9, 397.0), super::Stage::Fa, 5.0);
         assert_eq!(
             (slower.wins, slower.phrase.as_str()),
@@ -918,6 +953,40 @@ mod tests {
         assert!(
             !batch_on_decode.wins,
             "a decode gain does not win a prefill stage"
+        );
+    }
+
+    /// A loss on the other metric inside the guard is a trade the stage may
+    /// make; beyond it the incumbent is kept — and the phrase says how much
+    /// was lost against which tolerance either way.
+    #[test]
+    fn a_loss_on_the_other_metric_is_judged_against_the_guard() {
+        let inc = measured(31.2, 402.0);
+        let judge = |candidate: &super::Measured| {
+            super::judge(
+                candidate,
+                &inc,
+                super::JudgeCriteria {
+                    stage: super::Stage::Batch,
+                    significance_pct: 5.0,
+                    guard_tolerance_pct: 15.0,
+                },
+            )
+        };
+        let costs_decode = judge(&measured(24.0, 466.0));
+        assert!(!costs_decode.wins);
+        assert_eq!(
+            costs_decode.phrase,
+            "faster on prefill but decode -23% is beyond the 15% guard — incumbent kept"
+        );
+        let within = judge(&measured(28.0, 466.0));
+        assert!(
+            within.wins,
+            "a loss inside the guard is a trade the stage may make"
+        );
+        assert_eq!(
+            within.phrase,
+            "faster on prefill, decode -10% is within the 15% guard — new incumbent"
         );
     }
 
@@ -1178,15 +1247,19 @@ mod tests {
         assert_eq!(back.trials[0].speed_limit_pct, [None, Some(87)]);
         assert!(back.winner.is_none());
         assert!((back.guard_tolerance_pct - 15.0).abs() < f64::EPSILON);
-        let pre_knob = std::fs::read_to_string(&path)
-            .expect("read")
-            .replace("\"guard_tolerance_pct\": 15.0,", "");
-        let old: super::Record = serde_json::from_str(&pre_knob).expect("a pre-knob record loads");
-        assert!(
-            old.guard_tolerance_pct.abs() < f64::EPSILON,
-            "a record from before the knob was judged on the strict rule"
-        );
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// A record written before the guard knob existed was judged on the
+    /// strict rule, and reads as exactly that.
+    #[test]
+    fn a_record_from_before_the_guard_knob_reads_as_strict() {
+        let record = sample_record(argv(&[]), crate::core::bench::stamp::launch_flags(&[]));
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert!(json.contains("\"guard_tolerance_pct\":15.0,"), "{json}");
+        let pre_knob = json.replace("\"guard_tolerance_pct\":15.0,", "");
+        let old: super::Record = serde_json::from_str(&pre_knob).expect("a pre-knob record loads");
+        assert!(old.guard_tolerance_pct.abs() < f64::EPSILON);
     }
 
     #[test]

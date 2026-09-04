@@ -215,6 +215,11 @@ pub struct TuneSection {
     pub batch_sizes: Vec<u32>,
     /// Stage ubatch: `--ubatch-size` candidates, each ≤ the incumbent batch.
     pub ubatch_sizes: Vec<u32>,
+    /// How much a stage's winner may lose on the OTHER metric (median, in
+    /// percent) and still win: a decode gain that costs prefill is a trade,
+    /// not a regression, inside this band. `0` is the strict rule — any
+    /// significant loss keeps the incumbent.
+    pub guard_tolerance_pct: u32,
 }
 
 impl Default for TuneSection {
@@ -228,6 +233,7 @@ impl Default for TuneSection {
             cache_types: vec!["q8_0".to_string(), "f16".to_string()],
             batch_sizes: vec![512, 1024, 2048, 4096],
             ubatch_sizes: vec![256, 512, 1024, 2048],
+            guard_tolerance_pct: 15,
         }
     }
 }
@@ -570,7 +576,10 @@ mod tests {
         .expect("overrides parse");
         assert_eq!((cfg.tune.depth, cfg.tune.batch_sizes.len()), (2048, 1));
         assert_eq!(cfg.tune.spec_drafts.len(), 2);
-        assert_eq!(cfg.tune.guard_tolerance_pct, 0, "0 restores the strict guard");
+        assert_eq!(
+            cfg.tune.guard_tolerance_pct, 0,
+            "0 restores the strict guard"
+        );
         assert!(
             toml::from_str::<super::FileConfig>("[tune]\ndepths = [1]\n").is_err(),
             "unknown keys are refused"

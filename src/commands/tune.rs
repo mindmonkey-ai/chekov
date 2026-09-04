@@ -53,6 +53,8 @@ struct Plan<'a> {
     tune: &'a TuneSection,
     sweep: SweepPlan,
     significance_pct: f64,
+    /// `[tune] guard_tolerance_pct`, as a percentage the verdicts print.
+    guard_tolerance_pct: f64,
 }
 
 /// The configuration later candidates are judged against — the baseline, then
@@ -91,11 +93,13 @@ struct Completed {
 /// The run's verdict when the final incumbent is not the baseline (spec §8).
 const CANDIDATE_WON: &str = "a candidate beat the current flags";
 
-/// Spec §9's `defaults won` line. The threshold is the record's own — the one
-/// every verdict in that run was reached under — never a restated default.
-fn defaults_won_line(significance_pct: f64) -> String {
+/// Spec §9's `defaults won` line. The thresholds are the record's own — the
+/// ones every verdict in that run was reached under — never a restated
+/// default.
+fn defaults_won_line(significance_pct: f64, guard_tolerance_pct: f64) -> String {
     format!(
-        "{} — no candidate beat the current flags at p < {significance_pct:.0}% on its metric",
+        "{} — no candidate beat the current flags at p < {significance_pct:.0}% on its metric \
+         within a {guard_tolerance_pct:.0}% guard on the other",
         tune::DEFAULTS_WON
     )
 }
@@ -474,7 +478,10 @@ fn winner_versus(record: &Record, winner: &[String]) -> Option<String> {
 /// The winner block, or the one line that says nothing beat the baseline.
 fn verdict_block(record: &Record) -> String {
     let Some(winner) = record.winner.as_deref() else {
-        return format!("  {}\n", defaults_won_line(record.significance_pct));
+        return format!(
+            "  {}\n",
+            defaults_won_line(record.significance_pct, record.guard_tolerance_pct)
+        );
     };
     let flags = winner.join(" ");
     let named = format!("  {:<10} {flags}\n", "winner");
@@ -587,6 +594,7 @@ impl<'a> Session<'a> {
                     max_tokens: plan.sweep.max_tokens,
                 },
                 significance_pct: plan.significance_pct,
+                guard_tolerance_pct: plan.guard_tolerance_pct,
                 thermal_source: tune::THERMAL_SOURCE.to_owned(),
                 trials: Vec::new(),
                 winner: None,
@@ -687,6 +695,7 @@ impl<'a> Session<'a> {
             JudgeCriteria {
                 stage,
                 significance_pct: self.plan.significance_pct,
+                guard_tolerance_pct: self.plan.guard_tolerance_pct,
             },
         ))
     }
@@ -879,6 +888,7 @@ impl TuneCmd {
                 max_tokens: bench.max_tokens,
             },
             significance_pct: f64::from(bench.significance_pct),
+            guard_tolerance_pct: f64::from(ctx.config.file.tune.guard_tolerance_pct),
         })
     }
 }
@@ -1196,7 +1206,8 @@ mod tests {
         let out = super::report(&record, &lines, Path::new("tune/x-m.json"));
         assert!(
             out.contains(
-                "\n  defaults won — no candidate beat the current flags at p < 5% on its metric\n"
+                "\n  defaults won — no candidate beat the current flags at p < 5% on its metric \
+                 within a 15% guard on the other\n"
             ),
             "{out}"
         );

@@ -655,8 +655,12 @@ the launch flags, not the model". The flags were LEFT APPLIED on
 (b) SHIPPED 2026-09-03 as `capability compare --cross-flags`: exactly the
 eight flag fields masked, the banner names the differing flags, a differing
 runtime still refuses, and the two masks compose.
-Proposed 2026-09-03 — status: MEASURED; (b) SHIPPED; (a) OPEN — a design
-choice for the human (tolerance vs. workload figure)
+(a) SHIPPED 2026-09-03 as `[tune] guard_tolerance_pct` (default 15, `0` =
+the strict rule), the human's choice of the tolerance over a workload
+figure: the verdict line names the trade and the tolerance, the `defaults
+won` line names both thresholds, and the record stamps the tolerance it
+judged under. The workload-figure alternative stays unbuilt.
+Proposed 2026-09-03 — status: MEASURED; (a) and (b) SHIPPED
 
 ## tune's fa stage cannot measure `fa off` under quantized KV, and a dead candidate reads as a timeout (2026-09-01)
 Two full live tunes (ornith-1.5-35b-a3b 2026-08-30, qwen3.8-27b 2026-09-01,
