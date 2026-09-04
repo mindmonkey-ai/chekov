@@ -562,12 +562,15 @@ mod tests {
         assert_eq!(cfg.tune.batch_sizes, vec![512, 1024, 2048, 4096]);
         assert_eq!(cfg.tune.ubatch_sizes, vec![256, 512, 1024, 2048]);
         assert_eq!(cfg.tune.spec_drafts, vec!["off", "mtp:1", "mtp:2", "mtp:3"]);
+        assert_eq!(cfg.tune.guard_tolerance_pct, 15);
         let cfg: super::FileConfig = toml::from_str(
-            "[tune]\ndepth = 2048\nbatch_sizes = [1024]\nspec_drafts = [\"off\", \"mtp:1\"]\n",
+            "[tune]\ndepth = 2048\nbatch_sizes = [1024]\nspec_drafts = [\"off\", \"mtp:1\"]\n\
+             guard_tolerance_pct = 0\n",
         )
         .expect("overrides parse");
         assert_eq!((cfg.tune.depth, cfg.tune.batch_sizes.len()), (2048, 1));
         assert_eq!(cfg.tune.spec_drafts.len(), 2);
+        assert_eq!(cfg.tune.guard_tolerance_pct, 0, "0 restores the strict guard");
         assert!(
             toml::from_str::<super::FileConfig>("[tune]\ndepths = [1]\n").is_err(),
             "unknown keys are refused"

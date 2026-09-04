@@ -981,6 +981,7 @@ mod tests {
                 max_tokens: 128,
             },
             significance_pct: 5.0,
+            guard_tolerance_pct: 15.0,
         }
     }
 
@@ -1024,6 +1025,7 @@ mod tests {
                 max_tokens: 128,
             },
             significance_pct: 5.0,
+            guard_tolerance_pct: 15.0,
             thermal_source: THERMAL_SOURCE.into(),
             verdict: if winner.is_some() {
                 super::CANDIDATE_WON.into()
@@ -1150,9 +1152,13 @@ mod tests {
     fn the_report_names_the_threshold_its_verdicts_were_reached_under() {
         let (mut record, lines) = defaults_won_fixture();
         record.significance_pct = 12.0;
+        record.guard_tolerance_pct = 15.0;
         let out = super::report(&record, &lines, Path::new("tune/x-m.json"));
         assert!(
-            out.contains("no candidate beat the current flags at p < 12% on its metric\n"),
+            out.contains(
+                "no candidate beat the current flags at p < 12% on its metric within a 15% \
+                 guard on the other\n"
+            ),
             "{out}"
         );
     }

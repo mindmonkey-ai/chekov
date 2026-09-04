@@ -882,6 +882,7 @@ mod tests {
                 super::JudgeCriteria {
                     stage,
                     significance_pct,
+                    guard_tolerance_pct: 15.0,
                 },
             )
         };
@@ -895,7 +896,13 @@ mod tests {
         assert!(!costs_decode.wins);
         assert_eq!(
             costs_decode.phrase,
-            "faster on prefill but slower on decode — incumbent kept"
+            "faster on prefill but decode -23% is beyond the 15% guard — incumbent kept"
+        );
+        let within = judge(&measured(28.0, 466.0), super::Stage::Batch, 5.0);
+        assert!(within.wins, "a loss inside the guard is a trade the stage may make");
+        assert_eq!(
+            within.phrase,
+            "faster on prefill, decode -10% is within the 15% guard — new incumbent"
         );
         let slower = judge(&measured(24.9, 397.0), super::Stage::Fa, 5.0);
         assert_eq!(
@@ -911,6 +918,28 @@ mod tests {
         assert!(
             !batch_on_decode.wins,
             "a decode gain does not win a prefill stage"
+        );
+    }
+
+    /// `guard_tolerance_pct = 0` is the strict guard the stage shipped with:
+    /// any significant loss on the other metric keeps the incumbent, and the
+    /// phrase still says how much was lost.
+    #[test]
+    fn a_zero_guard_is_the_strict_rule() {
+        let inc = measured(31.2, 402.0);
+        let strict = super::judge(
+            &measured(28.0, 466.0),
+            &inc,
+            super::JudgeCriteria {
+                stage: super::Stage::Batch,
+                significance_pct: 5.0,
+                guard_tolerance_pct: 0.0,
+            },
+        );
+        assert!(!strict.wins);
+        assert_eq!(
+            strict.phrase,
+            "faster on prefill but decode -10% is beyond the 0% guard — incumbent kept"
         );
     }
 
@@ -1088,6 +1117,7 @@ mod tests {
                 max_tokens: 128,
             },
             significance_pct: 5.0,
+            guard_tolerance_pct: 15.0,
             thermal_source: super::THERMAL_SOURCE.into(),
             trials: vec![super::Trial {
                 stage: "baseline".into(),
@@ -1147,6 +1177,15 @@ mod tests {
         assert_eq!(back.verdict, "defaults won");
         assert_eq!(back.trials[0].speed_limit_pct, [None, Some(87)]);
         assert!(back.winner.is_none());
+        assert!((back.guard_tolerance_pct - 15.0).abs() < f64::EPSILON);
+        let pre_knob = std::fs::read_to_string(&path)
+            .expect("read")
+            .replace("\"guard_tolerance_pct\": 15.0,", "");
+        let old: super::Record = serde_json::from_str(&pre_knob).expect("a pre-knob record loads");
+        assert!(
+            old.guard_tolerance_pct.abs() < f64::EPSILON,
+            "a record from before the knob was judged on the strict rule"
+        );
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
