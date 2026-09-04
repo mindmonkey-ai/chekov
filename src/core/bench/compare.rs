@@ -10,7 +10,7 @@ use crate::core::bench::codebase::ladder::{Score, Tier, as_f64};
 use crate::core::bench::stamp;
 use crate::core::bench::stamp::Stamp;
 use crate::core::bench::store::{
-    self, CodebaseRow, RunLog, Tally, TaskRow, Transport, door_tag, is_unavailable,
+    self, CodebaseRow, RunHead, RunLog, Tally, TaskRow, Transport, door_tag, is_unavailable,
 };
 use crate::core::stats::{self, Comparison, Summary};
 use crate::error::ChekovError;
@@ -26,6 +26,27 @@ pub struct DepthComparison {
 pub struct RunPair<'a> {
     pub a: &'a RunLog,
     pub b: &'a RunLog,
+}
+
+impl RunPair<'_> {
+    /// The two names every verdict prints. Two runs of one model — a flag
+    /// experiment under `--cross-flags` — are named by run id instead,
+    /// because "X is faster — 66.8 vs 86.2" names nothing when both sides
+    /// are X; a run id carries the model name and the timestamp that tells
+    /// the two apart.
+    #[must_use]
+    pub fn names(&self) -> (String, String) {
+        let (a, b) = (&self.a.head.model, &self.b.head.model);
+        if a != b {
+            return (a.clone(), b.clone());
+        }
+        let run_id = |log: &RunLog| {
+            log.rows
+                .first()
+                .map_or_else(|| log.head.model.clone(), |row| row.run_id.clone())
+        };
+        (run_id(self.a), run_id(self.b))
+    }
 }
 
 /// Everything two runs can be held against each other on.
@@ -142,6 +163,9 @@ pub struct CodebaseComparison {
 pub struct CompareOpts {
     pub significance_pct: f64,
     pub cross_runtime: bool,
+    /// Mask exactly the eight launch-flag fields — a flag experiment on one
+    /// runtime, one engine, one model. Composes with `cross_runtime`.
+    pub cross_flags: bool,
 }
 
 /// The fields `--cross-runtime` permits to differ, and no others.
@@ -160,6 +184,20 @@ const CROSS_RUNTIME_ALLOWED: [&str; 14] = [
     "spec_type",
     "spec_draft_n_max",
     "prompt_set_hash",
+];
+
+/// The fields `--cross-flags` permits to differ: the launch flags a stamp
+/// reads off the argv, and nothing else — runtime, engine, ctx and the
+/// sampling fields still refuse.
+const CROSS_FLAGS_ALLOWED: [&str; 8] = [
+    "kv_unified",
+    "n_batch",
+    "n_ubatch",
+    "type_k",
+    "type_v",
+    "flash_attn",
+    "spec_type",
+    "spec_draft_n_max",
 ];
 
 pub fn compare_runs(
@@ -223,7 +261,23 @@ fn assert_same_environment(pair: &RunPair, opts: &CompareOpts) -> Result<(), Che
     if opts.cross_runtime {
         mask_cross_runtime(&mut b_env, a);
     }
+    if opts.cross_flags {
+        mask_cross_flags(&mut b_env, a);
+    }
     stamp::mismatch_error(a, &b_env).map_or(Ok(()), Err)
+}
+
+/// Masks exactly the eight launch-flag fields onto `b_env` — what a flag
+/// experiment under one runtime and one engine is permitted to differ on.
+fn mask_cross_flags(b_env: &mut Stamp, a: &Stamp) {
+    b_env.kv_unified.clone_from(&a.kv_unified);
+    b_env.n_batch.clone_from(&a.n_batch);
+    b_env.n_ubatch.clone_from(&a.n_ubatch);
+    b_env.type_k.clone_from(&a.type_k);
+    b_env.type_v.clone_from(&a.type_v);
+    b_env.flash_attn.clone_from(&a.flash_attn);
+    b_env.spec_type.clone_from(&a.spec_type);
+    b_env.spec_draft_n_max.clone_from(&a.spec_draft_n_max);
 }
 
 /// Masks exactly the 14-entry `--cross-runtime` allow-list (spec §7) onto
@@ -263,6 +317,26 @@ pub fn cross_runtime_banner(a: &Stamp, b: &Stamp) -> String {
         }
     }
     lines.push("this measures the runtimes, not the model.".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// The `--cross-flags` banner: both models, one line per launch flag that
+/// differs, and the sentence that says what the comparison measures.
+#[must_use]
+pub fn cross_flags_banner(a: &RunHead, b: &RunHead) -> String {
+    let (ja, jb) = (json_of(&a.stamp), json_of(&b.stamp));
+    let mut lines = vec![format!(
+        "launch-flag comparison: {} vs {}",
+        a.model, b.model
+    )];
+    lines.push("the launch flags differ; differing fields:".to_owned());
+    for field in CROSS_FLAGS_ALLOWED {
+        let (va, vb) = (&ja[field], &jb[field]);
+        if va != vb {
+            lines.push(format!("{field}: {va} vs {vb}"));
+        }
+    }
+    lines.push("this measures the launch flags, not the model.".to_owned());
     lines.join("\n") + "\n"
 }
 
@@ -902,9 +976,10 @@ fn binomial(n: u32, k: u32) -> u128 {
 
 #[must_use]
 pub fn render_comparison(pair: &RunPair, comparison: &RunComparison) -> String {
+    let (name_a, name_b) = pair.names();
     let mut out = format!(
-        "compare {} vs {}  (engine {})\n",
-        pair.a.head.model, pair.b.head.model, pair.a.head.stamp.engine_build_commit
+        "compare {name_a} vs {name_b}  (engine {})\n",
+        pair.a.head.stamp.engine_build_commit
     );
     if comparison.depths.is_empty() {
         out.push_str("no depth measured in both runs — nothing to compare\n");
@@ -919,11 +994,12 @@ pub fn render_comparison(pair: &RunPair, comparison: &RunComparison) -> String {
 /// A section one run never measured is named as absent. A section that simply
 /// vanished would read as a section where nothing differed.
 fn absent_line(pair: &RunPair, section: &str, presence: Presence) -> Option<String> {
+    let (name_a, name_b) = pair.names();
     let missing = match presence {
         Presence::Both => return None,
-        Presence::OnlyA => pair.b.head.model.clone(),
-        Presence::OnlyB => pair.a.head.model.clone(),
-        Presence::Neither => format!("{} or {}", pair.a.head.model, pair.b.head.model),
+        Presence::OnlyA => name_b,
+        Presence::OnlyB => name_a,
+        Presence::Neither => format!("{name_a} or {name_b}"),
     };
     Some(format!("{section}: not measured in {missing}\n"))
 }
@@ -975,11 +1051,12 @@ fn disagreement_block(pair: &RunPair, cases: &[CaseDelta]) -> String {
 }
 
 fn disagreement_line(pair: &RunPair, case: &CaseDelta, width: usize) -> String {
+    let (name_a, name_b) = pair.names();
     format!(
         "    {:<width$}{}   |   {}\n",
         case_id(case),
-        case_side(&pair.a.head.model, case.a_pass, case.a_reason.as_deref()),
-        case_side(&pair.b.head.model, case.b_pass, case.b_reason.as_deref()),
+        case_side(&name_a, case.a_pass, case.a_reason.as_deref()),
+        case_side(&name_b, case.b_pass, case.b_reason.as_deref()),
     )
 }
 
@@ -998,9 +1075,10 @@ fn case_side(model: &str, pass: bool, reason: Option<&str>) -> String {
 }
 
 fn only_in_block(pair: &RunPair, cases: &[OnlyIn]) -> String {
-    [("a", &pair.a.head.model), ("b", &pair.b.head.model)]
+    let (name_a, name_b) = pair.names();
+    [("a", name_a), ("b", name_b)]
         .into_iter()
-        .filter_map(|(which, model)| only_in_line(cases, which, model))
+        .filter_map(|(which, model)| only_in_line(cases, which, &model))
         .collect()
 }
 
@@ -1051,6 +1129,7 @@ fn render_codebase(pair: &RunPair, codebase: &CodebaseComparison) -> String {
 }
 
 fn tier_delta_line(pair: &RunPair, delta: &TierDelta, widths: Columns) -> String {
+    let (name_a, name_b) = pair.names();
     format!(
         "  {:<group$}{:<tier$}{:.2} vs {:.2}  (Δ {:+.2})   A better {}, B better {}, tie {} — {}\n",
         delta.group,
@@ -1061,7 +1140,7 @@ fn tier_delta_line(pair: &RunPair, delta: &TierDelta, widths: Columns) -> String
         delta.a_better,
         delta.b_better,
         delta.ties,
-        delta_phrase((&pair.a.head.model, &pair.b.head.model), delta),
+        delta_phrase((&name_a, &name_b), delta),
         group = widths.group,
         tier = widths.tier,
     )
@@ -1105,18 +1184,13 @@ fn verdict_line(pair: &RunPair, row: &DepthComparison) -> String {
         "{:.1} vs {:.1} tok/s (p10-p90 [{:.1}..{:.1}] vs [{:.1}..{:.1}])",
         row.a.median, row.b.median, row.a.p10, row.a.p90, row.b.p10, row.b.p90
     );
+    let (name_a, name_b) = pair.names();
     match row.verdict {
         Comparison::Faster => {
-            format!(
-                "depth {:>6}: {} is faster — {numbers}\n",
-                row.depth, pair.a.head.model
-            )
+            format!("depth {:>6}: {name_a} is faster — {numbers}\n", row.depth)
         }
         Comparison::Slower => {
-            format!(
-                "depth {:>6}: {} is faster — {numbers}\n",
-                row.depth, pair.b.head.model
-            )
+            format!("depth {:>6}: {name_b} is faster — {numbers}\n", row.depth)
         }
         Comparison::NoSignificantDifference => {
             format!(
@@ -1131,7 +1205,7 @@ fn verdict_line(pair: &RunPair, row: &DepthComparison) -> String {
 mod tests {
     use super::{
         CompareOpts, Presence, RunPair, SuiteTotals, TierDelta, binomial, compare_runs,
-        cross_runtime_banner, render_comparison, sign_test,
+        cross_flags_banner, cross_runtime_banner, render_comparison, sign_test,
     };
     use crate::core::bench::codebase::{Excluded, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
@@ -1214,7 +1288,109 @@ mod tests {
         CompareOpts {
             significance_pct,
             cross_runtime: false,
+            cross_flags: false,
         }
+    }
+
+    /// Two llama.cpp runs that differ only on launch flags are the flag
+    /// experiment `--cross-flags` exists for: exactly the eight flag fields
+    /// are masked, the banner names the ones that differ and says what is
+    /// being measured, and everything else still refuses (spec-stage
+    /// follow-up (b), 2026-09-03).
+    #[test]
+    fn cross_flags_masks_exactly_the_eight_launch_flags_and_names_them() {
+        assert_eq!(super::CROSS_FLAGS_ALLOWED.len(), 8);
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut flagged = stamp("dda1b0d67", "r1/s1");
+        flagged.n_batch = "4096".into();
+        flagged.spec_type = "draft-mtp".into();
+        flagged.spec_draft_n_max = "1".into();
+        let b = run("m2", flagged, &[19.0, 21.0, 22.0]);
+        let err = compare_runs(&a, &b, &opts(5.0)).expect_err("flags differ");
+        match err {
+            ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "n_batch"),
+            other => panic!("expected stamp mismatch, got {other}"),
+        }
+        let cross = CompareOpts {
+            cross_flags: true,
+            ..opts(5.0)
+        };
+        assert!(compare_runs(&a, &b, &cross).is_ok());
+        let banner = cross_flags_banner(&a.head, &b.head);
+        assert!(
+            banner.starts_with("launch-flag comparison: m1 vs m2\n"),
+            "{banner}"
+        );
+        assert!(
+            banner.contains("n_batch: \"engine-default\" vs \"4096\"\n"),
+            "{banner}"
+        );
+        assert!(
+            banner.contains("spec_type: \"engine-default\" vs \"draft-mtp\"\n"),
+            "{banner}"
+        );
+        assert!(
+            !banner.contains("flash_attn:"),
+            "an equal flag is not listed: {banner}"
+        );
+        assert!(
+            banner.ends_with("this measures the launch flags, not the model.\n"),
+            "{banner}"
+        );
+    }
+
+    /// Two runs of one model — the `--cross-flags` case — are told apart by
+    /// run id everywhere a verdict names a side; two different models keep
+    /// their bare names.
+    #[test]
+    fn same_model_runs_are_named_by_run_id_in_every_verdict() {
+        let a = run("m", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut b = run("m", stamp("dda1b0d67", "r1/s1"), &[29.0, 31.0, 32.0]);
+        for row in &mut b.rows {
+            row.run_id = "r2".into();
+        }
+        let pair = RunPair { a: &a, b: &b };
+        assert_eq!(pair.names(), ("r".to_owned(), "r2".to_owned()));
+        let comparison = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        let out = render_comparison(&pair, &comparison);
+        assert!(
+            out.starts_with("compare r vs r2  (engine dda1b0d67)\n"),
+            "{out}"
+        );
+        assert!(out.contains(": r2 is faster"), "{out}");
+        assert!(
+            !out.contains(" m is faster"),
+            "a bare name names nothing here: {out}"
+        );
+
+        let other = run("n", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let distinct = RunPair { a: &a, b: &other };
+        assert_eq!(distinct.names(), ("m".to_owned(), "n".to_owned()));
+    }
+
+    /// `--cross-flags` masks flags and nothing else: a runtime that differs
+    /// still refuses by name, and only `--cross-runtime` on top lets it pass.
+    #[test]
+    fn cross_flags_leaves_the_runtime_refusal_in_place() {
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut foreign = stamp("dda1b0d67", "r1/s1");
+        foreign.spec_type = "draft-mtp".into();
+        foreign.runtime = "mtplx 0.4.1".into();
+        let c = run("m2", foreign, &[19.0, 21.0, 22.0]);
+        let cross = CompareOpts {
+            cross_flags: true,
+            ..opts(5.0)
+        };
+        let err = compare_runs(&a, &c, &cross).expect_err("runtime is not a flag");
+        match err {
+            ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "runtime"),
+            other => panic!("expected stamp mismatch, got {other}"),
+        }
+        let both = CompareOpts {
+            cross_runtime: true,
+            ..cross
+        };
+        assert!(compare_runs(&a, &c, &both).is_ok(), "the two masks compose");
     }
 
     #[test]

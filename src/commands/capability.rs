@@ -59,11 +59,23 @@ pub enum CapAction {
         /// Run ids under `eval/`, or paths to run directories.
         a: std::path::PathBuf,
         b: std::path::PathBuf,
-        /// Permit the runtime allow-list (spec §7) to differ — a loud
-        /// banner prints before any other output.
-        #[arg(long)]
-        cross_runtime: bool,
+        #[command(flatten)]
+        masks: CompareMasks,
     },
+}
+
+/// Which stamp fields a comparison is permitted to read across (spec §7;
+/// spec-stage follow-up (b)). Each mask prints its own banner.
+#[derive(Debug, Clone, Copy, clap::Args)]
+pub struct CompareMasks {
+    /// Permit the runtime allow-list (spec §7) to differ — a loud
+    /// banner prints before any other output.
+    #[arg(long)]
+    pub cross_runtime: bool,
+    /// Permit exactly the eight launch-flag fields to differ — a flag
+    /// experiment on one runtime and one engine; a banner names the flags.
+    #[arg(long)]
+    pub cross_flags: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -233,12 +245,8 @@ impl Command for CapabilityCmd {
                 );
             }
             Some(CapAction::Bench(opts)) => return bench(ctx, &bench_args(opts)?),
-            Some(CapAction::Compare {
-                a,
-                b,
-                cross_runtime,
-            }) => {
-                return compare(ctx, &compare_args(a, b, *cross_runtime));
+            Some(CapAction::Compare { a, b, masks }) => {
+                return compare(ctx, &compare_args(a, b, *masks));
             }
             _ => {}
         }
@@ -2539,19 +2547,15 @@ fn resolve_run(ctx: &Ctx, arg: &std::path::Path) -> std::path::PathBuf {
 struct CompareArgs<'a> {
     a: &'a std::path::Path,
     b: &'a std::path::Path,
-    cross_runtime: bool,
+    masks: CompareMasks,
 }
 
 const fn compare_args<'a>(
     a: &'a std::path::Path,
     b: &'a std::path::Path,
-    cross_runtime: bool,
+    masks: CompareMasks,
 ) -> CompareArgs<'a> {
-    CompareArgs {
-        a,
-        b,
-        cross_runtime,
-    }
+    CompareArgs { a, b, masks }
 }
 
 fn compare(ctx: &Ctx, args: &CompareArgs) -> Result<ExitCode, ChekovError> {
@@ -2560,13 +2564,20 @@ fn compare(ctx: &Ctx, args: &CompareArgs) -> Result<ExitCode, ChekovError> {
     let run_b = store::RunLog::load(&resolve_run(ctx, args.b))?;
     let opts = bench_compare::CompareOpts {
         significance_pct: f64::from(ctx.config.file.bench.significance_pct),
-        cross_runtime: args.cross_runtime,
+        cross_runtime: args.masks.cross_runtime,
+        cross_flags: args.masks.cross_flags,
     };
     let comparison = bench_compare::compare_runs(&run_a, &run_b, &opts)?;
     if opts.cross_runtime {
         print!(
             "{}",
             bench_compare::cross_runtime_banner(&run_a.head.stamp, &run_b.head.stamp)
+        );
+    }
+    if opts.cross_flags {
+        print!(
+            "{}",
+            bench_compare::cross_flags_banner(&run_a.head, &run_b.head)
         );
     }
     print!(
@@ -2682,44 +2693,39 @@ mod tests {
         }
     }
 
+    /// The masks `compare a b <flags...>` parsed — the two bare switches, each
+    /// defaulting off and independent of the other.
+    fn compare_masks(flags: &[&str]) -> super::CompareMasks {
+        use clap::Parser;
+        let mut argv = vec!["chekov", "capability", "compare", "a.json", "b.json"];
+        argv.extend_from_slice(flags);
+        let cli = crate::cli::Cli::try_parse_from(argv).expect("compare parses");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Compare { masks, .. }) => masks,
+                other => panic!("expected Compare, got {other:?}"),
+            },
+            _ => panic!("expected capability"),
+        }
+    }
+
     #[test]
     fn compare_cross_runtime_flag_is_a_bare_switch_defaulting_off() {
-        use clap::Parser;
-        let cli = crate::cli::Cli::try_parse_from([
-            "chekov",
-            "capability",
-            "compare",
-            "a.json",
-            "b.json",
-        ])
-        .expect("compare parses");
-        match cli.cmd {
-            crate::cli::Cmd::Capability(cap) => match cap.action {
-                Some(super::CapAction::Compare { cross_runtime, .. }) => {
-                    assert!(!cross_runtime);
-                }
-                other => panic!("expected Compare, got {other:?}"),
-            },
-            _ => panic!("expected capability"),
-        }
-        let cli = crate::cli::Cli::try_parse_from([
-            "chekov",
-            "capability",
-            "compare",
-            "a.json",
-            "b.json",
-            "--cross-runtime",
-        ])
-        .expect("compare parses with the flag");
-        match cli.cmd {
-            crate::cli::Cmd::Capability(cap) => match cap.action {
-                Some(super::CapAction::Compare { cross_runtime, .. }) => {
-                    assert!(cross_runtime);
-                }
-                other => panic!("expected Compare, got {other:?}"),
-            },
-            _ => panic!("expected capability"),
-        }
+        let plain = compare_masks(&[]);
+        assert!(!plain.cross_runtime);
+        let masked = compare_masks(&["--cross-runtime"]);
+        assert!(masked.cross_runtime);
+        assert!(!masked.cross_flags, "one mask does not imply the other");
+    }
+
+    #[test]
+    fn compare_cross_flags_is_its_own_switch() {
+        assert!(!compare_masks(&[]).cross_flags);
+        let masked = compare_masks(&["--cross-flags"]);
+        assert!(masked.cross_flags);
+        assert!(!masked.cross_runtime);
+        let both = compare_masks(&["--cross-runtime", "--cross-flags"]);
+        assert!(both.cross_runtime && both.cross_flags, "the two compose");
     }
 
     #[test]

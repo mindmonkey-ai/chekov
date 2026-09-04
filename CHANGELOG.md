@@ -7,6 +7,19 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `capability compare A B --cross-flags` — permits exactly the eight
+  launch-flag stamp fields (`kv_unified`, `n_batch`, `n_ubatch`, `type_k`,
+  `type_v`, `flash_attn`, `spec_type`, `spec_draft_n_max`) to differ and
+  nothing else, for a flag experiment on one runtime, one engine and one
+  model; it opens with `launch-flag comparison: <a> vs <b>`, one line per
+  flag that differs, and "this measures the launch flags, not the model."
+  Before this the only way to read a tuned run against an untuned one was
+  `--cross-runtime`, whose banner then said "llama.cpp vs llama.cpp … this
+  measures the runtimes" — the wrong sentence. The two masks compose; a
+  differing runtime still refuses under `--cross-flags` alone. Two runs of
+  one model are now named by run id in every verdict (`compare <run-a> vs
+  <run-b>`, `<run-b> is faster`) — "X is faster — 66.8 vs 86.2" named
+  nothing when both sides were X; two different models keep their names.
 - `chekov tune` gains a fifth stage, `spec`, run first: llama.cpp's native
   MTP draft head (`--spec-type draft-mtp`, on the model's own weights — no
   draft file) trialed at each `[tune] spec_drafts` length (`off`, `mtp:1`,
