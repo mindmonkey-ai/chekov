@@ -652,7 +652,11 @@ model", which is the wrong sentence for a flag experiment: proposal, a
 nothing else) with a banner that names the flags and says "this measures
 the launch flags, not the model". The flags were LEFT APPLIED on
 `ornith-1.5-35b-a3b` after this measurement.
-Proposed 2026-09-03 — status: MEASURED; (a) and (b) OPEN
+(b) SHIPPED 2026-09-03 as `capability compare --cross-flags`: exactly the
+eight flag fields masked, the banner names the differing flags, a differing
+runtime still refuses, and the two masks compose.
+Proposed 2026-09-03 — status: MEASURED; (b) SHIPPED; (a) OPEN — a design
+choice for the human (tolerance vs. workload figure)
 
 ## tune's fa stage cannot measure `fa off` under quantized KV, and a dead candidate reads as a timeout (2026-09-01)
 Two full live tunes (ornith-1.5-35b-a3b 2026-08-30, qwen3.8-27b 2026-09-01,

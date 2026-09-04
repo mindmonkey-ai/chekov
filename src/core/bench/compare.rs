@@ -10,7 +10,7 @@ use crate::core::bench::codebase::ladder::{Score, Tier, as_f64};
 use crate::core::bench::stamp;
 use crate::core::bench::stamp::Stamp;
 use crate::core::bench::store::{
-    self, CodebaseRow, RunLog, Tally, TaskRow, Transport, door_tag, is_unavailable,
+    self, CodebaseRow, RunHead, RunLog, Tally, TaskRow, Transport, door_tag, is_unavailable,
 };
 use crate::core::stats::{self, Comparison, Summary};
 use crate::error::ChekovError;
@@ -142,6 +142,9 @@ pub struct CodebaseComparison {
 pub struct CompareOpts {
     pub significance_pct: f64,
     pub cross_runtime: bool,
+    /// Mask exactly the eight launch-flag fields — a flag experiment on one
+    /// runtime, one engine, one model. Composes with `cross_runtime`.
+    pub cross_flags: bool,
 }
 
 /// The fields `--cross-runtime` permits to differ, and no others.
@@ -160,6 +163,20 @@ const CROSS_RUNTIME_ALLOWED: [&str; 14] = [
     "spec_type",
     "spec_draft_n_max",
     "prompt_set_hash",
+];
+
+/// The fields `--cross-flags` permits to differ: the launch flags a stamp
+/// reads off the argv, and nothing else — runtime, engine, ctx and the
+/// sampling fields still refuse.
+const CROSS_FLAGS_ALLOWED: [&str; 8] = [
+    "kv_unified",
+    "n_batch",
+    "n_ubatch",
+    "type_k",
+    "type_v",
+    "flash_attn",
+    "spec_type",
+    "spec_draft_n_max",
 ];
 
 pub fn compare_runs(
@@ -223,7 +240,23 @@ fn assert_same_environment(pair: &RunPair, opts: &CompareOpts) -> Result<(), Che
     if opts.cross_runtime {
         mask_cross_runtime(&mut b_env, a);
     }
+    if opts.cross_flags {
+        mask_cross_flags(&mut b_env, a);
+    }
     stamp::mismatch_error(a, &b_env).map_or(Ok(()), Err)
+}
+
+/// Masks exactly the eight launch-flag fields onto `b_env` — what a flag
+/// experiment under one runtime and one engine is permitted to differ on.
+fn mask_cross_flags(b_env: &mut Stamp, a: &Stamp) {
+    b_env.kv_unified.clone_from(&a.kv_unified);
+    b_env.n_batch.clone_from(&a.n_batch);
+    b_env.n_ubatch.clone_from(&a.n_ubatch);
+    b_env.type_k.clone_from(&a.type_k);
+    b_env.type_v.clone_from(&a.type_v);
+    b_env.flash_attn.clone_from(&a.flash_attn);
+    b_env.spec_type.clone_from(&a.spec_type);
+    b_env.spec_draft_n_max.clone_from(&a.spec_draft_n_max);
 }
 
 /// Masks exactly the 14-entry `--cross-runtime` allow-list (spec §7) onto
@@ -263,6 +296,26 @@ pub fn cross_runtime_banner(a: &Stamp, b: &Stamp) -> String {
         }
     }
     lines.push("this measures the runtimes, not the model.".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// The `--cross-flags` banner: both models, one line per launch flag that
+/// differs, and the sentence that says what the comparison measures.
+#[must_use]
+pub fn cross_flags_banner(a: &RunHead, b: &RunHead) -> String {
+    let (ja, jb) = (json_of(&a.stamp), json_of(&b.stamp));
+    let mut lines = vec![format!(
+        "launch-flag comparison: {} vs {}",
+        a.model, b.model
+    )];
+    lines.push("the launch flags differ; differing fields:".to_owned());
+    for field in CROSS_FLAGS_ALLOWED {
+        let (va, vb) = (&ja[field], &jb[field]);
+        if va != vb {
+            lines.push(format!("{field}: {va} vs {vb}"));
+        }
+    }
+    lines.push("this measures the launch flags, not the model.".to_owned());
     lines.join("\n") + "\n"
 }
 
@@ -1131,7 +1184,7 @@ fn verdict_line(pair: &RunPair, row: &DepthComparison) -> String {
 mod tests {
     use super::{
         CompareOpts, Presence, RunPair, SuiteTotals, TierDelta, binomial, compare_runs,
-        cross_runtime_banner, render_comparison, sign_test,
+        cross_flags_banner, cross_runtime_banner, render_comparison, sign_test,
     };
     use crate::core::bench::codebase::{Excluded, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
@@ -1231,7 +1284,7 @@ mod tests {
         flagged.n_batch = "4096".into();
         flagged.spec_type = "draft-mtp".into();
         flagged.spec_draft_n_max = "1".into();
-        let b = run("m2", flagged.clone(), &[19.0, 21.0, 22.0]);
+        let b = run("m2", flagged, &[19.0, 21.0, 22.0]);
         let err = compare_runs(&a, &b, &opts(5.0)).expect_err("flags differ");
         match err {
             ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "n_batch"),
@@ -1242,21 +1295,52 @@ mod tests {
             ..opts(5.0)
         };
         assert!(compare_runs(&a, &b, &cross).is_ok());
-        let banner = cross_flags_banner(&a.head.stamp, &b.head.stamp);
-        assert!(banner.starts_with("launch-flag comparison: m1 vs m2\n"), "{banner}");
-        assert!(banner.contains("n_batch: \"engine-default\" vs \"4096\"\n"), "{banner}");
-        assert!(banner.contains("spec_type: \"engine-default\" vs \"draft-mtp\"\n"), "{banner}");
-        assert!(!banner.contains("flash_attn:"), "an equal flag is not listed: {banner}");
-        assert!(banner.ends_with("this measures the launch flags, not the model.\n"), "{banner}");
+        let banner = cross_flags_banner(&a.head, &b.head);
+        assert!(
+            banner.starts_with("launch-flag comparison: m1 vs m2\n"),
+            "{banner}"
+        );
+        assert!(
+            banner.contains("n_batch: \"engine-default\" vs \"4096\"\n"),
+            "{banner}"
+        );
+        assert!(
+            banner.contains("spec_type: \"engine-default\" vs \"draft-mtp\"\n"),
+            "{banner}"
+        );
+        assert!(
+            !banner.contains("flash_attn:"),
+            "an equal flag is not listed: {banner}"
+        );
+        assert!(
+            banner.ends_with("this measures the launch flags, not the model.\n"),
+            "{banner}"
+        );
+    }
 
-        let mut foreign = flagged;
+    /// `--cross-flags` masks flags and nothing else: a runtime that differs
+    /// still refuses by name, and only `--cross-runtime` on top lets it pass.
+    #[test]
+    fn cross_flags_leaves_the_runtime_refusal_in_place() {
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut foreign = stamp("dda1b0d67", "r1/s1");
+        foreign.spec_type = "draft-mtp".into();
         foreign.runtime = "mtplx 0.4.1".into();
         let c = run("m2", foreign, &[19.0, 21.0, 22.0]);
+        let cross = CompareOpts {
+            cross_flags: true,
+            ..opts(5.0)
+        };
         let err = compare_runs(&a, &c, &cross).expect_err("runtime is not a flag");
         match err {
             ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "runtime"),
             other => panic!("expected stamp mismatch, got {other}"),
         }
+        let both = CompareOpts {
+            cross_runtime: true,
+            ..cross
+        };
+        assert!(compare_runs(&a, &c, &both).is_ok(), "the two masks compose");
     }
 
     #[test]
