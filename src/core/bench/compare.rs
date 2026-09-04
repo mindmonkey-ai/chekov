@@ -28,6 +28,27 @@ pub struct RunPair<'a> {
     pub b: &'a RunLog,
 }
 
+impl RunPair<'_> {
+    /// The two names every verdict prints. Two runs of one model — a flag
+    /// experiment under `--cross-flags` — are named by run id instead,
+    /// because "X is faster — 66.8 vs 86.2" names nothing when both sides
+    /// are X; a run id carries the model name and the timestamp that tells
+    /// the two apart.
+    #[must_use]
+    pub fn names(&self) -> (String, String) {
+        let (a, b) = (&self.a.head.model, &self.b.head.model);
+        if a != b {
+            return (a.clone(), b.clone());
+        }
+        let run_id = |log: &RunLog| {
+            log.rows
+                .first()
+                .map_or_else(|| log.head.model.clone(), |row| row.run_id.clone())
+        };
+        (run_id(self.a), run_id(self.b))
+    }
+}
+
 /// Everything two runs can be held against each other on.
 #[derive(Debug)]
 pub struct RunComparison {
@@ -955,9 +976,10 @@ fn binomial(n: u32, k: u32) -> u128 {
 
 #[must_use]
 pub fn render_comparison(pair: &RunPair, comparison: &RunComparison) -> String {
+    let (name_a, name_b) = pair.names();
     let mut out = format!(
-        "compare {} vs {}  (engine {})\n",
-        pair.a.head.model, pair.b.head.model, pair.a.head.stamp.engine_build_commit
+        "compare {name_a} vs {name_b}  (engine {})\n",
+        pair.a.head.stamp.engine_build_commit
     );
     if comparison.depths.is_empty() {
         out.push_str("no depth measured in both runs — nothing to compare\n");
@@ -972,11 +994,12 @@ pub fn render_comparison(pair: &RunPair, comparison: &RunComparison) -> String {
 /// A section one run never measured is named as absent. A section that simply
 /// vanished would read as a section where nothing differed.
 fn absent_line(pair: &RunPair, section: &str, presence: Presence) -> Option<String> {
+    let (name_a, name_b) = pair.names();
     let missing = match presence {
         Presence::Both => return None,
-        Presence::OnlyA => pair.b.head.model.clone(),
-        Presence::OnlyB => pair.a.head.model.clone(),
-        Presence::Neither => format!("{} or {}", pair.a.head.model, pair.b.head.model),
+        Presence::OnlyA => name_b,
+        Presence::OnlyB => name_a,
+        Presence::Neither => format!("{name_a} or {name_b}"),
     };
     Some(format!("{section}: not measured in {missing}\n"))
 }
@@ -1028,11 +1051,12 @@ fn disagreement_block(pair: &RunPair, cases: &[CaseDelta]) -> String {
 }
 
 fn disagreement_line(pair: &RunPair, case: &CaseDelta, width: usize) -> String {
+    let (name_a, name_b) = pair.names();
     format!(
         "    {:<width$}{}   |   {}\n",
         case_id(case),
-        case_side(&pair.a.head.model, case.a_pass, case.a_reason.as_deref()),
-        case_side(&pair.b.head.model, case.b_pass, case.b_reason.as_deref()),
+        case_side(&name_a, case.a_pass, case.a_reason.as_deref()),
+        case_side(&name_b, case.b_pass, case.b_reason.as_deref()),
     )
 }
 
@@ -1051,9 +1075,10 @@ fn case_side(model: &str, pass: bool, reason: Option<&str>) -> String {
 }
 
 fn only_in_block(pair: &RunPair, cases: &[OnlyIn]) -> String {
-    [("a", &pair.a.head.model), ("b", &pair.b.head.model)]
+    let (name_a, name_b) = pair.names();
+    [("a", name_a), ("b", name_b)]
         .into_iter()
-        .filter_map(|(which, model)| only_in_line(cases, which, model))
+        .filter_map(|(which, model)| only_in_line(cases, which, &model))
         .collect()
 }
 
@@ -1104,6 +1129,7 @@ fn render_codebase(pair: &RunPair, codebase: &CodebaseComparison) -> String {
 }
 
 fn tier_delta_line(pair: &RunPair, delta: &TierDelta, widths: Columns) -> String {
+    let (name_a, name_b) = pair.names();
     format!(
         "  {:<group$}{:<tier$}{:.2} vs {:.2}  (Δ {:+.2})   A better {}, B better {}, tie {} — {}\n",
         delta.group,
@@ -1114,7 +1140,7 @@ fn tier_delta_line(pair: &RunPair, delta: &TierDelta, widths: Columns) -> String
         delta.a_better,
         delta.b_better,
         delta.ties,
-        delta_phrase((&pair.a.head.model, &pair.b.head.model), delta),
+        delta_phrase((&name_a, &name_b), delta),
         group = widths.group,
         tier = widths.tier,
     )
@@ -1158,18 +1184,13 @@ fn verdict_line(pair: &RunPair, row: &DepthComparison) -> String {
         "{:.1} vs {:.1} tok/s (p10-p90 [{:.1}..{:.1}] vs [{:.1}..{:.1}])",
         row.a.median, row.b.median, row.a.p10, row.a.p90, row.b.p10, row.b.p90
     );
+    let (name_a, name_b) = pair.names();
     match row.verdict {
         Comparison::Faster => {
-            format!(
-                "depth {:>6}: {} is faster — {numbers}\n",
-                row.depth, pair.a.head.model
-            )
+            format!("depth {:>6}: {name_a} is faster — {numbers}\n", row.depth)
         }
         Comparison::Slower => {
-            format!(
-                "depth {:>6}: {} is faster — {numbers}\n",
-                row.depth, pair.b.head.model
-            )
+            format!("depth {:>6}: {name_b} is faster — {numbers}\n", row.depth)
         }
         Comparison::NoSignificantDifference => {
             format!(
@@ -1316,6 +1337,35 @@ mod tests {
             banner.ends_with("this measures the launch flags, not the model.\n"),
             "{banner}"
         );
+    }
+
+    /// Two runs of one model — the `--cross-flags` case — are told apart by
+    /// run id everywhere a verdict names a side; two different models keep
+    /// their bare names.
+    #[test]
+    fn same_model_runs_are_named_by_run_id_in_every_verdict() {
+        let a = run("m", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut b = run("m", stamp("dda1b0d67", "r1/s1"), &[29.0, 31.0, 32.0]);
+        for row in &mut b.rows {
+            row.run_id = "r2".into();
+        }
+        let pair = RunPair { a: &a, b: &b };
+        assert_eq!(pair.names(), ("r".to_owned(), "r2".to_owned()));
+        let comparison = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        let out = render_comparison(&pair, &comparison);
+        assert!(
+            out.starts_with("compare r vs r2  (engine dda1b0d67)\n"),
+            "{out}"
+        );
+        assert!(out.contains(": r2 is faster"), "{out}");
+        assert!(
+            !out.contains(" m is faster"),
+            "a bare name names nothing here: {out}"
+        );
+
+        let other = run("n", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let distinct = RunPair { a: &a, b: &other };
+        assert_eq!(distinct.names(), ("m".to_owned(), "n".to_owned()));
     }
 
     /// `--cross-flags` masks flags and nothing else: a runtime that differs
