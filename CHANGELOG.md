@@ -7,6 +7,16 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `[tune] guard_tolerance_pct` (default 15) — a stage's winner may now lose
+  up to this much of the incumbent's median on the OTHER metric and still
+  win; `0` is the strict "not `Slower`" rule tune shipped with. The verdict
+  line names the trade either way (`faster on decode, prefill -13% is within
+  the 15% guard — new incumbent`; `… prefill -22% is beyond the 15% guard —
+  incumbent kept`), the `defaults won` line names both thresholds, and the
+  record stamps `guard_tolerance_pct` beside `significance_pct` (a record
+  from before the knob reads `0`, the rule it was judged under). Why: the
+  2026-09-03 measurement — `mtp:1` rejected by the guard at −13% prefill on
+  the probe, then +21–31% decode with identical output on real code.
 - `capability compare A B --cross-flags` — permits exactly the eight
   launch-flag stamp fields (`kv_unified`, `n_batch`, `n_ubatch`, `type_k`,
   `type_v`, `flash_attn`, `spec_type`, `spec_draft_n_max`) to differ and
