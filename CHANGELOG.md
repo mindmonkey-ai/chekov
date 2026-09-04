@@ -16,7 +16,10 @@ All notable changes to chekov are recorded here. The format follows
   Before this the only way to read a tuned run against an untuned one was
   `--cross-runtime`, whose banner then said "llama.cpp vs llama.cpp … this
   measures the runtimes" — the wrong sentence. The two masks compose; a
-  differing runtime still refuses under `--cross-flags` alone.
+  differing runtime still refuses under `--cross-flags` alone. Two runs of
+  one model are now named by run id in every verdict (`compare <run-a> vs
+  <run-b>`, `<run-b> is faster`) — "X is faster — 66.8 vs 86.2" named
+  nothing when both sides were X; two different models keep their names.
 - `chekov tune` gains a fifth stage, `spec`, run first: llama.cpp's native
   MTP draft head (`--spec-type draft-mtp`, on the model's own weights — no
   draft file) trialed at each `[tune] spec_drafts` length (`off`, `mtp:1`,
