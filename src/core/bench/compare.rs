@@ -1214,6 +1214,48 @@ mod tests {
         CompareOpts {
             significance_pct,
             cross_runtime: false,
+            cross_flags: false,
+        }
+    }
+
+    /// Two llama.cpp runs that differ only on launch flags are the flag
+    /// experiment `--cross-flags` exists for: exactly the eight flag fields
+    /// are masked, the banner names the ones that differ and says what is
+    /// being measured, and everything else still refuses (spec-stage
+    /// follow-up (b), 2026-09-03).
+    #[test]
+    fn cross_flags_masks_exactly_the_eight_launch_flags_and_names_them() {
+        assert_eq!(super::CROSS_FLAGS_ALLOWED.len(), 8);
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
+        let mut flagged = stamp("dda1b0d67", "r1/s1");
+        flagged.n_batch = "4096".into();
+        flagged.spec_type = "draft-mtp".into();
+        flagged.spec_draft_n_max = "1".into();
+        let b = run("m2", flagged.clone(), &[19.0, 21.0, 22.0]);
+        let err = compare_runs(&a, &b, &opts(5.0)).expect_err("flags differ");
+        match err {
+            ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "n_batch"),
+            other => panic!("expected stamp mismatch, got {other}"),
+        }
+        let cross = CompareOpts {
+            cross_flags: true,
+            ..opts(5.0)
+        };
+        assert!(compare_runs(&a, &b, &cross).is_ok());
+        let banner = cross_flags_banner(&a.head.stamp, &b.head.stamp);
+        assert!(banner.starts_with("launch-flag comparison: m1 vs m2\n"), "{banner}");
+        assert!(banner.contains("n_batch: \"engine-default\" vs \"4096\"\n"), "{banner}");
+        assert!(banner.contains("spec_type: \"engine-default\" vs \"draft-mtp\"\n"), "{banner}");
+        assert!(!banner.contains("flash_attn:"), "an equal flag is not listed: {banner}");
+        assert!(banner.ends_with("this measures the launch flags, not the model.\n"), "{banner}");
+
+        let mut foreign = flagged;
+        foreign.runtime = "mtplx 0.4.1".into();
+        let c = run("m2", foreign, &[19.0, 21.0, 22.0]);
+        let err = compare_runs(&a, &c, &cross).expect_err("runtime is not a flag");
+        match err {
+            ChekovError::BenchStampMismatch { field, .. } => assert_eq!(field, "runtime"),
+            other => panic!("expected stamp mismatch, got {other}"),
         }
     }
 

@@ -2713,9 +2713,30 @@ mod tests {
         .expect("compare parses with the flag");
         match cli.cmd {
             crate::cli::Cmd::Capability(cap) => match cap.action {
-                Some(super::CapAction::Compare { cross_runtime, .. }) => {
+                Some(super::CapAction::Compare {
+                    cross_runtime,
+                    cross_flags,
+                    ..
+                }) => {
                     assert!(cross_runtime);
+                    assert!(!cross_flags, "one mask does not imply the other");
                 }
+                other => panic!("expected Compare, got {other:?}"),
+            },
+            _ => panic!("expected capability"),
+        }
+        let cli = crate::cli::Cli::try_parse_from([
+            "chekov",
+            "capability",
+            "compare",
+            "a.json",
+            "b.json",
+            "--cross-flags",
+        ])
+        .expect("compare parses with --cross-flags");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Compare { cross_flags, .. }) => assert!(cross_flags),
                 other => panic!("expected Compare, got {other:?}"),
             },
             _ => panic!("expected capability"),
