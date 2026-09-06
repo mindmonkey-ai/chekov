@@ -660,6 +660,18 @@ the strict rule), the human's choice of the tolerance over a workload
 figure: the verdict line names the trade and the tolerance, the `defaults
 won` line names both thresholds, and the record stamps the tolerance it
 judged under. The workload-figure alternative stays unbuilt.
+Live check of (a) 2026-09-05 (`tune ornith-1.5-35b-a3b --stages spec`,
+untuned incumbent, record `tune/20260906T022935Z-ornith-1.5-35b-a3b.json`):
+`mtp:1` decode 74.7 vs 67.9, prefill 126 vs 150 — "faster on decode but
+prefill -16% is beyond the 15% guard — incumbent kept"; defaults won. The
+same trade measured −13% on 2026-09-01 and 2026-09-03 and −16% here, so on
+this machine it sits ON the default tolerance, not inside it: three runs,
+one point either side. The knob behaved exactly as designed and the phrase
+says why; whether the default should be 20 rather than 15 is a per-machine
+call (`[tune] guard_tolerance_pct` in config.toml), not a reason to move
+the shipped default after one candidate. The draft flags remain applied on
+the daily driver from the 2026-09-03 codebase measurement, which is the
+stronger evidence.
 Proposed 2026-09-03 — status: MEASURED; (a) and (b) SHIPPED
 
 ## tune's fa stage cannot measure `fa off` under quantized KV, and a dead candidate reads as a timeout (2026-09-01)
