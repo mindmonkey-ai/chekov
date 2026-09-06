@@ -46,6 +46,8 @@ pub(crate) const fn empty_measure() -> store::Measure {
         prefill_samples: vec![],
         warmup_dropped: 0,
         cache_n: 0,
+        draft_n: 0,
+        draft_n_accepted: 0,
     }
 }
 
@@ -56,6 +58,8 @@ pub(crate) fn probe_measure(timings: &runner::Timings) -> store::Measure {
         prefill_samples: vec![timings.prompt_per_second],
         warmup_dropped: 0,
         cache_n: timings.cache_n,
+        draft_n: timings.draft_n,
+        draft_n_accepted: timings.draft_n_accepted,
     }
 }
 

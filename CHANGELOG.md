@@ -7,6 +7,17 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Bench records draft acceptance. Every probe's `timings` object carries
+  `draft_n`/`draft_n_accepted` when llama-server drafted (the MTP head, or
+  any `--spec-type`); the sweep sums them per depth into the row
+  (`Measure.draft_n`, `draft_n_accepted`, `#[serde(default)]` so every
+  stored row loads as undrafted), the depth line prints `accept 63% (300
+  drafted)` beside the numbers it explains, and the `speculative:` header
+  line ends with the acceptance summed over the sweep (`acceptance 63% (190
+  of 300 drafted)`). A run that drafted nothing prints neither. The
+  acceptance ratio is what says whether a draft head pays on a workload —
+  the 2026-09-01 spike's 25–81% range is now recorded, not eyeballed from
+  the server log.
 - `[tune] guard_tolerance_pct` (default 15) — a stage's winner may now lose
   up to this much of the incumbent's median on the OTHER metric and still
   win; `0` is the strict "not `Slower`" rule tune shipped with. The verdict

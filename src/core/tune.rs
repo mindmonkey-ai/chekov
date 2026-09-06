@@ -1045,6 +1045,8 @@ mod tests {
             depth: 4096,
             prompt_n: 4101,
             cache_n: 0,
+            draft_n: 0,
+            draft_n_accepted: 0,
             decode_samples: vec![30.0, 31.0, 31.2],
             prefill_samples: vec![400.0, 402.0, 401.0],
             decode: crate::core::stats::summarize(&[30.0, 31.0, 31.2]),

@@ -123,6 +123,13 @@ pub struct Timings {
     /// the reason a warm rerun's `prompt_n` can shrink. Absent means zero
     /// cached, not a missing measurement.
     pub cache_n: u64,
+    /// Tokens the speculative draft proposed and tokens the target accepted,
+    /// when the server drafted at all — `draft_n`/`draft_n_accepted` on the
+    /// `timings` object. Absent means nothing was drafted, not a missing
+    /// measurement; the acceptance ratio is what says whether a draft head
+    /// pays on this workload.
+    pub draft_n: u64,
+    pub draft_n_accepted: u64,
 }
 
 /// One measured probe: what the agent would receive, and what it cost.
@@ -461,6 +468,8 @@ fn timings_from_stream(usage: &StreamUsage, marks: &StreamMarks) -> Result<Timin
         predicted_n: usage.completion_tokens,
         predicted_per_second: token_count_f64(usage.completion_tokens - 1) / first_to_done,
         cache_n: 0,
+        draft_n: 0,
+        draft_n_accepted: 0,
     })
 }
 
@@ -640,6 +649,8 @@ fn timings_from(parsed: &Value) -> Result<Timings, ChekovError> {
             predicted_n,
             predicted_per_second: gps,
             cache_n: count("cache_n").unwrap_or(0),
+            draft_n: count("draft_n").unwrap_or(0),
+            draft_n_accepted: count("draft_n_accepted").unwrap_or(0),
         }),
         _ => Err(ChekovError::BenchNoTimings),
     }

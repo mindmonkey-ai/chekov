@@ -89,6 +89,13 @@ pub struct Measure {
     /// before this field load as zero-cached.
     #[serde(default)]
     pub cache_n: u64,
+    /// Draft tokens the server proposed and accepted over the repetitions —
+    /// zero on a run without speculation, and on every row written before
+    /// the fields existed.
+    #[serde(default)]
+    pub draft_n: u64,
+    #[serde(default)]
+    pub draft_n_accepted: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -506,7 +513,7 @@ pub fn render_run(log: &RunLog) -> String {
         log.head.model, stamp.ctx, stamp.engine_build_commit, stamp.machine_id
     );
     out.push_str(&timing_source_line(stamp));
-    out.push_str(&speculative_line(stamp));
+    out.push_str(&speculative_line(log));
     out.push_str(&throughput_table(log));
     let probes: String = log
         .rows
@@ -931,16 +938,49 @@ fn timing_source_line(stamp: &crate::core::bench::stamp::Stamp) -> String {
 }
 
 /// How the run decoded, said out loud exactly when it was not plain
-/// autoregressive decoding (spec-stage design §6): the speculative type and
-/// its draft length. A run without `--spec-type` prints nothing here.
-fn speculative_line(stamp: &crate::core::bench::stamp::Stamp) -> String {
+/// autoregressive decoding (spec-stage design §6): the speculative type, its
+/// draft length, and — when the throughput rows recorded drafts — the
+/// acceptance summed over the sweep, which is what says whether the head
+/// paid on this workload. A run without `--spec-type` prints nothing here.
+fn speculative_line(log: &RunLog) -> String {
+    let stamp = &log.head.stamp;
     if stamp.spec_type == crate::core::bench::stamp::FLAG_ENGINE_DEFAULT {
         return String::new();
     }
+    let (drafted, accepted) = rows_of(log, "throughput").fold((0, 0), |(d, a), row| {
+        (d + row.measure.draft_n, a + row.measure.draft_n_accepted)
+    });
+    let acceptance = if drafted > 0 {
+        format!(
+            ", acceptance {} ({accepted} of {drafted} drafted)",
+            percent(accepted, drafted)
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "speculative: {}, draft length {}\n",
+        "speculative: {}, draft length {}{acceptance}\n",
         stamp.spec_type, stamp.spec_draft_n_max
     )
+}
+
+/// `  accept 63% (300 drafted)` for a row the server drafted on; nothing for
+/// a row it did not.
+fn accept_cell(measure: &Measure) -> String {
+    if measure.draft_n == 0 {
+        return String::new();
+    }
+    format!(
+        "  accept {} ({} drafted)",
+        percent(measure.draft_n_accepted, measure.draft_n),
+        measure.draft_n
+    )
+}
+
+/// `part` of `whole` as a rounded percentage string; `whole` is non-zero.
+fn percent(part: u64, whole: u64) -> String {
+    let pct = u128::from(part) * 200 / u128::from(whole);
+    format!("{}%", pct.div_ceil(2).min(100))
 }
 
 /// `; exec: cargo 1.95.0 (…), offline, scratch target` — what the exec tiers
@@ -1628,9 +1668,10 @@ fn depth_line(row: &TaskRow) -> String {
     } else {
         String::new()
     };
+    let accept = accept_cell(&row.measure);
     match (decode, prefill) {
         (Some(d), Some(p)) => format!(
-            "{:>5}  {:>8}  {:.1} [{:.1}..{:.1}]  {:.1}  {} ({} warmup dropped){cached}\n",
+            "{:>5}  {:>8}  {:.1} [{:.1}..{:.1}]  {:.1}  {} ({} warmup dropped){cached}{accept}\n",
             depth, row.measure.prompt_n, d.median, d.p10, d.p90, p.median, d.n, d.warmup_dropped
         ),
         _ => format!(
@@ -2810,9 +2851,11 @@ mod tests {
         let mut m = measure(&[19.0, 21.0, 22.0, 22.4]);
         m.draft_n = 300;
         m.draft_n_accepted = 190;
-        let out = rendered_with_measure(&eval, "r-accept", &drafted, m);
+        let out = rendered_with_measure(&eval, ("r-accept", &drafted), m);
         assert!(
-            out.contains("speculative: draft-mtp, draft length 1, acceptance 63% (190 of 300 drafted)\n"),
+            out.contains(
+                "speculative: draft-mtp, draft length 1, acceptance 63% (190 of 300 drafted)\n"
+            ),
             "{out}"
         );
         assert!(out.contains("  accept 63% (300 drafted)\n"), "{out}");
@@ -2849,16 +2892,17 @@ mod tests {
 
     /// One depth recorded under the given head, rendered.
     fn rendered_with(eval: &std::path::Path, run_id: &str, head: &RunHead) -> String {
-        rendered_with_measure(eval, run_id, head, measure(&[19.0, 21.0, 22.0, 22.4]))
+        rendered_with_measure(eval, (run_id, head), measure(&[19.0, 21.0, 22.0, 22.4]))
     }
 
-    /// One depth with the given measure recorded under the given head, rendered.
+    /// One depth with the given measure recorded under `(run_id, head)`,
+    /// rendered.
     fn rendered_with_measure(
         eval: &std::path::Path,
-        run_id: &str,
-        head: &RunHead,
+        run: (&str, &RunHead),
         measure: Measure,
     ) -> String {
+        let (run_id, head) = run;
         let mut writer = RunWriter::create(eval, run_id, head).expect("create");
         writer
             .append(Task {

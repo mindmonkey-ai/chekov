@@ -2168,6 +2168,8 @@ fn run_throughput(
                 prefill_samples: result.prefill_samples,
                 warmup_dropped: u32::try_from(warmup).unwrap_or(0),
                 cache_n: result.cache_n,
+                draft_n: result.draft_n,
+                draft_n_accepted: result.draft_n_accepted,
             },
             grade: None,
             transport,
@@ -3248,6 +3250,8 @@ mod tests {
             predicted_n: 20,
             predicted_per_second: 50.0,
             cache_n: 0,
+            draft_n: 0,
+            draft_n_accepted: 0,
         }
     }
 

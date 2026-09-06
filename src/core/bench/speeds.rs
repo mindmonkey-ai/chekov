@@ -246,6 +246,8 @@ mod tests {
                 prefill_samples: decode.to_vec(),
                 warmup_dropped: 1,
                 cache_n: 0,
+                draft_n: 0,
+                draft_n_accepted: 0,
             },
             grade: None,
             codebase: None,
