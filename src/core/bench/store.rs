@@ -1717,6 +1717,8 @@ mod tests {
             prefill_samples: decode.to_vec(),
             warmup_dropped: 1,
             cache_n: 0,
+            draft_n: 0,
+            draft_n_accepted: 0,
         }
     }
 
@@ -2795,6 +2797,30 @@ mod tests {
         );
     }
 
+    /// A drafted run's rows carry what the server drafted and accepted; the
+    /// depth line prints the acceptance beside the numbers it explains, and
+    /// the speculative header sums it over the sweep. A row without drafts
+    /// prints neither.
+    #[test]
+    fn draft_acceptance_is_printed_per_depth_and_summed_on_the_header() {
+        let eval = scratch("acceptance");
+        let mut drafted = head();
+        drafted.stamp.spec_type = "draft-mtp".into();
+        drafted.stamp.spec_draft_n_max = "1".into();
+        let mut m = measure(&[19.0, 21.0, 22.0, 22.4]);
+        m.draft_n = 300;
+        m.draft_n_accepted = 190;
+        let out = rendered_with_measure(&eval, "r-accept", &drafted, m);
+        assert!(
+            out.contains("speculative: draft-mtp, draft length 1, acceptance 63% (190 of 300 drafted)\n"),
+            "{out}"
+        );
+        assert!(out.contains("  accept 63% (300 drafted)\n"), "{out}");
+
+        let plain = rendered_with(&eval, "r-plain-accept", &head());
+        assert!(!plain.contains("accept "), "{plain}");
+    }
+
     /// The header names speculative decoding exactly when the run used it: a
     /// plain run's render is what it always was (spec-stage design §6).
     #[test]
@@ -2823,12 +2849,22 @@ mod tests {
 
     /// One depth recorded under the given head, rendered.
     fn rendered_with(eval: &std::path::Path, run_id: &str, head: &RunHead) -> String {
+        rendered_with_measure(eval, run_id, head, measure(&[19.0, 21.0, 22.0, 22.4]))
+    }
+
+    /// One depth with the given measure recorded under the given head, rendered.
+    fn rendered_with_measure(
+        eval: &std::path::Path,
+        run_id: &str,
+        head: &RunHead,
+        measure: Measure,
+    ) -> String {
         let mut writer = RunWriter::create(eval, run_id, head).expect("create");
         writer
             .append(Task {
                 suite: "throughput".into(),
                 task_id: "depth-1024".into(),
-                measure: measure(&[19.0, 21.0, 22.0, 22.4]),
+                measure,
                 grade: None,
                 transport: Transport::Buffered,
                 codebase: None,

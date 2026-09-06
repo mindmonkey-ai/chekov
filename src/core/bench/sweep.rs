@@ -101,6 +101,8 @@ mod tests {
                 predicted_n: 128,
                 predicted_per_second: decode_tps,
                 cache_n: 64,
+                draft_n: 30,
+                draft_n_accepted: 19,
             },
         }
     }
@@ -131,6 +133,11 @@ mod tests {
             "the honest depth is the measured one"
         );
         assert_eq!(results[0].cache_n, 64, "prefix-cache reuse rides along");
+        assert_eq!(
+            (results[0].draft_n, results[0].draft_n_accepted),
+            (90, 57),
+            "draft counts are summed over the repetitions, warmup included"
+        );
     }
 
     #[test]

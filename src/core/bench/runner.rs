@@ -2004,6 +2004,26 @@ mod tests {
         assert!(super::cross(&wire(&http, &facade, &up), &req).is_err());
     }
 
+    /// llama-server adds `draft_n`/`draft_n_accepted` to `timings` only when
+    /// speculation ran; absent means none was drafted, not a missing
+    /// measurement — the four rate fields stay all-or-nothing.
+    #[test]
+    fn timings_carry_the_draft_counts_when_the_server_drafted() {
+        let drafted = serde_json::json!({"timings": {
+            "prompt_n": 1055, "prompt_per_second": 145.2,
+            "predicted_n": 128, "predicted_per_second": 86.2,
+            "draft_n": 300, "draft_n_accepted": 190,
+        }});
+        let t = super::timings_from(&drafted).expect("timings");
+        assert_eq!((t.draft_n, t.draft_n_accepted), (300, 190));
+        let plain = serde_json::json!({"timings": {
+            "prompt_n": 1055, "prompt_per_second": 145.2,
+            "predicted_n": 128, "predicted_per_second": 66.8,
+        }});
+        let t = super::timings_from(&plain).expect("timings");
+        assert_eq!((t.draft_n, t.draft_n_accepted), (0, 0));
+    }
+
     fn props(n_ctx: u64) -> String {
         serde_json::json!({
             "default_generation_settings": {"n_ctx": n_ctx},
