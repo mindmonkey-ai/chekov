@@ -536,6 +536,12 @@ at 58–81% acceptance — a 3B-active MoE trunk is cheap, so only a one-token
 draft pays. `explain` now points at the stage; the stamp names `spec_type`
 and `spec_draft_n_max`; compare refuses across them. A bench-side accept-rate
 row (from `/metrics` `spec_decode_*`) is a possible later slice.
+ACCEPT-RATE SHIPPED 2026-09-05, and not from `/metrics`: llama-server puts
+`draft_n`/`draft_n_accepted` on every response's `timings` object when it
+drafted, so bench reads them where it already reads the four rates — no
+extra flag, nothing polled. Summed per depth into the row, printed as
+`accept N% (M drafted)` on the depth line and as a sweep total on the
+`speculative:` header; zero rows and pre-field rows print nothing.
 Proposed 2026-08-30 — status: SHIPPED 2026-09-01
 
 ## `chekov tune`: per-machine launch-flag autotune with an honest verdict (2026-08-30)

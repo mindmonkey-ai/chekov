@@ -1276,6 +1276,8 @@ mod tests {
                     prefill_samples: decode.to_vec(),
                     warmup_dropped: 1,
                     cache_n: 0,
+                    draft_n: 0,
+                    draft_n_accepted: 0,
                 },
                 grade: None,
                 codebase: None,
@@ -1619,6 +1621,8 @@ mod tests {
                 prefill_samples: vec![15.0, 16.0, 17.0],
                 warmup_dropped: 1,
                 cache_n: 0,
+                draft_n: 0,
+                draft_n_accepted: 0,
             },
             grade: None,
             codebase: None,
@@ -1684,6 +1688,8 @@ mod tests {
             prefill_samples: vec![],
             warmup_dropped: 0,
             cache_n: 0,
+            draft_n: 0,
+            draft_n_accepted: 0,
         }
     }
 
