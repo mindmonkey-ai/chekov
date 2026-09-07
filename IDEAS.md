@@ -131,6 +131,24 @@ Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit si
 It is hidden, so nothing that enumerates the eval dir reads it, and the next run
 removes and re-adds it itself — the manual cleanup, if you want the space back
 now, is `git worktree prune` in the target repo plus deleting that directory.
+Round check 2026-09-06: every slice-6 item in spec §12 has shipped (worktree
+isolation, `--allow-exec`, the leakage filter, HEAD-seeded sampling, `/infill`
+N/A, `--svg`, `--judge`), so what this entry still owes is §7.2's deferred
+probes and the seed counts. Ordered by what the evidence says pays next:
+`tool_loop` — single-turn `tool_emit` is saturating here (8/10, 8/10, 10/10,
+9/10 across the four face-off models) and in the field (a 0.97 frontier on
+BFCL-style single calls against a real spread on BFCL-v4 Multi-Turn and
+tau-bench); design drafted for approval in
+`docs/superpowers/specs/2026-09-06-tool-loop-probe-design.md`. Then
+`long_ctx_trace`, which only pays once a run reaches past the 16K depth the
+sweep stops at today (see "tune judges at 4096 tokens" below) — at the
+current depths its recommended `ctx_size` would read "≥16384, the largest
+measured", which recommends nothing. `hallucination` is largely covered by
+codebase tier 5 (repo-symbol existence) and `diff_fidelity` measures an edit
+shape (unified diffs) Claude Code does not emit — both stay deferred on
+purpose. `think_leak` still waits on §13 Q5. The agentic set stands at
+10/7/12 of the spec's 30/30/40; growing it breaks comparability with every
+stored agentic run by construction, so it is its own decision.
 Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) v0 SHIPPED 2026-08-28 (--suite agentic: tool_emit/grammar_gap/instruction seed set, growing toward 30/40; deferred: diff_fidelity+tool_loop+long_ctx_trace+hallucination need the §8/§9 corpora, think_leak waits on §13 Q5); slice-5 "`--metric tok-s` upgrades from predicted to measured" SHIPPED 2026-08-28 (fixed bands, deepest-depth median, exact-match + stale footer); fixture-v1 content release-gated; slice 6 OPEN (`--svg` SHIPPED 2026-08-28; --codebase slice A SHIPPED 2026-08-29 (Rust, same-file, tiers 1-5); `#[cfg(test)]` rule amended 2026-08-29 (items elided, file kept); slice B1 SHIPPED 2026-08-29 (cross_file_first, input_extra, two arms and the measured context lift; quota 12/6/6, corpus_id changed); slice B2 (exec tiers behind --allow-exec) SHIPPED 2026-08-30; slice C (--judge) SHIPPED 2026-08-30 (gpt-oss-20b recommended; probe in the spec §3.0))**
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
@@ -282,6 +300,8 @@ body confirms the model carries an MTP block at layer index 45 (relevant to the
 MTP-awareness idea below). Sizing note: 1-bit dynamic is ~93-100 GB, so even
 when the PR merges this model is Studio-class only — it cannot fit a 48 GB
 M4 Max under any published quant.
+2026-09-06: the Aug 24–31 upstream weekly report still lists `glm5next` among
+the OPEN pull requests — blocked as before; nothing to do here yet.
 Proposed 2026-08-28 — status: BLOCKED (upstream)
 
 ## A cell's second character ignores the overhead's provenance (2026-08-28)
@@ -509,6 +529,12 @@ and every chat fill fails loudly as "chat fill has no text content"
 `enable_thinking: false` fixed it live, and the README's foreign-runtime
 section now says so — still owed: growing the chat-FIM arm its own
 thinking-budget strategy instead of relying on the operator to disable it.
+2026-09-06: the live MTPLX referee run is still owed and still approval-gated
+(installing MTPLX is a machine-level dependency). New data point for when it
+runs: MTPLX 2.10.x publishes 64.3 tok/s on Qwen3.8-27B at 3K context on an
+M5 Max, 18.4 at 147K, and a Claude Code follow-up turn with 165,165 of
+165,502 tokens served from cache — the deep-context regime chekov's sweep
+does not reach today. `--runtime` needs nothing new for it.
 Proposed 2026-08-30 — status: SHIPPED; foreign-timing measurement SHIPPED
 2026-08-31; live MLX verification DONE 2026-08-31; finding (a) SHIPPED and
 finding (b) documented 2026-08-31; foreign agentic/fixture timing SHIPPED
@@ -723,3 +749,126 @@ grace-period poll — a candidate that dies at load now reports "died" in
 seconds instead of after 600 polls, and a cooperative teardown reports
 `Terminated` promptly instead of burning the full 20s grace on a corpse.
 Proposed 2026-09-01 — status: (a)/(b)/(c) SHIPPED 2026-08-31
+
+## tune's spec stage skips every model without an MTP head — the engine has five drafter-free n-gram types (2026-09-06)
+The stage's first skip is "no head in the GGUF" (`nextn_predict_layers 0`),
+which is most of this registry — `gpt-oss-20b`/`-120b`, `minimax-m2.7`,
+`gemma-3-12b-it`. But the pinned engine's `--spec-type` (checked 2026-09-06
+on `0f194b907`) accepts `none, draft-simple, draft-eagle3, draft-mtp,
+draft-dflash, draft-dspark, ngram-simple, ngram-map-k, ngram-map-k4v,
+ngram-mod, ngram-cache` as a comma-separated list tried in order, and the
+`ngram-*` types draft from the prompt's own repetition with no draft file
+and no head — the rewrite-a-file turn of an agent session is exactly that
+shape (MTPLX's "cache-copy drafting" is the same trick, +19% on that turn in
+its 2.10.0 note). Each has its own knobs (`--spec-ngram-mod-n-min/-max/
+-n-match`, `--spec-ngram-simple-size-n/-m/-min-hits`). Proposal: `[tune]
+spec_drafts` accepts `ngram:<type>` beside `off` and `mtp:<n>`; the
+head-absent skip narrows to the `mtp:` candidates and says so ("no head —
+MTP candidates skipped; n-gram trialed"); the engine's `--help` gate checks
+the type name in the list, not just the flag; the stamp's `spec_type`
+already carries whatever the flag says, so `compare` refuses by name
+unchanged. Two honesty limits to build in: n-gram acceptance is
+workload-bound and tune's 4096-token probe is prose-shaped, so a win or a
+loss there says little about code — the 2026-09-03-style decode-on-the-
+codebase check is the confirming measurement; and chaining
+(`draft-mtp,ngram-mod`) is a second candidate grammar, not this one. Not a
+quality question: every draft is verified by the target, so greedy output
+is unchanged.
+Proposed 2026-09-06 — status: OPEN
+
+## tune judges at 4096 tokens; the workload lives at 50–165K (2026-09-06)
+`[tune] depth = 4096` is the only depth any stage measures, and a flag's
+cost is not flat in depth: MTPLX's own release note has Qwen3.8-27B decoding
+3.5x slower at 147K than at 3K on one Mac; a 2026-08-31 A100 measurement of
+a llama.cpp KV fork had `q8_0`/`q4_0` KV at 64K under 30% of f16's decode
+(quantized-KV attention leaves the fast kernels at depth) — Metal is
+unmeasured, which is what tune is for. Claude Code's first turn on a real
+repo is 100–165K tokens (MTPLX logs 165,165 of 165,502 cached on a
+follow-up). So a `kv q8_0` or `mtp:1` verdict at 4K can invert where the
+user actually sits, and every guard debate of 2026-09-01/03/05 was a
+one-depth debate. Proposal: `[tune] depths = [4096, 65536]` (default stays
+`[4096]` — nothing changes until a machine opts in); a candidate wins only
+if it wins at the shallow depth AND is not `Slower` beyond
+`guard_tolerance_pct` at the deep one; the verdict names both depths; the
+record stamps the list. The cost is honest and large — 64K of prefill on
+`ornith-1.5-35b-a3b` is ~7.5 min per probe at 145 tok/s, ~40 min per
+candidate at the default five repetitions — so the plan line and the
+`--dry-run` estimate carry it; whether the deep depth gets the full
+repetition count or a single confirming probe is a design choice to make
+deliberately when this is built, not a default to flip. The config-only
+half needs no code: `[bench] depths` gaining 65536/131072 puts a measured
+point where the agent regime is, and `--metric tok-s` on the frontier then
+shows it; the same wall-clock honesty applies.
+Proposed 2026-09-06 — status: OPEN
+
+## Reasoning effort is a launch flag nobody stamps, and a cost nobody measures (2026-09-06)
+Three findings point one way. (1) chekov's own 2026-08-31 foreign run: a
+thinking-default model burned the whole bounded fill budget on reasoning
+and every chat fill was an honest N/A until the operator disabled thinking
+server-side — "growing the chat-FIM arm its own thinking-budget strategy"
+is still owed above. (2) Every Qwen3.8-27B guide says it "wildly overthinks
+by default" and to run it at low/medium effort; a 45-configuration RTX 5090
+sweep (2026-08-29) found reasoning effort moved time-to-visible-answer ~10x
+— more than any server flag it tried. (3) The pinned engine (checked
+2026-09-06) has `--reasoning [on|off|auto]`, `--reasoning-effort LEVEL`
+(`minimal` … `max`), `--reasoning-budget N` (`0` = end thinking at once)
+and `--reasoning-budget-message`; all four are launch flags a registry
+entry can carry in `extra_flags` today, with zero chekov code. What is
+missing is honesty about them. Proposal, two halves: (a) the bench `Stamp`
+reads `reasoning_effort` and `reasoning_budget` off the launch argv through
+the same `stamp::LaunchFlags` reader the six flags use (serde default
+`engine-default`; every stored run loads unchanged), so `compare` refuses
+two runs that differ only in how much the model was allowed to think —
+today that difference is invisible and would read as a model verdict — and
+`--cross-flags` masks them like the other eight; (b) bench records, per
+probe, reasoning tokens against answer tokens (the translator already
+splits `reasoning_content` into a `thinking` block — count it, never
+re-parse) and, on the streamed door, time-to-first-visible-text; the report
+prints a `think share` column beside the pass counts. Why chekov
+specifically: an agent backend that is right but 10x slower to its first
+visible token loses to one that is slightly wrong, and no chekov number
+sees that today. A per-entry registry key is NOT proposed — `extra_flags`
+already is one, and a second spelling of the same flag is the
+knob-for-a-value-that-never-varied mistake. The `think_leak` probe (§13 Q5)
+is a different question — where the thoughts land, not how many.
+Proposed 2026-09-06 — status: OPEN
+
+## New tool-use lane candidates for the agentic bench (survey 2026-09-06)
+Two Aug-2026 30B-class releases aim at the axis where our benched models
+sit near-saturated on single-turn `tool_emit`. Meta's Muse line — the ~30B
+dense checkpoint one guide calls Muse Glimmer and a release timeline lists
+as Muse Spark 1.3 (pin the HF repo before registering): ~29.6B incl. a 1.8B
+vision encoder, Apache-2.0, 131K ctx, self-reported MCP Atlas 75.5 against
+Qwen3.6-27B's 62.5, llama.cpp-supported, under 20 GB at a K-quant. And
+NVIDIA Nemotron 3.5 Lightning (30B-A3B MoE, 2026-08-11): tau-bench 0.640
+measured independently by Thoughtworks, a built-in speculative head that
+gave 1.46–1.96x there — hybrid Mamba-2, so llama.cpp support and a GGUF
+must be verified first, and `explain` should say whether the head appears
+as `nextn_predict_layers`. Both fit this Mac and the 48 GB seat. Proposal:
+register, `explain`, bench `all` + `--codebase` + `--judge gpt-oss-20b`
+against `ornith-1.5-35b-a3b` at ctx 131072 — and hold the tool-use verdict
+for `tool_loop`, since single-turn emission will not separate them. Not
+benchable here from the same survey: Tencent Hy4 preview (770B-A49B; the
+1-bit GGUF is 229 GB against a 182.62 GiB budget); GLM-5.3-Flash stays
+upstream-blocked (BLOCKED entry above).
+Proposed 2026-09-06 — status: OPEN (measurement)
+
+## Upstream engine work to watch, not build (2026-09-06)
+Recorded so the next round does not re-research it. (a) Speculative prefill
+(open llama.cpp PR, Aug 24–31 report): a draft model scores token
+importance and only the "relevant" prompt chunks are prefilled — faster
+long-context prefill "at the cost of some potential accuracy degradation",
+i.e. NOT output-preserving. If it lands it belongs in the quality-graded
+suites, never in `tune`, whose stages assume a flag changes speed and not
+answers. (b) TurboQuant KV types (`turbo2/3/4`, 2–4-bit WHT-rotated KV,
+~4.3x vs f16 at ~98% speed on Metal per the MLX port): fork-only as of the
+Aug-2026 Debian `llama.cpp-tools` manpage and absent from the pinned
+engine's `--cache-type-k` list (`f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl,
+q5_0, q5_1`); when upstream merges they are one more `[tune] cache_types`
+entry and the kv stage measures them — no chekov code. (c) Gemma 4 MTP
+"assistant" drafter models (a separate GGUF; conversion support unmerged):
+a draft-FILE path, which tune's spec stage deliberately does not model.
+(d) `draft-eagle3`, `draft-dflash`, `draft-dspark` are in the pinned
+engine's `--spec-type` list already, but each needs a trained draft head
+shipped as a file — same reason, same deferral.
+Proposed 2026-09-06 — status: DEFERRED (upstream)
