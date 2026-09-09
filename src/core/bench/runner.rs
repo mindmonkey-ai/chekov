@@ -130,6 +130,11 @@ pub struct Timings {
     /// pays on this workload.
     pub draft_n: u64,
     pub draft_n_accepted: u64,
+    /// Characters of the reply spent thinking and answering, read off the
+    /// upstream body where a `<think>` span still exists (design §4). Both
+    /// zero on a crossing that carried no message — never "no thinking".
+    pub thinking_chars: u64,
+    pub answer_chars: u64,
 }
 
 /// One measured probe: what the agent would receive, and what it cost.
@@ -362,9 +367,14 @@ pub fn cross_stream_timed(
         runtime: "unknown".to_owned(),
         reason: "no usage object in the stream".to_owned(),
     })?;
+    let chars = crate::core::bench::thinkspan::stream_reply_chars(data_lines(&sse));
     Ok(ProbeArtifact {
         anthropic_body,
-        timings: timings_from_stream(&usage, &marks)?,
+        timings: Timings {
+            thinking_chars: chars.thinking,
+            answer_chars: chars.answer,
+            ..timings_from_stream(&usage, &marks)?
+        },
     })
 }
 
@@ -403,7 +413,13 @@ fn stream_timings(sse: &str) -> Result<Timings, ChekovError> {
         .filter(|frame| frame.get("timings").is_some())
         .last()
         .ok_or(ChekovError::BenchNoTimings)?;
-    read_timings(&last.to_string())
+    let timings = read_timings(&last.to_string())?;
+    let chars = crate::core::bench::thinkspan::stream_reply_chars(data_lines(sse));
+    Ok(Timings {
+        thinking_chars: chars.thinking,
+        answer_chars: chars.answer,
+        ..timings
+    })
 }
 
 /// Token counts off an `OpenAI` `usage` object — the foreign-timing measure's
@@ -470,6 +486,8 @@ fn timings_from_stream(usage: &StreamUsage, marks: &StreamMarks) -> Result<Timin
         cache_n: 0,
         draft_n: 0,
         draft_n_accepted: 0,
+        thinking_chars: 0,
+        answer_chars: 0,
     })
 }
 
@@ -637,6 +655,7 @@ fn timings_from(parsed: &Value) -> Result<Timings, ChekovError> {
     let timings = parsed.get("timings").ok_or(ChekovError::BenchNoTimings)?;
     let float = |key: &str| timings.get(key).and_then(Value::as_f64);
     let count = |key: &str| timings.get(key).and_then(Value::as_u64);
+    let chars = message_chars(parsed);
     match (
         count("prompt_n"),
         float("prompt_per_second"),
@@ -651,9 +670,22 @@ fn timings_from(parsed: &Value) -> Result<Timings, ChekovError> {
             cache_n: count("cache_n").unwrap_or(0),
             draft_n: count("draft_n").unwrap_or(0),
             draft_n_accepted: count("draft_n_accepted").unwrap_or(0),
+            thinking_chars: chars.thinking,
+            answer_chars: chars.answer,
         }),
         _ => Err(ChekovError::BenchNoTimings),
     }
+}
+
+/// The buffered reply's counts — zero-both when the body has no message
+/// (an `/infill` body has none, and records no measurement).
+fn message_chars(parsed: &Value) -> crate::core::bench::thinkspan::ReplyChars {
+    parsed
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .map(crate::core::bench::thinkspan::reply_chars)
+        .unwrap_or_default()
 }
 
 /// Recast a missing-`timings` failure on the foreign path (C1).

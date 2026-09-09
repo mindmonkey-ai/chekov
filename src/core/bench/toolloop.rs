@@ -655,6 +655,8 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
             cache_n: prompt_n / 2,
             draft_n: 4,
             draft_n_accepted: 3,
+            thinking_chars: 5,
+            answer_chars: 15,
         }
     }
 

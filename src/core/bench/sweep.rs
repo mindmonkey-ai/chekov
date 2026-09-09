@@ -113,6 +113,8 @@ mod tests {
                 cache_n: 64,
                 draft_n: 30,
                 draft_n_accepted: 19,
+                thinking_chars: 7,
+                answer_chars: 11,
             },
         }
     }

@@ -3369,6 +3369,8 @@ mod tests {
             cache_n: 0,
             draft_n: 0,
             draft_n_accepted: 0,
+            thinking_chars: 0,
+            answer_chars: 0,
         }
     }
 
