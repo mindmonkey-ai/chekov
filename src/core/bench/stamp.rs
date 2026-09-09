@@ -510,10 +510,10 @@ mod tests {
         assert_eq!(parsed.spec_draft_n_max, "engine-default");
     }
 
-    /// One reader for the eight flag-sourced values, each spelling covered
+    /// One reader for the fifteen flag-sourced values, each spelling covered
     /// (spec §6).
     #[test]
-    fn launch_flags_read_all_eight() {
+    fn launch_flags_read_all_fifteen() {
         let argv: Vec<String> =
             "-fa on --cache-type-k q8_0 -ctv q8_0 -b 4096 --spec-type draft-mtp --spec-draft-n-max 1"
                 .split(' ')
@@ -544,12 +544,14 @@ mod tests {
         );
         let plain = launch_flags(&[]);
         assert_eq!(plain.spec_type, "engine-default");
+        assert_eq!(flags.reasoning_format, "engine-default");
     }
 
-    /// The foreign sentinel is eight of the same word, and a six-field record
-    /// from before the speculative fields still loads (spec §6).
+    /// The foreign sentinel is fifteen of the same word, and an eight-field
+    /// record from before the reasoning fields still loads (spec §6, design
+    /// §11).
     #[test]
-    fn unmanaged_is_eight_sentinels_and_a_six_field_record_loads() {
+    fn unmanaged_is_fifteen_sentinels_and_an_eight_field_record_loads() {
         let sentinel = unmanaged_flags();
         for value in [
             &sentinel.kv_unified,
@@ -560,12 +562,118 @@ mod tests {
             &sentinel.flash_attn,
             &sentinel.spec_type,
             &sentinel.spec_draft_n_max,
+            &sentinel.reasoning,
+            &sentinel.reasoning_format,
+            &sentinel.reasoning_effort,
+            &sentinel.reasoning_budget,
+            &sentinel.reasoning_budget_message,
+            &sentinel.reasoning_preserve,
+            &sentinel.chat_template_kwargs,
         ] {
             assert_eq!(value, "unmanaged");
         }
         let json = r#"{"kv_unified":"engine-default","n_batch":"4096","n_ubatch":"engine-default",
-            "type_k":"q8_0","type_v":"q8_0","flash_attn":"on"}"#;
-        let old: LaunchFlags = serde_json::from_str(json).expect("a six-field record loads");
+            "type_k":"q8_0","type_v":"q8_0","flash_attn":"on",
+            "spec_type":"engine-default","spec_draft_n_max":"engine-default"}"#;
+        let old: LaunchFlags = serde_json::from_str(json).expect("an eight-field record loads");
         assert_eq!(old.spec_type, "engine-default");
+        assert_eq!(old.reasoning_budget, "engine-default");
+    }
+
+    #[test]
+    fn the_reasoning_flags_read_under_every_spelling_and_absence_is_engine_default() {
+        let argv: Vec<String> = "-rea off --reasoning-format none --reasoning-effort low \
+                                 --reasoning-budget -1 --reasoning-budget-message hurry \
+                                 --no-reasoning-preserve --chat-template-kwargs {\"enable_thinking\":false}"
+            .split(' ')
+            .map(str::to_owned)
+            .collect();
+        let flags = launch_flags(&argv);
+        assert_eq!(flags.reasoning, "off");
+        assert_eq!(flags.reasoning_format, "none");
+        assert_eq!(flags.reasoning_effort, "low");
+        assert_eq!(
+            flags.reasoning_budget, "-1",
+            "a negative number is a value, not a switch"
+        );
+        assert_eq!(flags.reasoning_budget_message, "hurry");
+        assert_eq!(
+            flags.reasoning_preserve, "off",
+            "the negated spelling reads as off"
+        );
+        assert_eq!(flags.chat_template_kwargs, "{\"enable_thinking\":false}");
+        let long: Vec<String> = ["--reasoning", "auto", "--reasoning-preserve"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let flags = launch_flags(&long);
+        assert_eq!(flags.reasoning, "auto");
+        assert_eq!(flags.reasoning_preserve, "on");
+        let none = launch_flags(&[]);
+        for value in [
+            &none.reasoning,
+            &none.reasoning_format,
+            &none.reasoning_effort,
+            &none.reasoning_budget,
+            &none.reasoning_budget_message,
+            &none.reasoning_preserve,
+            &none.chat_template_kwargs,
+        ] {
+            assert_eq!(value, "engine-default");
+        }
+    }
+
+    #[test]
+    fn a_negative_number_after_a_flag_is_its_value() {
+        let argv: Vec<String> = ["--reasoning-budget", "-1", "-fa"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert_eq!(flag_value(&argv, "--reasoning-budget"), "-1");
+        assert_eq!(
+            flag_value(&argv, "-fa"),
+            "on",
+            "a following flag is still a switch"
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_differs_after_spec_draft_n_max_and_before_allow_exec() {
+        let a = stamp();
+        let mut b = stamp();
+        b.reasoning_effort = "high".into();
+        b.allow_exec = true;
+        assert_eq!(first_mismatch(&a, &b), Some("reasoning_effort"));
+        let mut c = stamp();
+        c.spec_draft_n_max = "2".into();
+        c.reasoning_effort = "high".into();
+        assert_eq!(first_mismatch(&a, &c), Some("spec_draft_n_max"));
+        assert_eq!(super::FLAG_FIELDS, 15);
+    }
+
+    #[test]
+    fn a_stamp_without_the_reasoning_fields_reads_as_engine_default_and_set_flags_copies_all_fifteen()
+     {
+        let json = serde_json::to_string(&stamp()).expect("ser");
+        let stripped = json
+            .replace("\"reasoning\":\"engine-default\",", "")
+            .replace("\"reasoning_format\":\"engine-default\",", "")
+            .replace("\"reasoning_effort\":\"engine-default\",", "")
+            .replace("\"reasoning_budget\":\"engine-default\",", "")
+            .replace("\"reasoning_budget_message\":\"engine-default\",", "")
+            .replace("\"reasoning_preserve\":\"engine-default\",", "")
+            .replace("\"chat_template_kwargs\":\"engine-default\",", "");
+        assert_ne!(json, stripped, "the fixture carried the fields to strip");
+        let parsed: Stamp = serde_json::from_str(&stripped).expect("an old stamp loads");
+        assert_eq!(parsed.reasoning_format, "engine-default");
+        let argv: Vec<String> = ["--reasoning-format", "none", "-b", "4096"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let mut hydrated = parsed;
+        hydrated.set_flags(&launch_flags(&argv));
+        assert_eq!(hydrated.reasoning_format, "none");
+        assert_eq!(hydrated.n_batch, "4096");
+        assert_eq!(hydrated.reasoning_effort, "engine-default");
     }
 }
