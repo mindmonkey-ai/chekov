@@ -823,6 +823,8 @@ Streaming probes use the same seam: `stream: true`, buffered `post_json`, split 
 | `hallucination` | all | Every identifier and import in every snippet across the run, checked against the corpus symbol set plus declared dependencies (`Cargo.toml` / `package.json` / `pyproject.toml`) | Fraction that exist. Best value-per-LOC probe in the plan: no execution, no judge, and it measures the failure mode that actually breaks agent sessions |
 | `throughput` | depths × repeats | Prefill and decode tok/s at depth | §7.4 |
 
+Status 2026-09-09: `tool_loop` shipped — see `docs/superpowers/specs/2026-09-06-tool-loop-probe-design.md`. Still deferred: `diff_fidelity`, `think_leak` (§13 Q5), `long_ctx_trace` (pays only past the 16K depth the sweep stops at), `hallucination` (largely covered by codebase tier 5).
+
 ### 7.3 Per-candidate lifecycle
 
 Sequential by necessity — `minimax-m2.7` at UD-Q5_K_XL is ~181 GiB resident and cannot co-reside with anything.
