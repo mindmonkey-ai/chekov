@@ -455,8 +455,10 @@ fn agentic_totals(pairs: &[AgenticPair]) -> Vec<SuiteTotals> {
     out.extend(tool_emit_totals(&sides, Transport::Buffered));
     out.extend(grammar_gap_totals(&sides));
     out.extend(instruction_totals(&sides, Transport::Buffered));
+    out.extend(tool_loop_totals(&sides, Transport::Buffered));
     out.extend(tool_emit_totals(&sides, Transport::Streamed));
     out.extend(instruction_totals(&sides, Transport::Streamed));
+    out.extend(tool_loop_totals(&sides, Transport::Streamed));
     out
 }
 
@@ -479,6 +481,19 @@ fn tool_emit_totals(sides: &Sides, transport: Transport) -> Option<SuiteTotals> 
     let b = rows_via(sides.b, "tool_emit", transport);
     Some(SuiteTotals {
         label: format!("tool_emit{}", door_tag(transport)),
+        a: Tally::of(&a).cell(),
+        b: Tally::of(&b).cell(),
+    })
+}
+
+fn tool_loop_totals(sides: &Sides, transport: Transport) -> Option<SuiteTotals> {
+    let a = rows_via(sides.a, "tool_loop", transport);
+    if a.is_empty() {
+        return None;
+    }
+    let b = rows_via(sides.b, "tool_loop", transport);
+    Some(SuiteTotals {
+        label: format!("tool_loop{}", door_tag(transport)),
         a: Tally::of(&a).cell(),
         b: Tally::of(&b).cell(),
     })
