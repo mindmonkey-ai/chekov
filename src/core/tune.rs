@@ -1254,6 +1254,25 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
+    #[test]
+    fn a_trials_stamp_reads_the_reasoning_flags_off_its_argv() {
+        let argv: Vec<String> = ["--reasoning-effort", "low", "--reasoning-budget", "-1"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let flags = crate::core::bench::stamp::launch_flags(&argv);
+        let record = sample_record(argv, flags);
+        let stamp = &record.trials[0].stamp;
+        assert_eq!(
+            (
+                stamp.reasoning_effort.as_str(),
+                stamp.reasoning_budget.as_str()
+            ),
+            ("low", "-1")
+        );
+        assert_eq!(stamp.reasoning_format, "engine-default");
+    }
+
     /// A record written before the guard knob existed was judged on the
     /// strict rule, and reads as exactly that.
     #[test]
