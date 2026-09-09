@@ -626,6 +626,7 @@ fn suite_summaries(log: &RunLog) -> String {
     out.extend(tool_emit_line(log, Transport::Streamed));
     out.extend(instruction_line(log, Transport::Streamed));
     out.extend(tool_loop_line(log, Transport::Streamed));
+    out.extend(thinking_line(log));
     out.push_str(&asymmetry_lines(log));
     out
 }
@@ -1019,6 +1020,89 @@ fn speculative_line(log: &RunLog) -> String {
         "speculative: {}, draft length {}{acceptance}\n",
         stamp.spec_type, stamp.spec_draft_n_max
     )
+}
+
+/// The suites in the order the line names them.
+const THINKING_SUITES: [&str; 6] = [
+    "throughput",
+    "tool_emit",
+    "grammar_gap",
+    "instruction",
+    "tool_loop",
+    "codebase",
+];
+
+/// `thinking     share of reply characters spent thinking, median per case:
+/// tool_emit 12%, …` — printed only when some row measured any characters,
+/// footnoted with what the launch said about thinking (design §5, §11).
+fn thinking_line(log: &RunLog) -> Option<String> {
+    let cells: Vec<String> = THINKING_SUITES
+        .iter()
+        .filter_map(|suite| suite_share(log, suite).map(|pct| format!("{suite} {pct}%")))
+        .collect();
+    if cells.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "thinking     share of reply characters spent thinking, median per case: {}{}{}\n",
+        cells.join(", "),
+        forced_arm_note(log),
+        reasoning_launch_note(&log.head.stamp)
+    ))
+}
+
+/// The median whole-percent share over the suite's measured rows, `None`
+/// when no row of the suite measured any characters. Rounded per row the
+/// way `percent` rounds, then the upper-middle median, both in integers.
+fn suite_share(log: &RunLog, suite: &str) -> Option<u128> {
+    let mut shares: Vec<u128> = rows_of(log, suite)
+        .map(|row| (row.measure.thinking_chars, row.measure.answer_chars))
+        .filter(|(thinking, answer)| thinking + answer > 0)
+        .map(|(thinking, answer)| {
+            (u128::from(thinking) * 200 / u128::from(thinking + answer))
+                .div_ceil(2)
+                .min(100)
+        })
+        .collect();
+    if shares.is_empty() {
+        return None;
+    }
+    shares.sort_unstable();
+    Some(shares[shares.len() / 2])
+}
+
+/// The grammar arm ran under its own extraction, whatever the launch said.
+fn forced_arm_note(log: &RunLog) -> String {
+    log.head
+        .forced_reasoning_format
+        .as_deref()
+        .map_or_else(String::new, |mode| {
+            format!("; grammar_gap measured with reasoning extracted ({mode})")
+        })
+}
+
+/// What the launch said about thinking: nothing at all, or unobservable.
+fn reasoning_launch_note(stamp: &crate::core::bench::stamp::Stamp) -> &'static str {
+    use crate::core::bench::stamp::{FLAG_ENGINE_DEFAULT, RUNTIME_LLAMA_CPP};
+    if stamp.runtime != RUNTIME_LLAMA_CPP {
+        return " (reasoning flags unmanaged on this runtime)";
+    }
+    let flagless = [
+        &stamp.reasoning,
+        &stamp.reasoning_format,
+        &stamp.reasoning_effort,
+        &stamp.reasoning_budget,
+        &stamp.reasoning_budget_message,
+        &stamp.reasoning_preserve,
+        &stamp.chat_template_kwargs,
+    ]
+    .iter()
+    .all(|f| *f == FLAG_ENGINE_DEFAULT);
+    if flagless {
+        " (launched with no reasoning flag)"
+    } else {
+        ""
+    }
 }
 
 /// `  accept 63% (300 drafted)` for a row the server drafted on; nothing for
@@ -2096,7 +2180,7 @@ mod tests {
     }
 
     /// A row of `suite` with the given counts, buffered, passing.
-    fn thought(suite: &str, id: &str, thinking: u64, answer: u64) -> Task {
+    fn thought(suite: &str, id: &str, (thinking, answer): (u64, u64)) -> Task {
         let mut task = graded(suite, id, GradeRow::pass());
         task.measure.thinking_chars = thinking;
         task.measure.answer_chars = answer;
@@ -2108,11 +2192,11 @@ mod tests {
         let eval = scratch("thinking-line");
         let mut writer = RunWriter::create(&eval, "r-think", &head()).expect("create");
         for task in [
-            thought("tool_emit", "te-001", 10, 90),
-            thought("tool_emit", "te-002", 50, 50),
-            thought("tool_emit", "te-003", 100, 0),
-            thought("instruction", "if-001", 0, 0),
-            thought("tool_loop", "tl-001", 30, 70),
+            thought("tool_emit", "te-001", (10, 90)),
+            thought("tool_emit", "te-002", (50, 50)),
+            thought("tool_emit", "te-003", (100, 0)),
+            thought("instruction", "if-001", (0, 0)),
+            thought("tool_loop", "tl-001", (30, 70)),
         ] {
             writer.append(task).expect("append");
         }
@@ -2143,7 +2227,7 @@ mod tests {
         forced.launch_args = vec!["--reasoning-format".into(), "none".into()];
         let mut writer = RunWriter::create(&eval, "r-forced", &forced).expect("create");
         writer
-            .append(thought("grammar_gap", "gg-te-001", 20, 80))
+            .append(thought("grammar_gap", "gg-te-001", (20, 80)))
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
@@ -2155,7 +2239,7 @@ mod tests {
         foreign.stamp.runtime = "mlx-lm 0.31.3".into();
         let mut writer = RunWriter::create(&eval, "r-foreign", &foreign).expect("create");
         writer
-            .append(thought("tool_emit", "te-001", 1, 3))
+            .append(thought("tool_emit", "te-001", (1, 3)))
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
