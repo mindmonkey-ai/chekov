@@ -7,6 +7,32 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `capability bench --suite agentic` gains `tool_loop` (spec §7.2 row 4):
+  six canned read→edit→verify cases, each driven to a terminal state through
+  an in-process tool environment — `read_file`, `list_dir`, `grep`, an
+  `edit_file` with Claude Code's own exactly-one-occurrence contract, and a
+  `run_tests` that answers one fixed failing line until the goal is met —
+  on both doors, within `[bench] tool_loop_max_turns` turns (default 8).
+  The grade is the end state (reached; stopped unmet; exhausted; truncated;
+  a fabricated tool; a malformed call) and never the path: the report
+  prints `tool_loop    4/6 reached   turns 2/3/6 (min/median/max over
+  reached)` per door, `compare` shows the two counts side by side and names
+  the cases only one run reached, and every row carries a typed `tool_loop`
+  record (`turns`, `tool_calls`, `end`). Why: single-turn `tool_emit` had
+  stopped separating the models this desk benches (8–10/10 across four),
+  and Claude Code is a loop, not a call. Adding the cases changes the
+  agentic `prompt_set_hash` — runs recorded before this change compare
+  with each other, new runs with new runs — and the turn budget is part of
+  that hash, so two runs judged under different budgets refuse by name.
+  Live check 2026-09-09 on this desk (run
+  `20260909T181700Z-ornith-1.5-35b-a3b`, the daily driver reused, `--suite
+  agentic`): `tool_loop 6/6 reached, turns 4/6/7` on both doors with
+  identical turn and call counts door for door, and the near-miss case
+  `tl-003` closing in 7 turns and 9 calls — the loop ran the tests, read
+  the failure, and edited again, which is the behaviour the case exists to
+  see. One model saturates the line by design; the cross-candidate spread
+  (the three 9B runs) is owed, since a second candidate cannot bench while
+  the daily driver is up.
 - Bench records draft acceptance. Every probe's `timings` object carries
   `draft_n`/`draft_n_accepted` when llama-server drafted (the MTP head, or
   any `--spec-type`); the sweep sums them per depth into the row

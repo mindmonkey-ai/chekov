@@ -26,10 +26,10 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub use crate::core::bench::runner::Transport;
 
 /// The suites whose rows are graded per case.
-pub(crate) const AGENTIC: [&str; 3] = ["tool_emit", "grammar_gap", "instruction"];
+pub(crate) const AGENTIC: [&str; 4] = ["tool_emit", "grammar_gap", "instruction", "tool_loop"];
 
 /// The suites crossed through both doors, so a case can disagree with itself.
-const PAIRED: [&str; 2] = ["tool_emit", "instruction"];
+const PAIRED: [&str; 3] = ["tool_emit", "instruction", "tool_loop"];
 
 /// Everything `stamp.json` records about a run, once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +74,10 @@ pub struct TaskRow {
     /// the same `task_id`. Rows written before slice C load as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judge: Option<JudgeRow>,
+    /// Present on `tool_loop` rows only: turns, calls and the end state.
+    /// Rows written before the field load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_loop: Option<LoopRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +228,29 @@ pub struct JudgeRow {
     pub judge_secs: f64,
 }
 
+/// How a `tool_loop` crossing ended (tool-loop design §6). The grade is a
+/// function of this and nothing else; the path is never scored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LoopEnd {
+    GoalMet,
+    GoalUnmet { wanted: String },
+    TurnsExhausted,
+    Truncated,
+    FabricatedTool { name: String },
+    MalformedCall { name: String, key: String },
+}
+
+/// What a `tool_loop` row records beside its grade: how long the loop ran
+/// and how it stopped. Printed beside the count, never folded into it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopRow {
+    pub turns: u32,
+    pub tool_calls: u32,
+    pub end: LoopEnd,
+}
+
 /// A codebase task's record (spec §8, slice A). Raw text in, scores out.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -288,6 +315,8 @@ pub struct Task {
     pub codebase: Option<CodebaseRow>,
     /// Present on `judge` rows only — see `TaskRow::judge`.
     pub judge: Option<JudgeRow>,
+    /// Present on `tool_loop` rows only — see `TaskRow::tool_loop`.
+    pub tool_loop: Option<LoopRow>,
 }
 
 /// An open run directory being written.
@@ -356,6 +385,7 @@ impl RunWriter {
             grade: task.grade,
             codebase: task.codebase,
             judge: task.judge,
+            tool_loop: task.tool_loop,
         };
         let results = self.dir.join("results.jsonl");
         let mut line = serde_json::to_string(&row).map_err(|e| invalid(&results, e))?;
@@ -567,8 +597,10 @@ fn suite_summaries(log: &RunLog) -> String {
     out.extend(tool_emit_line(log, Transport::Buffered));
     out.extend(grammar_gap_line(log));
     out.extend(instruction_line(log, Transport::Buffered));
+    out.extend(tool_loop_line(log, Transport::Buffered));
     out.extend(tool_emit_line(log, Transport::Streamed));
     out.extend(instruction_line(log, Transport::Streamed));
+    out.extend(tool_loop_line(log, Transport::Streamed));
     out.push_str(&asymmetry_lines(log));
     out
 }
@@ -1579,6 +1611,57 @@ fn tool_emit_line(log: &RunLog, transport: Transport) -> Option<String> {
     ))
 }
 
+/// `tool_loop    4/6 reached   turns 2/3/6 (min/median/max over reached)` —
+/// the count is the grade; the turns are printed beside it, never scored.
+fn tool_loop_line(log: &RunLog, transport: Transport) -> Option<String> {
+    let rows: Vec<&TaskRow> = rows_via(log, "tool_loop", transport).collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let label = door_label(transport);
+    let tally = Tally::of(&rows);
+    if tally.total == 0 {
+        return Some(format!(
+            "tool_loop    {label}N/A — nothing was measured ({})\n",
+            unavailable_reason(&rows)
+        ));
+    }
+    Some(format!(
+        "tool_loop    {label}{} reached{}{}{}\n",
+        tally.cell(),
+        turns_note(&rows),
+        saturation_note(tally),
+        excluded_note(tally.excluded)
+    ))
+}
+
+/// `   turns min/median/max (…)` over the rows that reached the goal; nothing
+/// when none did.
+fn turns_note(rows: &[&TaskRow]) -> String {
+    let mut turns: Vec<u32> = rows
+        .iter()
+        .filter(|r| r.grade.as_ref().is_some_and(|g| g.pass))
+        .filter_map(|r| r.tool_loop.as_ref())
+        .map(|l| l.turns)
+        .collect();
+    if turns.is_empty() {
+        return String::new();
+    }
+    turns.sort_unstable();
+    let (min, max) = (turns[0], turns[turns.len() - 1]);
+    let median = turns[turns.len() / 2];
+    format!("   turns {min}/{median}/{max} (min/median/max over reached)")
+}
+
+/// A run every case of which reached, or none did, ranks nothing by itself.
+const fn saturation_note(tally: Tally) -> &'static str {
+    if tally.total > 0 && (tally.passed == 0 || tally.passed == tally.total) {
+        " (saturated: rank across candidates, not on this line)"
+    } else {
+        ""
+    }
+}
+
 /// The §7.2 anti-self-deception line: forced vs unconstrained ON THE SAME
 /// CASES — a large gap means "works only with a babysitter".
 ///
@@ -1695,8 +1778,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        CodebaseRow, DecidedBy, GradeRow, JudgeRow, Measure, RunHead, RunLog, RunWriter, Task,
-        TaskKey, TaskRow, Transport, render_codebase, render_run,
+        AGENTIC, CodebaseRow, DecidedBy, GradeRow, JudgeRow, LoopEnd, LoopRow, Measure, PAIRED,
+        RunHead, RunLog, RunWriter, Task, TaskKey, TaskRow, Transport, render_codebase, render_run,
     };
     use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
@@ -1806,6 +1889,7 @@ mod tests {
                     transport: Transport::Buffered,
                     codebase: None,
                     judge: None,
+                    tool_loop: None,
                 })
                 .expect("append");
         }
@@ -1937,6 +2021,7 @@ mod tests {
             transport: Transport::Buffered,
             codebase: None,
             judge: None,
+            tool_loop: None,
         }
     }
 
@@ -1972,6 +2057,108 @@ mod tests {
         render_run(&RunLog::load(writer.dir()).expect("load"))
     }
 
+    /// A loop row graded the way the bench grades it, so the FAIL text the
+    /// report prints is the grader's own.
+    fn looped(id: &str, turns: u32, end: LoopEnd) -> Task {
+        use crate::core::bench::grade::{Grade, grade_tool_loop};
+        use crate::core::bench::toolloop::LoopOutcome;
+        let outcome = LoopOutcome {
+            end: end.clone(),
+            turns,
+            tool_calls: turns,
+            measure: crate::core::bench::codebase::run::empty_measure(),
+        };
+        let grade = match grade_tool_loop(&outcome) {
+            Grade::Pass => GradeRow::pass(),
+            Grade::Fail { reason } => GradeRow::fail(reason),
+        };
+        Task {
+            tool_loop: Some(LoopRow {
+                turns,
+                tool_calls: turns,
+                end,
+            }),
+            ..graded("tool_loop", id, grade)
+        }
+    }
+
+    /// Three reached (2, 3, 6 turns), one stopped unmet, and tl-001 truncated
+    /// through the streamed door.
+    fn loop_run(name: &str) -> String {
+        let eval = scratch(name);
+        let mut writer = RunWriter::create(&eval, "r-tl", &head()).expect("create");
+        for task in [
+            looped("tl-001", 2, LoopEnd::GoalMet),
+            looped("tl-002", 3, LoopEnd::GoalMet),
+            looped("tl-003", 6, LoopEnd::GoalMet),
+            looped(
+                "tl-004",
+                2,
+                LoopEnd::GoalUnmet {
+                    wanted: "src/a.rs containing \"x\"".into(),
+                },
+            ),
+            Task {
+                transport: Transport::Streamed,
+                ..looped("tl-001", 1, LoopEnd::Truncated)
+            },
+        ] {
+            writer.append(task).expect("append");
+        }
+        render_run(&RunLog::load(writer.dir()).expect("load"))
+    }
+
+    #[test]
+    fn the_tool_loop_line_counts_reached_and_prints_the_turns_beside_it() {
+        let rendered = loop_run("tool-loop-line");
+        assert!(
+            rendered
+                .contains("tool_loop    3/4 reached   turns 2/3/6 (min/median/max over reached)\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "tool_loop    streamed 0/1 reached (saturated: rank across candidates, not on this line)\n"
+            ),
+            "no turns note when nothing reached; a 0/N or N/N is flagged: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_tool_loop_failure_is_listed_and_the_doors_are_paired() {
+        let rendered = loop_run("tool-loop-pairs");
+        assert!(
+            rendered.contains(
+                "tool_loop FAIL tl-004  stopped with the goal unmet after 2 turns: src/a.rs containing \"x\""
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "asymmetry    tool_loop tl-001: buffered PASS, streamed FAIL — final reply hit max_tokens"
+            ),
+            "the loop is a paired suite: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_all_unavailable_tool_loop_axis_is_na_with_its_reason() {
+        let eval = scratch("tool-loop-na");
+        let mut writer = RunWriter::create(&eval, "r-tl-na", &head()).expect("create");
+        writer
+            .append(graded(
+                "tool_loop",
+                "tl-001",
+                GradeRow::unavailable("server died".to_owned()),
+            ))
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("tool_loop    N/A — nothing was measured (server died)"),
+            "{rendered}"
+        );
+    }
+
     #[test]
     fn a_row_written_before_transport_loads_as_buffered() {
         let line = r#"{"schema":1,"run_id":"r","seq":0,"suite":"tool_emit","task_id":"te-001",
@@ -1992,7 +2179,35 @@ mod tests {
             transport: Transport::Buffered,
             codebase: None,
             judge: Some(verdict),
+            tool_loop: None,
         }
+    }
+
+    #[test]
+    fn a_tool_loop_row_round_trips_and_an_old_row_loads_without_one() {
+        let row: TaskRow = serde_json::from_str(PRE_C_ROW).expect("loads");
+        assert!(
+            row.tool_loop.is_none(),
+            "rows from before the field carry none"
+        );
+        let end = LoopEnd::FabricatedTool { name: "rm".into() };
+        let json = serde_json::to_string(&LoopRow {
+            turns: 2,
+            tool_calls: 3,
+            end: end.clone(),
+        })
+        .expect("ser");
+        assert_eq!(
+            json,
+            r#"{"turns":2,"tool_calls":3,"end":{"kind":"fabricated_tool","name":"rm"}}"#
+        );
+        let back: LoopRow = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.end, end);
+        assert_eq!(
+            serde_json::to_string(&LoopEnd::GoalMet).expect("ser"),
+            r#"{"kind":"goal_met"}"#
+        );
+        assert!(AGENTIC.contains(&"tool_loop") && PAIRED.contains(&"tool_loop"));
     }
 
     #[test]
@@ -2221,6 +2436,7 @@ mod tests {
                 exec: None,
             }),
             judge: None,
+            tool_loop: None,
         }
     }
 
@@ -2671,6 +2887,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
@@ -2691,6 +2908,7 @@ mod tests {
                     transport: Transport::Buffered,
                     codebase: None,
                     judge: None,
+                    tool_loop: None,
                 })
                 .expect("append");
         }
@@ -2715,6 +2933,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         drop(writer);
@@ -2730,6 +2949,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append after resume");
         let reloaded = RunLog::load(resumed.dir()).expect("reload");
@@ -2767,6 +2987,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         let results = writer.dir().join("results.jsonl");
@@ -2790,6 +3011,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         writer
@@ -2803,6 +3025,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
@@ -2913,6 +3136,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         render_run(&RunLog::load(writer.dir()).expect("load"))

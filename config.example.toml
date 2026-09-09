@@ -46,6 +46,7 @@ codebase_tasks = 24            # `--codebase` tasks per run (2/3 in_file, 1/3 fu
 judge_max_tokens = 512         # --judge reply budget; 2x the largest reply in the 2026-08-30 probe
 judge_min_consistency_pct = 70 # swap-agreement floor below which the equiv column is voided
 judge_reasoning_effort = "low" # none|low|medium|high, forwarded to the judge's wire only
+tool_loop_max_turns = 8 # --suite agentic: turn budget per tool_loop case; still calling tools past it fails as exhausted
 
 [tune]                         # `chekov tune` sweep
 depth = 4096                   # probe prompt depth in tokens

@@ -455,8 +455,10 @@ fn agentic_totals(pairs: &[AgenticPair]) -> Vec<SuiteTotals> {
     out.extend(tool_emit_totals(&sides, Transport::Buffered));
     out.extend(grammar_gap_totals(&sides));
     out.extend(instruction_totals(&sides, Transport::Buffered));
+    out.extend(tool_loop_totals(&sides, Transport::Buffered));
     out.extend(tool_emit_totals(&sides, Transport::Streamed));
     out.extend(instruction_totals(&sides, Transport::Streamed));
+    out.extend(tool_loop_totals(&sides, Transport::Streamed));
     out
 }
 
@@ -479,6 +481,19 @@ fn tool_emit_totals(sides: &Sides, transport: Transport) -> Option<SuiteTotals> 
     let b = rows_via(sides.b, "tool_emit", transport);
     Some(SuiteTotals {
         label: format!("tool_emit{}", door_tag(transport)),
+        a: Tally::of(&a).cell(),
+        b: Tally::of(&b).cell(),
+    })
+}
+
+fn tool_loop_totals(sides: &Sides, transport: Transport) -> Option<SuiteTotals> {
+    let a = rows_via(sides.a, "tool_loop", transport);
+    if a.is_empty() {
+        return None;
+    }
+    let b = rows_via(sides.b, "tool_loop", transport);
+    Some(SuiteTotals {
+        label: format!("tool_loop{}", door_tag(transport)),
         a: Tally::of(&a).cell(),
         b: Tally::of(&b).cell(),
     })
@@ -1282,6 +1297,7 @@ mod tests {
                 grade: None,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             }],
         }
     }
@@ -1627,6 +1643,7 @@ mod tests {
             grade: None,
             codebase: None,
             judge: None,
+            tool_loop: None,
         });
         let b = run("m2", stamp("dda1b0d67", "r2/s2"), &[30.0, 40.0, 41.0]);
         let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
@@ -1705,6 +1722,7 @@ mod tests {
             grade: Some(case.grade),
             codebase: None,
             judge: None,
+            tool_loop: None,
         }
     }
 
@@ -1776,6 +1794,7 @@ mod tests {
                 exec: None,
             }),
             judge: None,
+            tool_loop: None,
         }
     }
 
@@ -1968,6 +1987,44 @@ mod tests {
             ],
         );
         (a, b)
+    }
+
+    #[test]
+    fn the_tool_loop_totals_and_disagreements_ride_the_agentic_comparison() {
+        let a = agentic_run(
+            "m1",
+            vec![
+                Case::pass("tool_loop", "tl-001"),
+                Case::fail(
+                    "tool_loop",
+                    "tl-002",
+                    "no terminal state in 8 turns (8 tool calls)",
+                ),
+            ],
+        );
+        let b = agentic_run(
+            "m2",
+            vec![
+                Case::pass("tool_loop", "tl-001"),
+                Case::pass("tool_loop", "tl-002"),
+            ],
+        );
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        assert_eq!(
+            cells(&compared.agentic.totals, "tool_loop"),
+            ("1/2".into(), "2/2".into())
+        );
+        let delta = compared
+            .agentic
+            .disagreements
+            .iter()
+            .find(|d| d.suite == "tool_loop" && d.task_id == "tl-002")
+            .expect("the case one run reached and the other did not");
+        assert!(!delta.a_pass && delta.b_pass);
+        assert_eq!(
+            delta.a_reason.as_deref(),
+            Some("no terminal state in 8 turns (8 tool calls)")
+        );
     }
 
     #[test]
@@ -2221,6 +2278,7 @@ mod tests {
             grade: None,
             codebase: None,
             judge: Some(row),
+            tool_loop: None,
         }
     }
 

@@ -2,9 +2,12 @@
 # The content of this file is hashed into every run's prompt_set_hash: editing
 # a case makes old runs incomparable BY CONSTRUCTION, which is the point.
 # Counts are a seed (7 call / 2 abstention / 1 missing-function; 12
-# instruction) — grow toward the spec's 30/40, never edit in place.
+# instruction; 6 tool_loop) — grow toward the spec's 30/40, never edit in place.
 
 version = 0
+
+# The system text every tool_loop turn carries (tool-loop design §5).
+loop_system = "You are a coding agent working in a small repository through the tools provided. Read before you edit, edit with exact text, and verify with the test tool whenever it is offered. When the task is complete, or cannot be done with the tools you have, reply in plain text and stop."
 
 # ---------------------------------------------------------------- tool_emit
 
@@ -214,3 +217,174 @@ checks = ["contains:1, 2, 3, 4, 5", "max_lines:1"]
 id = "if-012"
 prompt = "Write a Rust function with the exact signature fn clamp01(x: f64) -> f64 that clamps x into the range 0.0 to 1.0. At most 8 lines. Reply with only a fenced rust code block."
 checks = ["fenced_rust_only", "brace_balanced", "max_lines:8", "contains:fn clamp01"]
+
+# ---------------------------------------------------------------- tool_loop
+# Six canned read→edit→verify loops (tool-loop design §3). Every tool answer
+# is a pure function of the case and the calls so far; the grade is the end
+# state, never the path.
+
+[[tool_loop]]
+id = "tl-001"
+prompt = "MAX_RETRIES in src/config.rs must be 5, not 3. Fix it and run the tests."
+[[tool_loop.files]]
+path = "src/config.rs"
+text = "/// How many times a request is retried before it fails.\npub const MAX_RETRIES: u32 = 3;\n"
+[tool_loop.goal]
+kind = "edited"
+file = "src/config.rs"
+contains_any = ["pub const MAX_RETRIES: u32 = 5;"]
+tests_fail = "test retries_default ... FAILED: expected 5, got 3"
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+[[tool_loop.tools]]
+name = "run_tests"
+description = "Run the test suite, optionally filtered to test names containing a string."
+input_schema = '{"type":"object","properties":{"filter":{"type":"string"}},"required":["filter"]}'
+
+[[tool_loop]]
+id = "tl-002"
+prompt = "The function port_of returns the wrong default port: it must return 8080, not 8000. Find it and fix it."
+[[tool_loop.files]]
+path = "src/server.rs"
+text = "pub fn port_of(explicit: Option<u16>) -> u16 {\n    explicit.unwrap_or(8000)\n}\n"
+[[tool_loop.files]]
+path = "src/client.rs"
+text = "pub fn connect(port: u16) -> String {\n    format!(\"http://127.0.0.1:{port}\")\n}\n"
+[tool_loop.goal]
+kind = "edited"
+file = "src/server.rs"
+contains_any = ["explicit.unwrap_or(8080)"]
+untouched = ["src/client.rs"]
+[[tool_loop.tools]]
+name = "grep"
+description = "Search files under a path for a pattern; returns matching lines."
+input_schema = '{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern","path"]}'
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+
+# The near miss: nothing in the file says what the right value is; only the
+# failing test does. A loop that edits without running the tests guesses.
+
+[[tool_loop]]
+id = "tl-003"
+prompt = "The paging test fails. Fix src/paging.rs so it passes; use the tests to check."
+[[tool_loop.files]]
+path = "src/paging.rs"
+text = "/// Rows per page returned to the client.\npub const PAGE_SIZE: usize = 50;\n"
+[tool_loop.goal]
+kind = "edited"
+file = "src/paging.rs"
+contains_any = ["pub const PAGE_SIZE: usize = 100;"]
+tests_fail = "test page_size_matches_api ... FAILED: expected PAGE_SIZE == 100 (the API's maximum), got a different value"
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+[[tool_loop.tools]]
+name = "run_tests"
+description = "Run the test suite, optionally filtered to test names containing a string."
+input_schema = '{"type":"object","properties":{"filter":{"type":"string"}},"required":["filter"]}'
+
+# Disambiguation: two files define `version`; the prompt names the module.
+
+[[tool_loop]]
+id = "tl-004"
+prompt = "In the api module, version() must return \"v2\", not \"v1\". Change only that module."
+[[tool_loop.files]]
+path = "src/lib.rs"
+text = "pub mod api;\nmod internal;\n"
+[[tool_loop.files]]
+path = "src/api.rs"
+text = "pub fn version() -> &'static str {\n    \"v1\"\n}\n"
+[[tool_loop.files]]
+path = "src/internal.rs"
+text = "pub(crate) fn version() -> &'static str {\n    \"v1\"\n}\n"
+[tool_loop.goal]
+kind = "edited"
+file = "src/api.rs"
+contains_any = ["\"v2\""]
+untouched = ["src/internal.rs", "src/lib.rs"]
+[[tool_loop.tools]]
+name = "list_dir"
+description = "List the entries of a repository directory."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+
+# Abstention inside a loop: the named file does not exist. Done means no
+# file changed and the reply says which path is missing.
+
+[[tool_loop]]
+id = "tl-005"
+prompt = "Fix the off-by-one in src/legacy.rs: the loop bound should be <= rather than <."
+[[tool_loop.files]]
+path = "src/main.rs"
+text = "fn main() {\n    println!(\"hello\");\n}\n"
+[[tool_loop.files]]
+path = "src/lib.rs"
+text = "pub mod util;\n"
+[[tool_loop.files]]
+path = "src/util.rs"
+text = "pub fn twice(n: u32) -> u32 {\n    n * 2\n}\n"
+[tool_loop.goal]
+kind = "unchanged"
+reply_mentions = "src/legacy.rs"
+[[tool_loop.tools]]
+name = "list_dir"
+description = "List the entries of a repository directory."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+
+# Cross-file: the invariant is documented in one file and violated in another.
+
+[[tool_loop]]
+id = "tl-006"
+prompt = "src/ledger.rs must honour the invariant documented in src/money.rs. Make the one change needed in src/ledger.rs."
+[[tool_loop.files]]
+path = "src/money.rs"
+text = "/// Amounts are integer cents. INVARIANT: never construct a `Cents` from a\n/// float — use `Cents::from_str_major` for decimal strings.\npub struct Cents(pub i128);\n\nimpl Cents {\n    pub fn from_major(major: f64) -> Self {\n        Self((major * 100.0) as i128)\n    }\n\n    pub fn from_str_major(text: &str) -> Self {\n        let (whole, frac) = text.split_once('.').unwrap_or((text, \"0\"));\n        Self(whole.parse::<i128>().unwrap_or(0) * 100 + frac.parse::<i128>().unwrap_or(0))\n    }\n}\n"
+[[tool_loop.files]]
+path = "src/ledger.rs"
+text = "use crate::money::Cents;\n\npub fn credit(amount: &str) -> Cents {\n    Cents::from_major(amount.parse::<f64>().unwrap_or(0.0))\n}\n"
+[tool_loop.goal]
+kind = "edited"
+file = "src/ledger.rs"
+contains_any = ["Cents::from_str_major(amount)", "Cents::from_str_major(amount.trim())"]
+untouched = ["src/money.rs"]
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'

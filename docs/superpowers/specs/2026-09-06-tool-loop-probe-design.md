@@ -310,3 +310,22 @@ consts, summary line), `src/core/bench/compare.rs` (`tool_loop_totals`),
 `[bench]` table), `CHANGELOG.md`, `docs/capability-spec.md` (§7.2 row 4
 status line). Thirteen files: approval requested for the count as well as
 the design.
+
+## 13. Amendments made during implementation (2026-09-09)
+
+- The goal's `contains` became `contains_any`, a list: two correct spellings
+  of one edit (`from_str_major(amount)` / `from_str_major(amount.trim())`)
+  must both pass, and a single string could not say so.
+- An `Edited` goal may name `untouched` files that must stay byte-identical
+  to their canned copy, so a model that edits both `version()` definitions
+  in `tl-004` does not pass by editing everything.
+- The "not discriminating" clause is per run — `render_run` sees one run —
+  and reads `(saturated: rank across candidates, not on this line)` on a
+  `0/N` or `N/N`; `compare` is where candidates stand side by side.
+- A loop reply chekov's own translator could not produce fails the crossing
+  as `ProxyBadRequest` (unavailable, never a model failure), which is the
+  spec's §9 "no new variants" honoured with the variant the runner already
+  uses for its own body faults.
+- The palette is validated against the environment's five canned tools at
+  load (`CANNED_TOOLS`): a case offering a tool the environment cannot answer
+  is refused, never answered wrong.

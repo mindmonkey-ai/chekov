@@ -44,8 +44,8 @@ pub fn grade(anthropic_body: &str, probe: &FixtureProbe) -> Grade {
 
 use crate::core::bench::probeset::{Expect, InstructionCase, ToolCase};
 
-/// The reply's text blocks, joined — or the translation-failure refusal.
-fn artifact_text(anthropic_body: &str) -> Result<String, Grade> {
+/// The reply's content blocks — or the translation-failure refusal.
+pub(crate) fn content_blocks(anthropic_body: &str) -> Result<Vec<Value>, Grade> {
     let Ok(parsed) = serde_json::from_str::<Value>(anthropic_body) else {
         return Err(Grade::Fail {
             reason: "artifact is not JSON".to_owned(),
@@ -57,7 +57,12 @@ fn artifact_text(anthropic_body: &str) -> Result<String, Grade> {
                 .to_owned(),
         });
     };
-    Ok(blocks
+    Ok(blocks.clone())
+}
+
+/// The reply's text blocks, joined — or the translation-failure refusal.
+pub(crate) fn artifact_text(anthropic_body: &str) -> Result<String, Grade> {
+    Ok(content_blocks(anthropic_body)?
         .iter()
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|b| b.get("text").and_then(Value::as_str))
@@ -65,31 +70,39 @@ fn artifact_text(anthropic_body: &str) -> Result<String, Grade> {
         .join("\n"))
 }
 
-/// The reply's `tool_use` blocks as (name, input) pairs.
-fn tool_uses(anthropic_body: &str) -> Result<Vec<(String, Value)>, Grade> {
-    let Ok(parsed) = serde_json::from_str::<Value>(anthropic_body) else {
-        return Err(Grade::Fail {
-            reason: "artifact is not JSON".to_owned(),
-        });
+/// One `tool_use` block as the agent would act on it — the id is what a
+/// `tool_result` must echo back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolUse {
+    pub id: String,
+    pub name: String,
+    pub input: Value,
+}
+
+/// The reply's `tool_use` blocks with their ids, in order.
+pub(crate) fn tool_use_blocks(anthropic_body: &str) -> Result<Vec<ToolUse>, Grade> {
+    let text = |b: &Value, key: &str| {
+        b.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
     };
-    let Some(blocks) = parsed.get("content").and_then(Value::as_array) else {
-        return Err(Grade::Fail {
-            reason: "no content in the artifact — a translation failure, not an empty reply"
-                .to_owned(),
-        });
-    };
-    Ok(blocks
+    Ok(content_blocks(anthropic_body)?
         .iter()
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
-        .map(|b| {
-            (
-                b.get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                b.get("input").cloned().unwrap_or(Value::Null),
-            )
+        .map(|b| ToolUse {
+            id: text(b, "id"),
+            name: text(b, "name"),
+            input: b.get("input").cloned().unwrap_or(Value::Null),
         })
+        .collect())
+}
+
+/// The reply's `tool_use` blocks as (name, input) pairs.
+fn tool_uses(anthropic_body: &str) -> Result<Vec<(String, Value)>, Grade> {
+    Ok(tool_use_blocks(anthropic_body)?
+        .into_iter()
+        .map(|u| (u.name, u.input))
         .collect())
 }
 
@@ -192,6 +205,31 @@ pub fn grade_instruction(anthropic_body: &str, case: &InstructionCase) -> (Grade
         Grade::Pass
     };
     (verdict(true), verdict(false))
+}
+
+/// The loop's end IS the grade (tool-loop design §6): reached, or why not.
+/// Turn and call counts go in the reason; a model that needed six turns and
+/// one that needed two both pass.
+#[must_use]
+pub fn grade_tool_loop(outcome: &crate::core::bench::toolloop::LoopOutcome) -> Grade {
+    use crate::core::bench::store::LoopEnd;
+    let turns = outcome.turns;
+    let fail = |reason: String| Grade::Fail { reason };
+    match &outcome.end {
+        LoopEnd::GoalMet => Grade::Pass,
+        LoopEnd::GoalUnmet { wanted } => fail(format!(
+            "stopped with the goal unmet after {turns} turns: {wanted}"
+        )),
+        LoopEnd::TurnsExhausted => fail(format!(
+            "no terminal state in {turns} turns ({} tool calls)",
+            outcome.tool_calls
+        )),
+        LoopEnd::Truncated => fail("final reply hit max_tokens".to_owned()),
+        LoopEnd::FabricatedTool { name } => {
+            fail(format!("called '{name}' — not in this case's palette"))
+        }
+        LoopEnd::MalformedCall { name, key } => fail(format!("'{name}' called without {key}")),
+    }
 }
 
 /// Whether a check name is in the grader's fixed vocabulary — probeset
@@ -473,6 +511,67 @@ mod tests {
             grade(&anthropic("  "), &probe(&[])),
             Grade::Fail { .. }
         ));
+    }
+
+    #[test]
+    fn the_loop_grade_is_the_end_state_with_the_turns_in_the_reason_only() {
+        use crate::core::bench::codebase::run::empty_measure;
+        use crate::core::bench::store::LoopEnd;
+        use crate::core::bench::toolloop::LoopOutcome;
+        let outcome = |end: LoopEnd| LoopOutcome {
+            end,
+            turns: 4,
+            tool_calls: 6,
+            measure: empty_measure(),
+        };
+        assert_eq!(
+            super::grade_tool_loop(&outcome(LoopEnd::GoalMet)),
+            super::Grade::Pass
+        );
+        let reason = |end: LoopEnd| match super::grade_tool_loop(&outcome(end)) {
+            super::Grade::Pass => panic!("a failure"),
+            super::Grade::Fail { reason } => reason,
+        };
+        assert_eq!(
+            reason(LoopEnd::GoalUnmet {
+                wanted: "src/a.rs containing \"x\"".into()
+            }),
+            "stopped with the goal unmet after 4 turns: src/a.rs containing \"x\""
+        );
+        assert_eq!(
+            reason(LoopEnd::TurnsExhausted),
+            "no terminal state in 4 turns (6 tool calls)"
+        );
+        assert_eq!(reason(LoopEnd::Truncated), "final reply hit max_tokens");
+        assert_eq!(
+            reason(LoopEnd::FabricatedTool { name: "rm".into() }),
+            "called 'rm' — not in this case's palette"
+        );
+        assert_eq!(
+            reason(LoopEnd::MalformedCall {
+                name: "edit_file".into(),
+                key: "new".into()
+            }),
+            "'edit_file' called without new"
+        );
+    }
+
+    #[test]
+    fn tool_use_blocks_keep_the_ids_a_tool_result_must_echo() {
+        let body = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "reading"},
+                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "a"}},
+                {"type": "tool_use", "id": "toolu_2", "name": "grep", "input": {"pattern": "x", "path": "."}}
+            ]
+        })
+        .to_string();
+        let uses = super::tool_use_blocks(&body).expect("readable");
+        assert_eq!(uses.len(), 2);
+        assert_eq!(uses[0].id, "toolu_1");
+        assert_eq!(uses[1].name, "grep");
+        assert_eq!(uses[1].input["pattern"], "x");
+        assert!(super::tool_use_blocks("not json").is_err());
     }
 
     #[test]
