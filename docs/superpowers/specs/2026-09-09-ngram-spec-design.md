@@ -201,3 +201,99 @@ context, the plan note, the closing caution), `src/core/config.rs` (doc
 comment), `src/error.rs` (the remedy text), `config.example.toml`,
 `README.md` (the tune row and runbook sentence), `CHANGELOG.md`,
 `IDEAS.md`, and the tune spec-stage design's §3/§4 status lines.
+
+## 13. Amendments after the seam map and the three-lens critique (2026-09-09)
+
+A read-only workflow (three seam readers, three adversarial critics) read
+this design against the engine source and chekov's code before any plan
+was written. What changes, in order of weight:
+
+- **Two of the five types cannot be measured on tune's probe, and would lie
+  if they were.** `ngram-mod` keeps one draft table shared across every
+  request and resets it only on occupancy (`common/speculative.cpp`: "shared
+  across all sequences"; `begin()` re-adds the prompt and resets past 0.25
+  occupancy, which a 4M-entry table never reaches here); `ngram-cache`'s
+  `begin()` is a no-op. tune's probe sends one identical greedy prompt five
+  times and drops the first as warmup, so repetitions 2–5 would replay
+  repetition 1's reply out of the drafter's memory at near-100%
+  acceptance: a large, spurious decode win that `--apply` would then write.
+  So they are a **fourth skip**, named: `the engine keeps <type>'s draft
+  memory across requests; the tune probe repeats one prompt, so every
+  repetition after the first would replay the reply — not measurable on
+  this probe`. `NgramType` keeps all five variants (the grammar accepts
+  them, the stamp names them, a user may hand-apply them) and the stage
+  skips two of them before any launch, exactly as it skips a headless
+  model's `mtp:` candidates.
+- **The other three cannot draft on the probe at all, and §1 said the
+  opposite.** `ngram-simple`, `ngram-map-k` and `ngram-map-k4v` are clean
+  per request and key on an exact match of the last twelve tokens against
+  an earlier position in the same history (`common/ngram-map.cpp`, defaults
+  `size_n 12`, `size_m 48`, `min_hits 1`). The probe's reply is at most 128
+  tokens of a strictly increasing count, which never repeats a twelve-token
+  window, so on this probe they can never draft. §1's "a hit is possible"
+  is withdrawn: on the probe these three measure the drafter's lookup
+  overhead and nothing else, and `no drafts` is the expected reading, not
+  a finding. The plan-line note, the stage line and the closing caution
+  all say so, and the §10 live acceptance is re-pointed at the confirming
+  measurement (a codebase bench under hand-applied flags, read with
+  `compare --cross-flags`) rather than at the probe.
+- **`--apply` does change.** `applied_extra_flags` strips the speculative
+  pair only when the winner lacks `--spec-type`; an n-gram winner carries
+  it, so a stale `--spec-draft-n-max` would ride into `extra_flags`. It
+  gains one rule: strip `--spec-draft-n-max` whenever the winner lacks it
+  (a winner is a full argv derived from the current flags, so absence means
+  the stage removed it). §3's "needs no change" is withdrawn.
+- **The draft counts have no path to the record without `Measured`.**
+  `classify` builds `Measured { decode, prefill, prompt_n }` from a
+  `DepthResult` that already carries `draft_n` / `draft_n_accepted` and
+  drops them; `trial_row`, `measured_of` and `carried` copy field by field.
+  `Measured` gains the two counts (plain fields; it is never stored),
+  `classify` copies them, `trial_row` writes them onto `Trial`,
+  `measured_of` reads them back with the record's zero default, `carried`
+  copies them. §5's "numbers the record already carries" is withdrawn.
+- **The plan's gate is per candidate, not per stage.** `Plan.spec_skip:
+  Option<String>` is one reason for the whole stage, read by `spec_skip`,
+  `max_launches` and `stage_plan_line`. It becomes `SpecGate { head:
+  Option<String>, engine: Option<String>, types: Option<Vec<String>> }` —
+  the head reason, the engine-has-no-flag reason, and the type list parsed
+  off the engine's `--spec-type` help line (the line whose first token is
+  `--spec-type`, its second token split on commas, compared by whole-token
+  equality — `ngram-map-k` is a prefix of `ngram-map-k4v`, and every type
+  name recurs inside the per-type knob flags, so `contains` is wrong).
+  `spec_gate` reads the help even when the head is absent. `spec_skip`
+  decides per candidate: `mtp:` → the head reason, else the engine's list
+  lacks `draft-mtp`; `ngram:<type>` → the memory skip for the two stateful
+  types, else the list lacks the name; `off` → nothing. `max_launches`
+  counts a candidate only when `spec_skip` is `None` for it, so the printed
+  ceiling stays a ceiling. The plan line under a partial skip keeps the
+  incumbent form and names what is skipped: `(1 is the incumbent; mtp
+  skipped: no MTP head in the GGUF (nextn_predict_layers 0))`; the
+  whole-stage `(skipped: …)` form remains for an engine with no
+  `--spec-type`. The head reason's two-clause suffix is appended in
+  `spec_gate`, which has the parsed candidate list, never in `head_gate`.
+- **The foreign skip's definitions.** A chain is a comma in the value OR
+  more than one `--spec-type` occurrence in the argv (the engine appends on
+  repetition, and chekov's `value_of` reads only the first). An
+  `ngram-cache` incumbent is foreign when the argv carries any of `-lcs`,
+  `--lookup-cache-static`, `-lcd`, `--lookup-cache-dynamic`; the scan is a
+  raw argv scan inside `foreign_spec_skip`, not a `Flag` variant, so
+  `rewrite`/`strip` never learn the flag.
+- **The acceptance clause is data-first and uses the bench's words.**
+  `stage_line` prints `   acceptance 63% (189 of 300 drafted)` whenever
+  `measured.draft_n > 0` — any stage's candidate under a speculative
+  incumbent drafts, not only the spec stage's — and `   no drafts` only
+  when the candidate is a spec-stage `mtp:`/`ngram:` value with
+  `draft_n == 0`; nothing otherwise. The clause spans every repetition
+  including the warmup the cells drop, and says so once in the README
+  rather than pretending the two sample sets agree. `baseline_line` prints
+  the same clause when the baseline drafted.
+- **Two existing tests are rewritten, not extended:** the foreign-incumbent
+  test asserts that `--spec-type ngram-mod` is now the incumbent, and the
+  grammar test gains the five accepts and the four refusals. Two tests sit
+  at the 40-line cap and get sibling tests instead of new lines.
+- **§12 gains** `Measured`, `classify`, `applied_extra_flags`, `stage_line`
+  in `core/tune.rs`; `Plan`, `spec_gate`, `spec_skip`, `max_launches`,
+  `stage_plan_line`, `trial_row`, `measured_of`, `carried`, `baseline_line`
+  in `commands/tune.rs`; every `Measured` (6) and `Trial` (3) literal the
+  compiler names. `stamp.rs`, `store.rs`, `capability.rs` stay untouched,
+  verified.
