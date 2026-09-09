@@ -1318,13 +1318,13 @@ mod tests {
     }
 
     /// Two llama.cpp runs that differ only on launch flags are the flag
-    /// experiment `--cross-flags` exists for: exactly the eight flag fields
+    /// experiment `--cross-flags` exists for: exactly the fifteen flag fields
     /// are masked, the banner names the ones that differ and says what is
     /// being measured, and everything else still refuses (spec-stage
     /// follow-up (b), 2026-09-03).
     #[test]
-    fn cross_flags_masks_exactly_the_eight_launch_flags_and_names_them() {
-        assert_eq!(super::CROSS_FLAGS_ALLOWED.len(), 8);
+    fn cross_flags_masks_exactly_the_fifteen_launch_flags_and_names_them() {
+        assert_eq!(super::CROSS_FLAGS_ALLOWED.len(), 15);
         let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
         let mut flagged = stamp("dda1b0d67", "r1/s1");
         flagged.n_batch = "4096".into();
@@ -1495,7 +1495,7 @@ mod tests {
 
     #[test]
     fn timing_source_is_allow_listed_only_under_cross_runtime() {
-        assert_eq!(super::CROSS_RUNTIME_ALLOWED.len(), 14);
+        assert_eq!(super::CROSS_RUNTIME_ALLOWED.len(), 21);
 
         let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
         let mut foreign = stamp("dda1b0d67", "r1/s1");
@@ -1559,6 +1559,38 @@ mod tests {
             banner.contains("spec_draft_n_max: \"engine-default\" vs \"1\""),
             "{banner}"
         );
+    }
+
+    /// A run allowed to think and one whose thinking was budgeted are
+    /// different environments: refused by name, masked under both
+    /// `--cross-flags` and `--cross-runtime`, and named in the flags banner
+    /// (reasoning-stamp design §3, §11).
+    #[test]
+    fn a_differing_reasoning_budget_is_refused_and_masked_by_both_masks() {
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[38.0, 40.0, 41.0, 40.5]);
+        let mut budgeted = stamp("dda1b0d67", "r1/s1");
+        budgeted.reasoning_budget = "0".into();
+        let b = run("m1", budgeted, &[39.0, 40.0, 41.0, 40.5]);
+        let err = compare_runs(&a, &b, &opts(5.0)).expect_err("a differing budget refuses");
+        assert!(
+            matches!(&err, ChekovError::BenchStampMismatch { field, .. } if field == "reasoning_budget"),
+            "{err}"
+        );
+        let flags = CompareOpts {
+            cross_flags: true,
+            ..opts(5.0)
+        };
+        compare_runs(&a, &b, &flags).expect("masked under --cross-flags");
+        let banner = cross_flags_banner(&a.head, &b.head);
+        assert!(
+            banner.contains("reasoning_budget: \"engine-default\" vs \"0\""),
+            "{banner}"
+        );
+        let runtime = CompareOpts {
+            cross_runtime: true,
+            ..opts(5.0)
+        };
+        compare_runs(&a, &b, &runtime).expect("masked under --cross-runtime");
     }
 
     #[test]
