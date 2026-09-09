@@ -170,7 +170,7 @@ fn validate_ids(set: &ProbeSet) -> Result<(), ChekovError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Expect, agentic_v0, content_hash};
+    use super::{Expect, ProbeSet, agentic_v0, content_hash};
 
     #[test]
     fn the_shipped_set_parses_with_the_seed_counts() {
@@ -230,5 +230,117 @@ mod tests {
         assert_eq!(h.len(), 12);
         assert_eq!(h, content_hash());
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// A one-case set for validation tests: the goal and palette are the
+    /// variable parts; the file is `src/a.rs` holding `const A: u32 = 3;`.
+    fn loop_set(goal: &str, tools: &[&str]) -> Result<ProbeSet, crate::error::ChekovError> {
+        let palette: String = tools
+            .iter()
+            .map(|name| {
+                let schema = match *name {
+                    "grep" => r#"{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern","path"]}"#,
+                    "edit_file" => r#"{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}"#,
+                    "run_tests" => r#"{"type":"object","properties":{"filter":{"type":"string"}},"required":["filter"]}"#,
+                    _ => r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+                };
+                format!("[[tool_loop.tools]]\nname = \"{name}\"\ndescription = \"d\"\ninput_schema = '{schema}'\n")
+            })
+            .collect();
+        super::parse(&format!(
+            "version = 0\nloop_system = \"s\"\ntool_emit = []\ninstruction = []\n\
+             [[tool_loop]]\nid = \"tl-x\"\nprompt = \"p\"\n\
+             [[tool_loop.files]]\npath = \"src/a.rs\"\ntext = \"const A: u32 = 3;\\n\"\n\
+             [tool_loop.goal]\n{goal}\n{palette}"
+        ))
+    }
+
+    const EDITED: &str =
+        "kind = \"edited\"\nfile = \"src/a.rs\"\ncontains_any = [\"const A: u32 = 5;\"]";
+
+    #[test]
+    fn the_shipped_loop_cases_parse_with_the_seed_count() {
+        let set = agentic_v0().expect("valid");
+        assert_eq!(set.tool_loop.len(), 6);
+        assert!(
+            !set.loop_system.is_empty(),
+            "the system text rides in the set"
+        );
+        assert!(set.tool_loop.iter().all(|c| c.id.starts_with("tl-")));
+    }
+
+    #[test]
+    fn a_loop_goal_already_met_by_the_canned_files_is_refused() {
+        let err = loop_set(
+            "kind = \"edited\"\nfile = \"src/a.rs\"\ncontains_any = [\"const A: u32 = 3;\"]",
+            &["read_file", "edit_file"],
+        )
+        .expect_err("a met goal grades doing nothing as done");
+        assert!(err.to_string().contains("already in 'src/a.rs'"), "{err}");
+    }
+
+    #[test]
+    fn a_loop_goal_naming_a_file_the_case_lacks_is_refused() {
+        let err = loop_set(
+            "kind = \"edited\"\nfile = \"src/b.rs\"\ncontains_any = [\"x\"]",
+            &["read_file", "edit_file"],
+        )
+        .expect_err("no such canned file");
+        assert!(
+            err.to_string()
+                .contains("'src/b.rs' is not in the case's files"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_edited_goal_needs_edit_file_and_run_tests_exactly_with_tests_fail() {
+        let err = loop_set(EDITED, &["read_file"]).expect_err("no edit_file");
+        assert!(err.to_string().contains("needs edit_file"), "{err}");
+        let err = loop_set(EDITED, &["read_file", "edit_file", "run_tests"])
+            .expect_err("run_tests without tests_fail");
+        assert!(err.to_string().contains("exactly when tests_fail"), "{err}");
+        let with_tests = format!("{EDITED}\ntests_fail = \"test a ... FAILED\"");
+        loop_set(&with_tests, &["read_file", "edit_file", "run_tests"]).expect("consistent");
+        let err = loop_set(&with_tests, &["read_file", "edit_file"])
+            .expect_err("tests_fail without run_tests");
+        assert!(err.to_string().contains("exactly when tests_fail"), "{err}");
+    }
+
+    #[test]
+    fn an_unchanged_goal_offers_no_tests_and_a_palette_tool_must_be_canned() {
+        let err = loop_set(
+            "kind = \"unchanged\"\nreply_mentions = \"src/legacy.rs\"",
+            &["read_file", "run_tests"],
+        )
+        .expect_err("nothing to test");
+        assert!(err.to_string().contains("no tests to run"), "{err}");
+        let err = loop_set(EDITED, &["read_file", "edit_file", "delete_file"])
+            .expect_err("the environment cannot answer delete_file");
+        assert!(
+            err.to_string()
+                .contains("'delete_file' has no canned behaviour"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_loop_case_id_may_not_repeat_an_id_from_another_array() {
+        let text = format!(
+            "version = 0\nloop_system = \"s\"\ninstruction = []\n\
+             [[tool_emit]]\nid = \"tl-x\"\nprompt = \"p\"\nexpect = \"abstain\"\n\
+             [[tool_emit.tools]]\nname = \"read_file\"\ndescription = \"d\"\n\
+             input_schema = '{{\"type\":\"object\",\"properties\":{{\"path\":{{\"type\":\"string\"}}}},\"required\":[\"path\"]}}'\n\
+             [[tool_loop]]\nid = \"tl-x\"\nprompt = \"p\"\n\
+             [[tool_loop.files]]\npath = \"src/a.rs\"\ntext = \"const A: u32 = 3;\\n\"\n\
+             [tool_loop.goal]\n{EDITED}\n\
+             [[tool_loop.tools]]\nname = \"edit_file\"\ndescription = \"d\"\n\
+             input_schema = '{{\"type\":\"object\",\"properties\":{{\"path\":{{\"type\":\"string\"}},\"old\":{{\"type\":\"string\"}},\"new\":{{\"type\":\"string\"}}}},\"required\":[\"path\",\"old\",\"new\"]}}'\n"
+        );
+        let err = super::parse(&text).expect_err("duplicate across arrays");
+        assert!(
+            err.to_string().contains("duplicate case id 'tl-x'"),
+            "{err}"
+        );
     }
 }
