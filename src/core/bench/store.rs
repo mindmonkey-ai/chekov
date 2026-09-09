@@ -427,13 +427,31 @@ pub struct RunLog {
     pub rows: Vec<TaskRow>,
 }
 
+/// The flag-sourced stamp fields, re-derived from the argv the head stores.
+///
+/// A stamp written before a flag field existed carries the honest value one
+/// key above it, in `launch_args`; reading it there instead of defaulting
+/// keeps every stored run comparable with, and resumable under, runs made
+/// after the field. Idempotent for a fresh stamp — the writer computed the
+/// same fields from the same argv. A foreign server's flags are unobserved.
+fn hydrate_flags(head: &mut RunHead) {
+    use crate::core::bench::stamp::{RUNTIME_LLAMA_CPP, launch_flags, unmanaged_flags};
+    let flags = if head.stamp.runtime == RUNTIME_LLAMA_CPP {
+        launch_flags(&head.launch_args)
+    } else {
+        unmanaged_flags()
+    };
+    head.stamp.set_flags(&flags);
+}
+
 impl RunLog {
     pub fn load(run_dir: &Path) -> Result<Self, ChekovError> {
         let stamp_path = run_dir.join("stamp.json");
         let head_text =
             std::fs::read_to_string(&stamp_path).map_err(|e| invalid(&stamp_path, e))?;
-        let head: RunHead =
+        let mut head: RunHead =
             serde_json::from_str(&head_text).map_err(|e| invalid(&stamp_path, e))?;
+        hydrate_flags(&mut head);
         let results = run_dir.join("results.jsonl");
         let rows = if results.exists() {
             read_rows(&results)?
@@ -1775,7 +1793,7 @@ fn probe_line(row: &TaskRow) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{
         AGENTIC, CodebaseRow, DecidedBy, GradeRow, JudgeRow, LoopEnd, LoopRow, Measure, PAIRED,
@@ -1831,14 +1849,39 @@ mod tests {
         }
     }
 
+    /// A head whose argv says what its stamp says — the loader re-derives
+    /// the flag fields from the argv, so the two must agree.
     fn head() -> RunHead {
         RunHead {
             model: "ornith-1.5-35b-a3b".into(),
             machine_brand: Some("Apple M3 Ultra".into()),
-            launch_args: vec!["-m".into(), "model.gguf".into()],
+            launch_args: [
+                "-m",
+                "model.gguf",
+                "-ctk",
+                "q8_0",
+                "-ctv",
+                "q8_0",
+                "-fa",
+                "on",
+            ]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
             forced_reasoning_format: None,
             stamp: stamp(),
         }
+    }
+
+    /// `head()` launched with extra flags, the stamp read off the argv the
+    /// way the writer and the loader read it.
+    fn launched_with(flags: &[&str]) -> RunHead {
+        use crate::core::bench::stamp::launch_flags;
+        let mut head = head();
+        head.launch_args
+            .extend(flags.iter().map(|s| (*s).to_owned()));
+        head.stamp.set_flags(&launch_flags(&head.launch_args));
+        head
     }
 
     fn measure(decode: &[f64]) -> Measure {
@@ -2174,10 +2217,9 @@ mod tests {
         assert_eq!(row.transport, Transport::Buffered);
     }
 
-    #[test]
-    fn a_stored_run_hydrates_its_flags_from_its_argv_and_a_foreign_one_reads_unmanaged() {
-        use crate::core::bench::stamp::{FLAG_UNMANAGED, Stamp};
-        let eval = scratch("hydrate-flags");
+    /// A run dir whose `stamp.json` predates the seven reasoning fields: the
+    /// argv says `--reasoning-format none -b 2048`, the stamp carries neither.
+    fn pre_reasoning_run(eval: &Path) -> PathBuf {
         let mut old = head();
         old.launch_args = [
             "-m",
@@ -2207,16 +2249,11 @@ mod tests {
         }
         stamp["n_batch"] = serde_json::Value::String("engine-default".into());
         std::fs::write(dir.join("stamp.json"), json.to_string()).expect("write");
-        let loaded = RunLog::load(&dir).expect("loads");
-        assert_eq!(
-            loaded.head.stamp.reasoning_format, "none",
-            "read off the stored argv"
-        );
-        assert_eq!(
-            loaded.head.stamp.n_batch, "2048",
-            "every flag field is re-derived, not only the new ones"
-        );
-        assert_eq!(loaded.head.stamp.reasoning_effort, "engine-default");
+        dir
+    }
+
+    /// A run dir stamped by a foreign server with no argv at all.
+    fn foreign_run(eval: &Path) -> PathBuf {
         let mut foreign = head();
         foreign.launch_args = Vec::new();
         foreign.stamp.runtime = "mlx-lm 0.31.3".into();
@@ -2227,7 +2264,24 @@ mod tests {
             serde_json::to_string(&foreign).expect("ser"),
         )
         .expect("write");
-        let loaded = RunLog::load(&dir).expect("loads");
+        dir
+    }
+
+    #[test]
+    fn a_stored_run_hydrates_its_flags_from_its_argv_and_a_foreign_one_reads_unmanaged() {
+        use crate::core::bench::stamp::{FLAG_UNMANAGED, Stamp};
+        let eval = scratch("hydrate-flags");
+        let loaded = RunLog::load(&pre_reasoning_run(&eval)).expect("loads");
+        assert_eq!(
+            loaded.head.stamp.reasoning_format, "none",
+            "read off the stored argv"
+        );
+        assert_eq!(
+            loaded.head.stamp.n_batch, "2048",
+            "every flag field is re-derived, not only the new ones"
+        );
+        assert_eq!(loaded.head.stamp.reasoning_effort, "engine-default");
+        let loaded = RunLog::load(&foreign_run(&eval)).expect("loads");
         assert_eq!(loaded.head.stamp.reasoning, FLAG_UNMANAGED);
         assert_eq!(
             loaded.head.stamp.spec_type, FLAG_UNMANAGED,
@@ -3137,9 +3191,7 @@ mod tests {
     #[test]
     fn draft_acceptance_is_printed_per_depth_and_summed_on_the_header() {
         let eval = scratch("acceptance");
-        let mut drafted = head();
-        drafted.stamp.spec_type = "draft-mtp".into();
-        drafted.stamp.spec_draft_n_max = "1".into();
+        let drafted = launched_with(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]);
         let mut m = measure(&[19.0, 21.0, 22.0, 22.4]);
         m.draft_n = 300;
         m.draft_n_accepted = 190;
@@ -3164,17 +3216,14 @@ mod tests {
         let plain = rendered_with(&eval, "r-plain", &head());
         assert!(!plain.contains("speculative:"), "{plain}");
 
-        let mut drafted = head();
-        drafted.stamp.spec_type = "draft-mtp".into();
-        drafted.stamp.spec_draft_n_max = "1".into();
+        let drafted = launched_with(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]);
         let with_head = rendered_with(&eval, "r-draft", &drafted);
         assert!(
             with_head.contains("speculative: draft-mtp, draft length 1\n"),
             "{with_head}"
         );
 
-        let mut default_len = head();
-        default_len.stamp.spec_type = "draft-mtp".into();
+        let default_len = launched_with(&["--spec-type", "draft-mtp"]);
         let engine_len = rendered_with(&eval, "r-draft-default", &default_len);
         assert!(
             engine_len.contains("speculative: draft-mtp, draft length engine-default\n"),
