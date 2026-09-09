@@ -1,4 +1,4 @@
-//! The 25-field configuration stamp (spec §7.4).
+//! The 32-field configuration stamp (spec §7.4).
 //!
 //! llama.cpp does not guarantee bit-identical results across configurations:
 //! GPU reduction kernels pick different accumulation orders and float
@@ -51,6 +51,23 @@ pub struct Stamp {
     /// `spec_type`, recorded regardless so two runs never differ silently.
     #[serde(default = "engine_default_flag")]
     pub spec_draft_n_max: String,
+    /// The seven reasoning-side launch flags as the argv said them (design
+    /// §11). `reasoning_format` is the server-wide launch value; the grammar
+    /// arm's per-request override lives in `RunHead::forced_reasoning_format`.
+    #[serde(default = "engine_default_flag")]
+    pub reasoning: String,
+    #[serde(default = "engine_default_flag")]
+    pub reasoning_format: String,
+    #[serde(default = "engine_default_flag")]
+    pub reasoning_effort: String,
+    #[serde(default = "engine_default_flag")]
+    pub reasoning_budget: String,
+    #[serde(default = "engine_default_flag")]
+    pub reasoning_budget_message: String,
+    #[serde(default = "engine_default_flag")]
+    pub reasoning_preserve: String,
+    #[serde(default = "engine_default_flag")]
+    pub chat_template_kwargs: String,
     /// Whether `--allow-exec` was given. Runs that executed the repository and
     /// runs that only read it are not the same environment: tiers 6-7 exist in
     /// one and are absent from the other, so `compare` refuses across it.
@@ -77,6 +94,31 @@ pub struct Stamp {
     /// `None` when the run graded no judged column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judge: Option<JudgeStamp>,
+}
+
+impl Stamp {
+    /// Copy every flag-sourced field from a read argv — the one place the
+    /// stamp and the flags are joined, used by the writer and the loader alike.
+    pub fn set_flags(&mut self, flags: &LaunchFlags) {
+        self.kv_unified.clone_from(&flags.kv_unified);
+        self.n_batch.clone_from(&flags.n_batch);
+        self.n_ubatch.clone_from(&flags.n_ubatch);
+        self.type_k.clone_from(&flags.type_k);
+        self.type_v.clone_from(&flags.type_v);
+        self.flash_attn.clone_from(&flags.flash_attn);
+        self.spec_type.clone_from(&flags.spec_type);
+        self.spec_draft_n_max.clone_from(&flags.spec_draft_n_max);
+        self.reasoning.clone_from(&flags.reasoning);
+        self.reasoning_format.clone_from(&flags.reasoning_format);
+        self.reasoning_effort.clone_from(&flags.reasoning_effort);
+        self.reasoning_budget.clone_from(&flags.reasoning_budget);
+        self.reasoning_budget_message
+            .clone_from(&flags.reasoning_budget_message);
+        self.reasoning_preserve
+            .clone_from(&flags.reasoning_preserve);
+        self.chat_template_kwargs
+            .clone_from(&flags.chat_template_kwargs);
+    }
 }
 
 /// The judge a run's `equiv` column was measured with (spec C §5) — the
@@ -140,7 +182,7 @@ fn engine_default_flag() -> String {
     FLAG_ENGINE_DEFAULT.to_owned()
 }
 
-/// The eight flag-sourced values a launch argv pins.
+/// The fifteen flag-sourced values a launch argv pins.
 ///
 /// Read the same way for a bench stamp and a tune trial so the two describe a
 /// configuration in the same words (tune spec-stage design §6). The two
@@ -159,7 +201,29 @@ pub struct LaunchFlags {
     pub spec_type: String,
     #[serde(default = "engine_default_flag")]
     pub spec_draft_n_max: String,
+    /// The seven reasoning-side flags (reasoning-stamp design §3, §11): how
+    /// much the model may think and where its thoughts land. Records and
+    /// stamps from before them load as engine-default and are hydrated from
+    /// their argv where one is stored.
+    #[serde(default = "engine_default_flag")]
+    pub reasoning: String,
+    #[serde(default = "engine_default_flag")]
+    pub reasoning_format: String,
+    #[serde(default = "engine_default_flag")]
+    pub reasoning_effort: String,
+    #[serde(default = "engine_default_flag")]
+    pub reasoning_budget: String,
+    #[serde(default = "engine_default_flag")]
+    pub reasoning_budget_message: String,
+    #[serde(default = "engine_default_flag")]
+    pub reasoning_preserve: String,
+    #[serde(default = "engine_default_flag")]
+    pub chat_template_kwargs: String,
 }
+
+/// How many fields a launch argv pins — the size `unmanaged_flags` and the
+/// mismatch table are checked against.
+pub const FLAG_FIELDS: usize = 15;
 
 /// Read the launch flags off an argv, each spelling covered.
 #[must_use]
@@ -173,10 +237,17 @@ pub fn launch_flags(argv: &[String]) -> LaunchFlags {
         flash_attn: flag_value_either(argv, &["-fa", "--flash-attn"]),
         spec_type: flag_value_either(argv, &["--spec-type"]),
         spec_draft_n_max: flag_value_either(argv, &["--spec-draft-n-max"]),
+        reasoning: flag_value_either(argv, &["-rea", "--reasoning"]),
+        reasoning_format: flag_value_either(argv, &["--reasoning-format"]),
+        reasoning_effort: flag_value_either(argv, &["--reasoning-effort"]),
+        reasoning_budget: flag_value_either(argv, &["--reasoning-budget"]),
+        reasoning_budget_message: flag_value_either(argv, &["--reasoning-budget-message"]),
+        reasoning_preserve: switch_value(argv, "--reasoning-preserve", "--no-reasoning-preserve"),
+        chat_template_kwargs: flag_value_either(argv, &["--chat-template-kwargs"]),
     }
 }
 
-/// Every launch flag of a foreign server, all eight unobservable.
+/// Every launch flag of a foreign server, all fifteen unobservable.
 #[must_use]
 pub fn unmanaged_flags() -> LaunchFlags {
     let sentinel = || FLAG_UNMANAGED.to_owned();
@@ -189,13 +260,27 @@ pub fn unmanaged_flags() -> LaunchFlags {
         flash_attn: sentinel(),
         spec_type: sentinel(),
         spec_draft_n_max: sentinel(),
+        reasoning: sentinel(),
+        reasoning_format: sentinel(),
+        reasoning_effort: sentinel(),
+        reasoning_budget: sentinel(),
+        reasoning_budget_message: sentinel(),
+        reasoning_preserve: sentinel(),
+        chat_template_kwargs: sentinel(),
     }
 }
 
 /// The FIRST differing field name, in declaration order — or `None` if equal.
 #[must_use]
 pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
-    let pairs: [(&'static str, bool); 25] = [
+    identity_mismatch(a, b)
+        .or_else(|| flag_mismatch(a, b))
+        .or_else(|| trailing_mismatch(a, b))
+}
+
+/// The fields before the launch flags.
+fn identity_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
+    let pairs: [(&'static str, bool); 8] = [
         ("machine_id", a.machine_id != b.machine_id),
         ("runtime", a.runtime != b.runtime),
         ("timing_source", a.timing_source != b.timing_source),
@@ -207,6 +292,13 @@ pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
         ("quant", a.quant != b.quant),
         ("ctx", a.ctx != b.ctx),
         ("n_parallel", a.n_parallel != b.n_parallel),
+    ];
+    first_differing(&pairs)
+}
+
+/// The fifteen flag-sourced fields, in `LaunchFlags` order.
+fn flag_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
+    let pairs: [(&'static str, bool); FLAG_FIELDS] = [
         ("kv_unified", a.kv_unified != b.kv_unified),
         ("n_batch", a.n_batch != b.n_batch),
         ("n_ubatch", a.n_ubatch != b.n_ubatch),
@@ -215,6 +307,29 @@ pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
         ("flash_attn", a.flash_attn != b.flash_attn),
         ("spec_type", a.spec_type != b.spec_type),
         ("spec_draft_n_max", a.spec_draft_n_max != b.spec_draft_n_max),
+        ("reasoning", a.reasoning != b.reasoning),
+        ("reasoning_format", a.reasoning_format != b.reasoning_format),
+        ("reasoning_effort", a.reasoning_effort != b.reasoning_effort),
+        ("reasoning_budget", a.reasoning_budget != b.reasoning_budget),
+        (
+            "reasoning_budget_message",
+            a.reasoning_budget_message != b.reasoning_budget_message,
+        ),
+        (
+            "reasoning_preserve",
+            a.reasoning_preserve != b.reasoning_preserve,
+        ),
+        (
+            "chat_template_kwargs",
+            a.chat_template_kwargs != b.chat_template_kwargs,
+        ),
+    ];
+    first_differing(&pairs)
+}
+
+/// The fields after the launch flags.
+fn trailing_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
+    let pairs: [(&'static str, bool); 9] = [
         ("allow_exec", a.allow_exec != b.allow_exec),
         ("cargo_version", a.cargo_version != b.cargo_version),
         ("exec_target", a.exec_target != b.exec_target),
@@ -228,6 +343,10 @@ pub fn first_mismatch(a: &Stamp, b: &Stamp) -> Option<&'static str> {
         ("corpus_id", a.corpus_id != b.corpus_id),
         ("judge", a.judge != b.judge),
     ];
+    first_differing(&pairs)
+}
+
+fn first_differing(pairs: &[(&'static str, bool)]) -> Option<&'static str> {
     pairs
         .iter()
         .find(|(_, differs)| *differs)
@@ -252,17 +371,38 @@ pub fn mismatch_error(a: &Stamp, b: &Stamp) -> Option<crate::error::ChekovError>
     })
 }
 
-/// One flag's value out of a launch argv. `--flag value` yields the value; a
-/// bare switch yields "on"; an absent flag yields "engine-default".
+/// One flag's value out of a launch argv.
+///
+/// `--flag value` yields the value; a bare switch yields "on"; an absent flag
+/// yields "engine-default". A next token that parses as a number is a value
+/// even when it starts with `-` (`--reasoning-budget -1` is llama-server's
+/// own spelling of unrestricted).
 #[must_use]
 pub fn flag_value(args: &[String], flag: &str) -> String {
     let Some(position) = args.iter().position(|a| a == flag) else {
         return FLAG_ENGINE_DEFAULT.to_owned();
     };
     match args.get(position + 1) {
-        Some(next) if !next.starts_with('-') => next.clone(),
+        Some(next) if is_value(next) => next.clone(),
         _ => "on".to_owned(),
     }
+}
+
+fn is_value(token: &str) -> bool {
+    !token.starts_with('-') || token.parse::<i64>().is_ok()
+}
+
+/// A switch with a negated spelling: `on` when the positive form is present,
+/// `off` for the `--no-` form, engine-default when neither.
+#[must_use]
+pub fn switch_value(args: &[String], on: &str, off: &str) -> String {
+    if args.iter().any(|a| a == off) {
+        return "off".to_owned();
+    }
+    if args.iter().any(|a| a == on) {
+        return "on".to_owned();
+    }
+    FLAG_ENGINE_DEFAULT.to_owned()
 }
 
 /// The first of several spellings (short and long form) that the argv sets.
@@ -300,6 +440,13 @@ mod tests {
             flash_attn: "on".into(),
             spec_type: "engine-default".into(),
             spec_draft_n_max: "engine-default".into(),
+            reasoning: "engine-default".into(),
+            reasoning_format: "engine-default".into(),
+            reasoning_effort: "engine-default".into(),
+            reasoning_budget: "engine-default".into(),
+            reasoning_budget_message: "engine-default".into(),
+            reasoning_preserve: "engine-default".into(),
+            chat_template_kwargs: "engine-default".into(),
             allow_exec: false,
             cargo_version: None,
             exec_target: "none".into(),

@@ -2454,8 +2454,33 @@ struct StampParts {
 }
 
 /// The stamp itself, given the setup and inputs `build_head` already has plus
-/// everything else bundled in `parts`.
+/// everything else bundled in `parts` — the flags copied through the one
+/// setter the loader also uses, so writer and reader cannot disagree.
 fn assemble_stamp(
+    setup: &Candidate,
+    inputs: &HeadInputs,
+    parts: StampParts,
+) -> crate::core::bench::stamp::Stamp {
+    let flags = parts.flags.clone();
+    let mut stamp = stamp_without_flags(setup, inputs, parts);
+    stamp.set_flags(&flags);
+    stamp
+}
+
+/// The scratch target exists exactly when a toolchain answered the probe —
+/// the same condition that put a version on the stamp.
+fn exec_target_of(inputs: &HeadInputs) -> String {
+    use crate::core::bench::stamp;
+    if inputs.cargo_version().is_some() {
+        stamp::EXEC_TARGET_SCRATCH.to_owned()
+    } else {
+        stamp::EXEC_TARGET_OFF.to_owned()
+    }
+}
+
+/// Every stamp field but the flag-sourced fifteen, which `assemble_stamp`
+/// sets afterwards through `Stamp::set_flags`.
+fn stamp_without_flags(
     setup: &Candidate,
     inputs: &HeadInputs,
     parts: StampParts,
@@ -2475,23 +2500,24 @@ fn assemble_stamp(
         quant: setup.eff.entry.quant.clone(),
         ctx: inputs.props.n_ctx,
         n_parallel: inputs.props.total_slots,
-        kv_unified: parts.flags.kv_unified,
-        n_batch: parts.flags.n_batch,
-        n_ubatch: parts.flags.n_ubatch,
-        type_k: parts.flags.type_k,
-        type_v: parts.flags.type_v,
-        flash_attn: parts.flags.flash_attn,
-        spec_type: parts.flags.spec_type,
-        spec_draft_n_max: parts.flags.spec_draft_n_max,
+        kv_unified: String::new(),
+        n_batch: String::new(),
+        n_ubatch: String::new(),
+        type_k: String::new(),
+        type_v: String::new(),
+        flash_attn: String::new(),
+        spec_type: String::new(),
+        spec_draft_n_max: String::new(),
+        reasoning: String::new(),
+        reasoning_format: String::new(),
+        reasoning_effort: String::new(),
+        reasoning_budget: String::new(),
+        reasoning_budget_message: String::new(),
+        reasoning_preserve: String::new(),
+        chat_template_kwargs: String::new(),
         allow_exec: inputs.allow_exec(),
         cargo_version: inputs.cargo_version().map(str::to_owned),
-        // The scratch target exists exactly when a toolchain answered the
-        // probe — the same condition that put a version on the stamp.
-        exec_target: if inputs.cargo_version().is_some() {
-            stamp::EXEC_TARGET_SCRATCH.to_owned()
-        } else {
-            stamp::EXEC_TARGET_OFF.to_owned()
-        },
+        exec_target: exec_target_of(inputs),
         seed: parts.seed,
         temperature_milli: 0,
         chekov_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -3728,6 +3754,13 @@ mod tests {
             flash_attn: "on".into(),
             spec_type: "engine-default".into(),
             spec_draft_n_max: "engine-default".into(),
+            reasoning: "engine-default".into(),
+            reasoning_format: "engine-default".into(),
+            reasoning_effort: "engine-default".into(),
+            reasoning_budget: "engine-default".into(),
+            reasoning_budget_message: "engine-default".into(),
+            reasoning_preserve: "engine-default".into(),
+            chat_template_kwargs: "engine-default".into(),
             allow_exec: false,
             cargo_version: None,
             exec_target: "none".into(),
