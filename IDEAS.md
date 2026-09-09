@@ -832,15 +832,21 @@ already is one, and a second spelling of the same flag is the
 knob-for-a-value-that-never-varied mistake. The `think_leak` probe (§13 Q5)
 is a different question — where the thoughts land, not how many.
 Design APPROVED 2026-09-09 (`docs/superpowers/specs/2026-09-09-reasoning-stamp-design.md`,
-binding): four reasoning flags (`--reasoning`, `-format`, `-effort`,
-`-budget`) join the stamp and both compare masks; every row's measure gains
-thinking and answer CHARACTER counts read off the upstream body — the only
-place a `--reasoning-format none` run's `<think>` span still exists —
-because llama-server reports no reasoning token count anywhere (checked
-`tools/server/` at 0f194b907); the report prints one `thinking` line of
-per-suite median shares. Time-to-first-visible-text stays owed: the mark
-would come from the streamed-read loop in `hub.rs`, which is agent-frozen.
-Proposed 2026-09-06 — status: APPROVED 2026-09-09
+binding): reasoning flags join the stamp and both compare masks; every row's
+measure gains thinking and answer CHARACTER counts read off the upstream body
+— the only place a `--reasoning-format none` run's `<think>` span still
+exists — because llama-server reports no reasoning token count anywhere
+(checked `tools/server/` at 0f194b907); the report prints one `thinking` line
+of per-suite median shares. §11 amended the same day after a seven-agent seam
+map and critique: seven flags, not four; stored runs hydrate their flags from
+their own argv; unclosed spans count to the end; a tag table of the six
+families llama.cpp leaves inline, Kimi named as the gap it cannot close.
+SHIPPED 2026-09-09 (both halves): fifteen flag-sourced stamp fields,
+load-time hydration, `thinking_chars` / `answer_chars` on every row, the
+`thinking` report line. Still owed: time-to-first-visible-text (the mark
+belongs in `hub.rs`'s streamed-read loop, which is agent-frozen); a `compare`
+column for the share.
+Proposed 2026-09-06 — status: SHIPPED 2026-09-09
 
 ## New tool-use lane candidates for the agentic bench (survey 2026-09-06)
 Two Aug-2026 30B-class releases aim at the axis where our benched models
