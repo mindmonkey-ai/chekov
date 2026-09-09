@@ -201,3 +201,91 @@ non-zero share there is the `<think>`-span path proving itself.
 plus every `Timings` / `Measure` literal the compiler names; `README.md`
 (the `compare` row's "eight" becomes "twelve", the bench row's report
 description gains the line), `CHANGELOG.md`, `IDEAS.md` (status line).
+
+## 11. Amendments after the seam map and the three-lens critique (2026-09-09)
+
+A read-only workflow (four seam readers, three adversarial critics) reviewed
+this design against the code before any plan was written. What changes:
+
+- **Seven reasoning-side launch flags, not four.** llama-server at the
+  pinned commit also takes `--reasoning-budget-message`,
+  `--reasoning-preserve` / `--no-reasoning-preserve`, and
+  `--chat-template-kwargs` — the last is how `enable_thinking` is switched
+  off on Qwen-family templates, and `--reasoning on|off` is the same kwarg
+  by another spelling. Two runs differing on any of them think differently.
+  `LaunchFlags` and `Stamp` gain `reasoning`, `reasoning_format`,
+  `reasoning_effort`, `reasoning_budget`, `reasoning_budget_message`,
+  `reasoning_preserve` (`on` / `off` / engine-default; `--no-…` reads as
+  `off`) and `chat_template_kwargs` (the verbatim string). Fifteen
+  flag-sourced fields; `--cross-flags` masks fifteen, `--cross-runtime`
+  twenty-one; `first_mismatch` is split so the flag block is its own
+  function under the 40-line gate.
+- **The flag reader accepts negative numbers.** `--reasoning-budget -1` is
+  llama-server's own spelling of "unrestricted"; today `flag_value` reads a
+  next token starting with `-` as a bare switch and would stamp `on`. A next
+  token that parses as an integer is a value.
+- **Stored runs are hydrated at load, never defaulted.** Every llama.cpp run
+  under `eval/` (35 of 41) was launched with `--reasoning-format none` and
+  says so in `stamp.json`'s `launch_args`, one key above the stamp. A serde
+  default of `engine-default` would make all of them refuse to compare with,
+  or resume under, any run made after this change. Instead the run-head
+  reader re-derives all fifteen flag-sourced fields from `launch_args`
+  (`launch_flags`) when the runtime is llama.cpp and sets them `unmanaged`
+  otherwise — idempotent for fresh stamps, which were written from the same
+  argv, and it also corrects the two speculative fields on the stored
+  foreign runs, which today load as engine-default while a fresh foreign
+  run stamps `unmanaged`. The serde default remains only for a head with no
+  argv at all. `assemble_stamp` and the loader copy the flags through one
+  `Stamp::set_flags`, so they cannot disagree.
+- **An unclosed thinking span is thinking to the end of `content`.** Under
+  `--reasoning-format none` the parser's own terminators include
+  `<tool_call>`, so a reply that thinks and then calls a tool carries
+  `<think>` with no `</think>`; a reply cut by `max_tokens` mid-thought has
+  none either. Both are exactly the rows the measure exists for. An opened
+  span with no close counts to the end of the text as thinking; tool-call
+  arguments still count as answer. Every span counts, not only the first.
+- **The span scan is a table, and it is not only `<think>`.** Under `none`,
+  llama.cpp leaves each family's own tags inline: `<think>` (Qwen, Ornith,
+  MiniMax, DeepSeek), `[THINK]…[/THINK]` (Mistral), gpt-oss's
+  `<|channel|>analysis<|message|>…<|end|>`, Gemma's `<|channel>thought…
+  <channel|>`, `<mm:think>`. The scanner reads a const table of (start,
+  end-tags) pairs mirrored from `common/chat.cpp`'s `thinking_start_tag` /
+  `thinking_end_tags` at the pinned commit — the `<think>` entry reusing
+  the proxy's `THINK_OPEN` / `THINK_CLOSE` so the two spellings cannot
+  drift — and the CHANGELOG names the table's contents so a new family is
+  a known gap, not a silent 0%.
+- **Foreign reasoning fields.** The stream fold reads `delta.reasoning`
+  as an alias of `delta.reasoning_content` (the spelling other
+  OpenAI-compatible servers use). On a foreign run the `thinking` line's
+  footnote reads `(reasoning flags unmanaged on this runtime)`.
+- **The forced arm is named.** `Stamp.reasoning_format` is the server-wide
+  launch value; the grammar arm's per-request `deepseek` override stays in
+  `RunHead.forced_reasoning_format`, and the `thinking` line appends
+  `; grammar_gap measured with reasoning extracted (deepseek)` when it is
+  set. The live acceptance reads the unconstrained suites' share, which is
+  the `<think>`-span path; `grammar_gap`'s share is the extracted path.
+- **Where the fold lives.** `timings_from_stream` never sees the SSE, and
+  `stream_timings` reads one frame. One helper, `stream_reply_chars(sse)`,
+  folds every frame's `delta.reasoning_content` / `delta.reasoning`,
+  `delta.content` (concatenated, then scanned) and
+  `delta.tool_calls[].function.arguments`; `cross_streaming` and
+  `cross_stream_timed` call it and write the counts onto their `Timings`.
+  The buffered door reads `choices[0].message` through `reply_chars`.
+- **The report line lives in `suite_summaries`** (which is what calls
+  `asymmetry_lines`), after the streamed `tool_loop` line; it is a
+  `thinking_line(log) -> Option<String>` shaped like `speculative_line`.
+  The median is a new `stats::median` (sort, middle, no warmup drop);
+  `stats::summarize` is never used for it. `codebase` appears on the line
+  only for rows the chat-FIM transport timed; `/infill` rows carry no
+  message and stay zero-both.
+- **Characters are `chars().count()`**, and the claim that the character
+  share tracks a token share "within a few points" is withdrawn: thinking
+  is prose and a tool reply is JSON, and they tokenize differently, so the
+  tool suites' share is biased and the README says the share is over
+  characters. An injected `--reasoning-budget-message` counts as thinking.
+- **Files.** §10 gains `src/commands/capability.rs` (`assemble_stamp`),
+  `src/core/bench/sweep.rs` and `speeds.rs` (test literals),
+  `src/core/stats.rs` (`median`), `src/core/tune.rs` (the record test lives
+  with `Trial`), the README's three "eight" mentions (the compare row, the
+  cross-runtime paragraph, the flags paragraph) and the doc comments and
+  test names that say eight, twenty-five or fourteen.
