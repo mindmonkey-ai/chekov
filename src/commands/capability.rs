@@ -4038,10 +4038,23 @@ mod tests {
             &done,
             &TaskKey::buffered("tool_emit", "te-002")
         ));
+        let done = vec![(
+            "tool_loop".to_owned(),
+            "tl-001".to_owned(),
+            crate::core::bench::store::Transport::Buffered,
+        )];
+        assert!(super::already_done(
+            &done,
+            &TaskKey::buffered("tool_loop", "tl-001")
+        ));
+        assert!(!super::already_done(
+            &done,
+            &TaskKey::streamed("tool_loop", "tl-001")
+        ));
     }
 
     #[test]
-    fn the_agentic_estimate_counts_both_doors() {
+    fn the_agentic_estimate_counts_both_doors_and_the_loops_upper_bound() {
         use crate::core::bench::lifecycle::Suite;
         use crate::core::bench::probeset::{Expect, agentic_v0};
         let set = agentic_v0().expect("the compiled-in set is valid");
@@ -4051,14 +4064,15 @@ mod tests {
             .filter(|c| c.expect == Expect::Call)
             .count();
         // Every unconstrained case crosses twice (buffered and streamed); the
-        // forced pass crosses once.
+        // forced pass crosses once; a loop case may cross up to K times per door.
         let cases = 2 * set.tool_emit.len() + forced + 2 * set.instruction.len();
+        let loops = 2 * set.tool_loop.len() * 8;
         assert_eq!(
-            super::agentic_estimate_secs(Some(Suite::Agentic)).expect("estimate"),
-            cases as u64 * 8
+            super::agentic_estimate_secs(Some(Suite::Agentic), 8).expect("estimate"),
+            (cases + loops) as u64 * 8
         );
         assert_eq!(
-            super::agentic_estimate_secs(Some(Suite::Throughput)).expect("estimate"),
+            super::agentic_estimate_secs(Some(Suite::Throughput), 8).expect("estimate"),
             0
         );
     }
