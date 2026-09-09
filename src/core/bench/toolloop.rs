@@ -225,12 +225,17 @@ fn dir_prefix(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
     use serde_json::{Value, json};
 
-    use super::ToolEnv;
+    use super::{LoopRun, ToolEnv, Turn, drive};
     use crate::core::bench::grade::ToolUse;
     use crate::core::bench::probeset::{LoopCase, ProbeSet, parse};
+    use crate::core::bench::runner::Timings;
     use crate::core::bench::store::LoopEnd;
+    use crate::core::proxy::http::HttpRequest;
 
     const TOOLS: &str = r#"
 [[tool_loop.tools]]
@@ -470,5 +475,212 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
         let read = call("read_file", json!({"path": "src/a.rs"}));
         assert_eq!(one.answer(&read), two.answer(&read));
         assert_eq!(one.finish(""), two.finish(""));
+    }
+
+    fn reply(content: Vec<Value>, stop: &str) -> String {
+        json!({
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+            "content": content, "stop_reason": stop, "stop_sequence": null,
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        })
+        .to_string()
+    }
+
+    fn use_block(id: &str, name: &str, input: Value) -> Value {
+        json!({"type": "tool_use", "id": id, "name": name, "input": input})
+    }
+
+    fn text_block(text: &str) -> Value {
+        json!({"type": "text", "text": text})
+    }
+
+    fn timings(prompt_n: u64) -> Timings {
+        Timings {
+            prompt_n,
+            prompt_per_second: 100.0,
+            predicted_n: 20,
+            predicted_per_second: 10.0,
+            cache_n: prompt_n / 2,
+            draft_n: 4,
+            draft_n_accepted: 3,
+        }
+    }
+
+    /// A door that answers from a script and records what it was sent.
+    struct Scripted {
+        bodies: RefCell<VecDeque<String>>,
+        sent: RefCell<Vec<Value>>,
+    }
+
+    impl Scripted {
+        fn new(bodies: Vec<String>) -> Self {
+            Self {
+                bodies: RefCell::new(bodies.into()),
+                sent: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn door(&self) -> impl FnMut(&HttpRequest) -> Result<Turn, crate::error::ChekovError> + '_ {
+            move |req: &HttpRequest| {
+                self.sent
+                    .borrow_mut()
+                    .push(serde_json::from_slice(&req.body).expect("json"));
+                let body = self.bodies.borrow_mut().pop_front().expect("scripted");
+                let turn = self.sent.borrow().len() as u64;
+                Ok(Turn {
+                    body,
+                    timings: Some(timings(100 * turn)),
+                })
+            }
+        }
+    }
+
+    fn run<'a>(set: &'a ProbeSet, max_turns: u32) -> LoopRun<'a> {
+        LoopRun {
+            case: case(set),
+            system: &set.loop_system,
+            max_turns,
+        }
+    }
+
+    #[test]
+    fn read_then_edit_then_stop_reaches_the_goal_and_the_transcript_echoes_the_ids() {
+        let set = edited_set();
+        let script = Scripted::new(vec![
+            reply(
+                vec![
+                    text_block("looking"),
+                    use_block("t1", "read_file", json!({"path": "src/a.rs"})),
+                ],
+                "tool_use",
+            ),
+            reply(
+                vec![use_block(
+                    "t2",
+                    "edit_file",
+                    json!({"path": "src/a.rs", "old": "A: u32 = 3", "new": "A: u32 = 5"}),
+                )],
+                "tool_use",
+            ),
+            reply(vec![text_block("done")], "end_turn"),
+        ]);
+        let outcome = drive(&mut script.door(), &run(&set, 8)).expect("drove");
+        assert_eq!(outcome.end, LoopEnd::GoalMet);
+        assert_eq!((outcome.turns, outcome.tool_calls), (3, 2));
+        assert_eq!(
+            outcome.measure.decode_samples.len(),
+            3,
+            "one sample per timed turn"
+        );
+        assert_eq!(outcome.measure.prompt_n, 300, "the deepest turn's prompt");
+        assert_eq!(outcome.measure.cache_n, 150, "the max seen");
+        assert_eq!(outcome.measure.draft_n_accepted, 9, "drafts summed");
+        let sent = script.sent.borrow();
+        let third = &sent[2]["messages"];
+        assert_eq!(third[1]["role"], "assistant");
+        assert_eq!(
+            third[1]["content"][1]["id"], "t1",
+            "the reply's blocks ride back verbatim"
+        );
+        assert_eq!(third[2]["content"][0]["type"], "tool_result");
+        assert_eq!(third[2]["content"][0]["tool_use_id"], "t1");
+        assert_eq!(
+            third[2]["content"][0]["content"],
+            "const A: u32 = 3;\nconst B: u32 = 3;\n"
+        );
+        assert_eq!(third[4]["content"][0]["tool_use_id"], "t2");
+    }
+
+    #[test]
+    fn a_fabricated_tool_ends_the_loop_at_that_turn() {
+        let set = edited_set();
+        let script = Scripted::new(vec![reply(
+            vec![use_block("t1", "delete_file", json!({"path": "src/a.rs"}))],
+            "tool_use",
+        )]);
+        let outcome = drive(&mut script.door(), &run(&set, 8)).expect("drove");
+        assert_eq!(
+            outcome.end,
+            LoopEnd::FabricatedTool {
+                name: "delete_file".into()
+            }
+        );
+        assert_eq!((outcome.turns, outcome.tool_calls), (1, 1));
+    }
+
+    #[test]
+    fn stopping_short_of_the_goal_is_unmet_and_a_cut_reply_is_truncated() {
+        let set = edited_set();
+        let script = Scripted::new(vec![reply(vec![text_block("all good")], "end_turn")]);
+        let outcome = drive(&mut script.door(), &run(&set, 8)).expect("drove");
+        assert!(
+            matches!(outcome.end, LoopEnd::GoalUnmet { ref wanted } if wanted.starts_with("src/a.rs containing"))
+        );
+        let script = Scripted::new(vec![reply(vec![text_block("I will now")], "max_tokens")]);
+        let outcome = drive(&mut script.door(), &run(&set, 8)).expect("drove");
+        assert_eq!(outcome.end, LoopEnd::Truncated);
+    }
+
+    #[test]
+    fn a_loop_still_calling_at_the_budget_is_exhausted_at_exactly_k_turns() {
+        let set = edited_set();
+        let read = || {
+            reply(
+                vec![use_block("t", "read_file", json!({"path": "src/a.rs"}))],
+                "tool_use",
+            )
+        };
+        let script = Scripted::new(vec![read(), read(), read(), read()]);
+        let outcome = drive(&mut script.door(), &run(&set, 3)).expect("drove");
+        assert_eq!(outcome.end, LoopEnd::TurnsExhausted);
+        assert_eq!((outcome.turns, outcome.tool_calls), (3, 3));
+        assert_eq!(
+            script.sent.borrow().len(),
+            3,
+            "the fourth reply was never asked for"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_reply_fails_the_crossing_rather_than_grading() {
+        let set = edited_set();
+        let script = Scripted::new(vec!["not json".to_owned()]);
+        let err = drive(&mut script.door(), &run(&set, 8)).expect_err("chekov's fault");
+        assert!(err.to_string().contains("loop reply unreadable"), "{err}");
+    }
+
+    #[test]
+    fn an_unchanged_goal_passes_when_the_model_reports_the_missing_file() {
+        let set = unchanged_set();
+        let script = Scripted::new(vec![
+            reply(
+                vec![use_block(
+                    "t1",
+                    "read_file",
+                    json!({"path": "src/legacy.rs"}),
+                )],
+                "tool_use",
+            ),
+            reply(
+                vec![text_block("src/legacy.rs does not exist; nothing to fix.")],
+                "end_turn",
+            ),
+        ]);
+        let outcome = drive(&mut script.door(), &run(&set, 8)).expect("drove");
+        assert_eq!(outcome.end, LoopEnd::GoalMet);
+    }
+
+    #[test]
+    fn an_untimed_door_leaves_the_measure_empty() {
+        let set = unchanged_set();
+        let mut door = |_: &HttpRequest| {
+            Ok(Turn {
+                body: reply(vec![text_block("no src/legacy.rs")], "end_turn"),
+                timings: None,
+            })
+        };
+        let outcome = drive(&mut door, &run(&set, 8)).expect("drove");
+        assert!(outcome.measure.decode_samples.is_empty());
+        assert_eq!(outcome.measure.prompt_n, 0);
     }
 }
