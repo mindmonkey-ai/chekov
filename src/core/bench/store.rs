@@ -2095,6 +2095,75 @@ mod tests {
         }
     }
 
+    /// A row of `suite` with the given counts, buffered, passing.
+    fn thought(suite: &str, id: &str, thinking: u64, answer: u64) -> Task {
+        let mut task = graded(suite, id, GradeRow::pass());
+        task.measure.thinking_chars = thinking;
+        task.measure.answer_chars = answer;
+        task
+    }
+
+    #[test]
+    fn the_thinking_line_prints_per_suite_medians_and_skips_unmeasured_suites() {
+        let eval = scratch("thinking-line");
+        let mut writer = RunWriter::create(&eval, "r-think", &head()).expect("create");
+        for task in [
+            thought("tool_emit", "te-001", 10, 90),
+            thought("tool_emit", "te-002", 50, 50),
+            thought("tool_emit", "te-003", 100, 0),
+            thought("instruction", "if-001", 0, 0),
+            thought("tool_loop", "tl-001", 30, 70),
+        ] {
+            writer.append(task).expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("thinking     share of reply characters spent thinking, median per case: tool_emit 50%, tool_loop 30% (launched with no reasoning flag)\n"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("instruction 0%"),
+            "a suite with no measured row is omitted: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_thinking_line_is_absent_without_a_measurement_and_names_the_forced_arm_and_the_foreign_runtime()
+     {
+        let eval = scratch("thinking-none");
+        let writer = graded_run(&eval);
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            !rendered.contains("thinking     "),
+            "zero-both everywhere prints nothing: {rendered}"
+        );
+        let eval = scratch("thinking-forced");
+        let mut forced = head();
+        forced.forced_reasoning_format = Some("deepseek".into());
+        forced.launch_args = vec!["--reasoning-format".into(), "none".into()];
+        let mut writer = RunWriter::create(&eval, "r-forced", &forced).expect("create");
+        writer
+            .append(thought("grammar_gap", "gg-te-001", 20, 80))
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("thinking     share of reply characters spent thinking, median per case: grammar_gap 20%; grammar_gap measured with reasoning extracted (deepseek)\n"),
+            "a run launched with a reasoning flag has no default footnote: {rendered}"
+        );
+        let eval = scratch("thinking-foreign");
+        let mut foreign = head();
+        foreign.stamp.runtime = "mlx-lm 0.31.3".into();
+        let mut writer = RunWriter::create(&eval, "r-foreign", &foreign).expect("create");
+        writer
+            .append(thought("tool_emit", "te-001", 1, 3))
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("tool_emit 25% (reasoning flags unmanaged on this runtime)\n"),
+            "{rendered}"
+        );
+    }
+
     fn streamed(suite: &str, id: &str, grade: GradeRow) -> Task {
         Task {
             transport: Transport::Streamed,
