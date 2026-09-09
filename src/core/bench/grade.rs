@@ -476,6 +476,24 @@ mod tests {
     }
 
     #[test]
+    fn tool_use_blocks_keep_the_ids_a_tool_result_must_echo() {
+        let body = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "reading"},
+                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "a"}},
+                {"type": "tool_use", "id": "toolu_2", "name": "grep", "input": {"pattern": "x", "path": "."}}
+            ]
+        })
+        .to_string();
+        let uses = super::tool_use_blocks(&body).expect("readable");
+        assert_eq!(uses.len(), 2);
+        assert_eq!(uses[0].id, "toolu_1");
+        assert_eq!(uses[1].name, "grep");
+        assert_eq!(uses[1].input["pattern"], "x");
+        assert!(super::tool_use_blocks("not json").is_err());
+    }
+
+    #[test]
     fn a_body_without_content_text_fails_as_a_translation_problem_not_an_empty_reply() {
         // A grader that reads a broken artifact as "the model said nothing"
         // would score a broken server as a merely unhelpful model.
