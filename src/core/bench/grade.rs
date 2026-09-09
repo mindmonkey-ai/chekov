@@ -44,8 +44,8 @@ pub fn grade(anthropic_body: &str, probe: &FixtureProbe) -> Grade {
 
 use crate::core::bench::probeset::{Expect, InstructionCase, ToolCase};
 
-/// The reply's text blocks, joined — or the translation-failure refusal.
-fn artifact_text(anthropic_body: &str) -> Result<String, Grade> {
+/// The reply's content blocks — or the translation-failure refusal.
+pub(crate) fn content_blocks(anthropic_body: &str) -> Result<Vec<Value>, Grade> {
     let Ok(parsed) = serde_json::from_str::<Value>(anthropic_body) else {
         return Err(Grade::Fail {
             reason: "artifact is not JSON".to_owned(),
@@ -57,7 +57,12 @@ fn artifact_text(anthropic_body: &str) -> Result<String, Grade> {
                 .to_owned(),
         });
     };
-    Ok(blocks
+    Ok(blocks.clone())
+}
+
+/// The reply's text blocks, joined — or the translation-failure refusal.
+pub(crate) fn artifact_text(anthropic_body: &str) -> Result<String, Grade> {
+    Ok(content_blocks(anthropic_body)?
         .iter()
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|b| b.get("text").and_then(Value::as_str))
@@ -65,31 +70,39 @@ fn artifact_text(anthropic_body: &str) -> Result<String, Grade> {
         .join("\n"))
 }
 
-/// The reply's `tool_use` blocks as (name, input) pairs.
-fn tool_uses(anthropic_body: &str) -> Result<Vec<(String, Value)>, Grade> {
-    let Ok(parsed) = serde_json::from_str::<Value>(anthropic_body) else {
-        return Err(Grade::Fail {
-            reason: "artifact is not JSON".to_owned(),
-        });
+/// One `tool_use` block as the agent would act on it — the id is what a
+/// `tool_result` must echo back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolUse {
+    pub id: String,
+    pub name: String,
+    pub input: Value,
+}
+
+/// The reply's `tool_use` blocks with their ids, in order.
+pub(crate) fn tool_use_blocks(anthropic_body: &str) -> Result<Vec<ToolUse>, Grade> {
+    let text = |b: &Value, key: &str| {
+        b.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
     };
-    let Some(blocks) = parsed.get("content").and_then(Value::as_array) else {
-        return Err(Grade::Fail {
-            reason: "no content in the artifact — a translation failure, not an empty reply"
-                .to_owned(),
-        });
-    };
-    Ok(blocks
+    Ok(content_blocks(anthropic_body)?
         .iter()
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
-        .map(|b| {
-            (
-                b.get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                b.get("input").cloned().unwrap_or(Value::Null),
-            )
+        .map(|b| ToolUse {
+            id: text(b, "id"),
+            name: text(b, "name"),
+            input: b.get("input").cloned().unwrap_or(Value::Null),
         })
+        .collect())
+}
+
+/// The reply's `tool_use` blocks as (name, input) pairs.
+fn tool_uses(anthropic_body: &str) -> Result<Vec<(String, Value)>, Grade> {
+    Ok(tool_use_blocks(anthropic_body)?
+        .into_iter()
+        .map(|u| (u.name, u.input))
         .collect())
 }
 

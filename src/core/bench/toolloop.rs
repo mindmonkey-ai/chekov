@@ -1,6 +1,227 @@
-//! The `tool_loop` probe's canned environment and driver (tool-loop design
-//! §4–§5): a repository as a map, every tool answer a pure function of the
-//! case and the calls so far, and a loop that stops at a terminal state.
+//! The `tool_loop` probe's canned environment and driver.
+//!
+//! Tool-loop design §4–§5: a repository as a map, every tool answer a pure
+//! function of the case and the calls so far, and a loop that stops at a
+//! terminal state.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::Value;
+
+use crate::core::bench::grade::ToolUse;
+use crate::core::bench::probeset::{Goal, LoopCase, ToolDef, canned_text};
+use crate::core::bench::store::LoopEnd;
+
+/// The canned repository for one case, and the goal it is judged against.
+///
+/// No clock, no randomness, no filesystem: two environments fed the same
+/// calls hold the same state, which is what makes the probe deterministic
+/// for a deterministic model.
+pub struct ToolEnv<'a> {
+    case: &'a LoopCase,
+    files: BTreeMap<String, String>,
+}
+
+impl<'a> ToolEnv<'a> {
+    #[must_use]
+    pub fn new(case: &'a LoopCase) -> Self {
+        let files = case
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), f.text.clone()))
+            .collect();
+        Self { case, files }
+    }
+
+    /// Answer one call, or end the loop: a tool outside the palette, or a
+    /// call missing a key the tool's schema requires, is not answered.
+    pub fn answer(&mut self, call: &ToolUse) -> Result<String, LoopEnd> {
+        let tool = self
+            .case
+            .tools
+            .iter()
+            .find(|t| t.name == call.name)
+            .ok_or_else(|| LoopEnd::FabricatedTool {
+                name: call.name.clone(),
+            })?;
+        if let Some(key) = missing_key(tool, &call.input) {
+            return Err(LoopEnd::MalformedCall {
+                name: call.name.clone(),
+                key,
+            });
+        }
+        Ok(match call.name.as_str() {
+            "read_file" => self.read_file(arg(&call.input, "path")),
+            "list_dir" => self.list_dir(arg(&call.input, "path")),
+            "grep" => self.grep(arg(&call.input, "pattern"), arg(&call.input, "path")),
+            "edit_file" => self.edit_file(&call.input),
+            "run_tests" => self.run_tests(),
+            other => format!("tool '{other}' is offered but has no canned behaviour"),
+        })
+    }
+
+    fn read_file(&self, path: &str) -> String {
+        self.files
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| format!("no such file: {path}"))
+    }
+
+    /// Direct children only; a subdirectory is named with a trailing slash.
+    fn list_dir(&self, path: &str) -> String {
+        let prefix = dir_prefix(path);
+        let entries: BTreeSet<String> = self
+            .files
+            .keys()
+            .filter_map(|p| p.strip_prefix(&prefix))
+            .map(|rest| match rest.split_once('/') {
+                Some((dir, _)) => format!("{dir}/"),
+                None => rest.to_owned(),
+            })
+            .collect();
+        if entries.is_empty() {
+            return format!("no such directory: {path}");
+        }
+        entries.into_iter().collect::<Vec<_>>().join("\n")
+    }
+
+    /// Plain substring, never a regex: no prompt asks for one, and a model
+    /// that sends `.` means a dot.
+    fn grep(&self, pattern: &str, path: &str) -> String {
+        let prefix = dir_prefix(path);
+        let hits: Vec<String> = self
+            .files
+            .iter()
+            .filter(|(p, _)| p.starts_with(&prefix) || p.as_str() == path)
+            .flat_map(|(p, text)| {
+                text.lines()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains(pattern))
+                    .map(move |(i, line)| format!("{p}:{}: {line}", i + 1))
+            })
+            .collect();
+        if hits.is_empty() {
+            "no matches".to_owned()
+        } else {
+            hits.join("\n")
+        }
+    }
+
+    /// Claude Code's own `Edit` contract: exactly one occurrence, or say why.
+    fn edit_file(&mut self, input: &Value) -> String {
+        let (path, old, new) = (arg(input, "path"), arg(input, "old"), arg(input, "new"));
+        let Some(text) = self.files.get(path) else {
+            return format!("no such file: {path}");
+        };
+        let count = text.matches(old).count();
+        let edited = text.replacen(old, new, 1);
+        match count {
+            0 => format!("old text not found in {path}"),
+            1 => {
+                self.files.insert(path.to_owned(), edited);
+                format!("edited {path}")
+            }
+            n => format!("old text occurs {n} times in {path}; make it unique"),
+        }
+    }
+
+    /// The canned failure until the goal is met — the same words every time,
+    /// never the answer.
+    fn run_tests(&self) -> String {
+        match &self.case.goal {
+            Goal::Edited {
+                tests_fail: Some(fail),
+                ..
+            } if !self.goal_met() => fail.clone(),
+            Goal::Edited { .. } | Goal::Unchanged { .. } => "ok. 1 passed".to_owned(),
+        }
+    }
+
+    fn goal_met(&self) -> bool {
+        match &self.case.goal {
+            Goal::Edited {
+                file,
+                contains_any,
+                untouched,
+                ..
+            } => {
+                self.files
+                    .get(file)
+                    .is_some_and(|t| contains_any.iter().any(|w| t.contains(w.as_str())))
+                    && untouched.iter().all(|p| self.unchanged(p))
+            }
+            Goal::Unchanged { .. } => self.case.files.iter().all(|f| self.unchanged(&f.path)),
+        }
+    }
+
+    fn unchanged(&self, path: &str) -> bool {
+        self.files.get(path).map(String::as_str) == canned_text(self.case, path)
+    }
+
+    /// The end state when the model stops talking: met, or what was wanted.
+    #[must_use]
+    pub fn finish(&self, final_text: &str) -> LoopEnd {
+        let mentioned = match &self.case.goal {
+            Goal::Unchanged { reply_mentions } => final_text
+                .to_lowercase()
+                .contains(&reply_mentions.to_lowercase()),
+            Goal::Edited { .. } => true,
+        };
+        if self.goal_met() && mentioned {
+            LoopEnd::GoalMet
+        } else {
+            LoopEnd::GoalUnmet {
+                wanted: self.wanted(),
+            }
+        }
+    }
+
+    fn wanted(&self) -> String {
+        match &self.case.goal {
+            Goal::Edited {
+                file, contains_any, ..
+            } => format!(
+                "{file} containing {}",
+                contains_any
+                    .iter()
+                    .map(|w| format!("{w:?}"))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ),
+            Goal::Unchanged { reply_mentions } => {
+                format!("no file changed and a reply naming {reply_mentions}")
+            }
+        }
+    }
+}
+
+fn arg<'v>(input: &'v Value, key: &str) -> &'v str {
+    input.get(key).and_then(Value::as_str).unwrap_or_default()
+}
+
+/// The first `required` key of the tool's schema the call did not supply as
+/// a string, if any — read off the schema, never a hard-coded list.
+fn missing_key(tool: &ToolDef, input: &Value) -> Option<String> {
+    let schema: Value = serde_json::from_str(&tool.input_schema).unwrap_or(Value::Null);
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|key| input.get(key).and_then(Value::as_str).is_none())
+        .map(str::to_owned)
+}
+
+/// `src` → `src/`; the root (`""`, `.`) → `""`.
+fn dir_prefix(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "." {
+        String::new()
+    } else {
+        format!("{trimmed}/")
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -230,7 +451,8 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
                 wanted: "no file changed and a reply naming src/legacy.rs".into()
             }
         );
-        env.answer(&edit("src/a.rs", "3", "4")).expect("answered");
+        env.answer(&edit("src/a.rs", "= 3;", "= 4;"))
+            .expect("answered");
         assert!(matches!(
             env.finish("no src/legacy.rs here"),
             LoopEnd::GoalUnmet { .. }
