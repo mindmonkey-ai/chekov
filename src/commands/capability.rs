@@ -992,6 +992,8 @@ struct RunInputs<'a> {
     /// How many candidates the judge will be asked about: every crossing is
     /// judged once per candidate run.
     candidates: usize,
+    /// `[bench] tool_loop_max_turns` — the loop probe's K, for the estimate.
+    max_turns: u32,
 }
 
 /// `codebase: {n} tasks from {repo} @ {head[..12]} ({tier census})`, with what
@@ -1093,7 +1095,7 @@ fn bench_estimate(
         .prepared
         .map_or(0, |p| codebase_estimate_secs(p, inputs.args.allow_exec));
     Ok(lifecycle::estimate_secs(steps, plan)
-        + agentic_estimate_secs(inputs.args.suite)?
+        + agentic_estimate_secs(inputs.args.suite, inputs.max_turns)?
         + codebase_secs
         + lifecycle::judge_estimate_secs(judge_crossings(inputs)))
 }
@@ -1136,6 +1138,7 @@ fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
         prepared: prepared.as_ref(),
         judge: judge.as_ref(),
         candidates: candidates.len(),
+        max_turns: ctx.config.file.bench.tool_loop_max_turns,
     };
     let plan: sweep::SweepPlan = (&ctx.config.file.bench).into();
     let steps = bench_steps(ctx, &candidates, judge.as_ref());
@@ -1730,6 +1733,7 @@ fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<()
         wire: &wire,
         clock: inputs.clock,
         runtime,
+        max_turns: ctx.config.file.bench.tool_loop_max_turns,
     };
     if inputs.suite.is_some_and(Suite::runs_throughput) {
         run_throughput(sink, &pass, inputs.plan).map_err(recast)?;
@@ -1774,6 +1778,8 @@ struct SuitePass<'a> {
     wire: &'a crate::core::bench::runner::ProbeWire<'a>,
     clock: TimingClock,
     runtime: Option<&'a str>,
+    /// `[bench] tool_loop_max_turns` — the loop probe's K.
+    max_turns: u32,
 }
 
 /// A crossing outcome as its own row will read it.
@@ -1791,9 +1797,12 @@ fn row_outcome<T>(
 
 /// Rough extra seconds for the agentic suites (8s per crossing), from the
 /// validated set — a suite that will not run costs nothing. Unconstrained
-/// cases cross twice (both doors); the forced pass once.
+/// cases cross twice (both doors); the forced pass once; a loop case up to
+/// `max_turns` times per door — the ceiling, since a loop that closes in two
+/// turns costs a quarter of it.
 fn agentic_estimate_secs(
     suite: Option<crate::core::bench::lifecycle::Suite>,
+    max_turns: u32,
 ) -> Result<u64, ChekovError> {
     use crate::core::bench::lifecycle::Suite;
     if !suite.is_some_and(Suite::runs_agentic) {
@@ -1805,7 +1814,8 @@ fn agentic_estimate_secs(
         .iter()
         .filter(|c| c.expect == crate::core::bench::probeset::Expect::Call)
         .count();
-    let crossings = 2 * set.tool_emit.len() + forced + 2 * set.instruction.len();
+    let loops = 2 * set.tool_loop.len() * max_turns as usize;
+    let crossings = 2 * set.tool_emit.len() + forced + 2 * set.instruction.len() + loops;
     Ok(crossings as u64 * 8)
 }
 
@@ -1835,6 +1845,14 @@ fn run_agentic(sink: &mut TaskSink, suite: &SuitePass) -> Result<(), ChekovError
         }
         for case in &set.instruction {
             run_instruction_case(sink, &pass, case)?;
+        }
+        for case in &set.tool_loop {
+            let run = crate::core::bench::toolloop::LoopRun {
+                case,
+                system: &set.loop_system,
+                max_turns: suite.max_turns,
+            };
+            run_loop_case(sink, &pass, &run)?;
         }
         refusal = pass.refusal;
     }
@@ -1926,6 +1944,66 @@ fn run_instruction_case(
         (timings, instruction_row(strict, &loose))
     });
     append_probe(sink, key, row_outcome(outcome, pass.suite.runtime))
+}
+
+/// One loop case through this door. The driver rides `agentic_cross`, so a
+/// foreign run's untimed buffered door and llama.cpp's timed doors all work,
+/// and the row's measure is whatever the door could time (tool-loop design §5).
+fn run_loop_case(
+    sink: &mut TaskSink,
+    pass: &AgenticPass,
+    run: &crate::core::bench::toolloop::LoopRun,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::store::TaskKey;
+    use crate::core::bench::toolloop;
+    let key = TaskKey {
+        suite: "tool_loop",
+        task_id: &run.case.id,
+        transport: pass.transport,
+    };
+    if sink.is_done(&key) {
+        return Ok(());
+    }
+    let mut door = |req: &crate::core::proxy::http::HttpRequest| {
+        agentic_cross(pass, req).map(|(timings, body)| toolloop::Turn { body, timings })
+    };
+    let outcome = row_outcome(toolloop::drive(&mut door, run), pass.suite.runtime);
+    append_loop(sink, key, outcome)
+}
+
+/// A finished loop is a graded row with its turn record; a crossing that
+/// failed mid-loop is unavailable, as every suite records it.
+fn append_loop(
+    sink: &mut TaskSink,
+    key: crate::core::bench::store::TaskKey,
+    outcome: Result<crate::core::bench::toolloop::LoopOutcome, ChekovError>,
+) -> Result<(), ChekovError> {
+    use crate::core::bench::{grade, store};
+    let (measure, verdict, tool_loop) = match outcome {
+        Ok(done) => {
+            let verdict = grade_row(grade::grade_tool_loop(&done));
+            let row = store::LoopRow {
+                turns: done.turns,
+                tool_calls: done.tool_calls,
+                end: done.end,
+            };
+            (done.measure, verdict, Some(row))
+        }
+        Err(e) => {
+            let (measure, verdict) = failed_probe(&e);
+            (measure, verdict, None)
+        }
+    };
+    sink.writer.append(store::Task {
+        suite: key.suite.into(),
+        task_id: key.task_id.into(),
+        measure,
+        grade: Some(verdict),
+        transport: key.transport,
+        codebase: None,
+        judge: None,
+        tool_loop,
+    })
 }
 
 /// The forced half of one call case.
