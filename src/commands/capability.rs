@@ -3524,13 +3524,17 @@ mod tests {
             repetitions: 5,
             max_tokens: 128,
         };
+        let pins = probes::HashPins {
+            seed: 42,
+            max_turns: 8,
+        };
         assert_eq!(
-            probes::suite_prompt_hash(Suite::Throughput, &plan, 42),
+            probes::suite_prompt_hash(Suite::Throughput, &plan, pins),
             probes::prompt_set_hash(&plan, 42),
             "runs recorded before --suite existed stay comparable"
         );
-        let agentic = probes::suite_prompt_hash(Suite::Agentic, &plan, 42);
-        let all = probes::suite_prompt_hash(Suite::All, &plan, 42);
+        let agentic = probes::suite_prompt_hash(Suite::Agentic, &plan, pins);
+        let all = probes::suite_prompt_hash(Suite::All, &plan, pins);
         assert_ne!(agentic, all);
         assert_ne!(agentic, probes::prompt_set_hash(&plan, 42));
     }

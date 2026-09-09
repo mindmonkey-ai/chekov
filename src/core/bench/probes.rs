@@ -163,6 +163,54 @@ mod tests {
     }
 
     #[test]
+    fn a_loop_turn_carries_the_system_text_the_palette_and_the_transcript_in_order() {
+        let set = crate::core::bench::probeset::agentic_v0().expect("valid");
+        let case = &set.tool_loop[0];
+        let messages = vec![
+            serde_json::json!({"role": "user", "content": "do it"}),
+            serde_json::json!({"role": "assistant", "content": [{"type": "text", "text": "ok"}]}),
+        ];
+        let req = super::loop_probe(case, &set.loop_system, &messages);
+        let body: serde_json::Value = serde_json::from_slice(&req.body).expect("json");
+        assert_eq!(body["system"], set.loop_system);
+        assert_eq!(
+            body["tools"].as_array().map(Vec::len),
+            Some(case.tools.len())
+        );
+        assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(body["messages"][1]["role"], "assistant");
+        assert_eq!(body["max_tokens"], 512);
+    }
+
+    #[test]
+    fn a_different_turn_budget_changes_the_agentic_hash_and_not_the_throughput_one() {
+        use crate::core::bench::lifecycle::Suite;
+        use crate::core::bench::sweep::SweepPlan;
+        let plan = SweepPlan {
+            depths: vec![1024],
+            repetitions: 5,
+            max_tokens: 128,
+        };
+        let eight = super::HashPins {
+            seed: 42,
+            max_turns: 8,
+        };
+        let three = super::HashPins {
+            seed: 42,
+            max_turns: 3,
+        };
+        assert_ne!(
+            super::suite_prompt_hash(Suite::Agentic, &plan, eight),
+            super::suite_prompt_hash(Suite::Agentic, &plan, three)
+        );
+        assert_eq!(
+            super::suite_prompt_hash(Suite::Throughput, &plan, eight),
+            super::suite_prompt_hash(Suite::Throughput, &plan, three),
+            "a throughput-only run's hash never saw the budget"
+        );
+    }
+
+    #[test]
     fn the_prompt_set_hash_pins_the_task_set() {
         use crate::core::bench::sweep::SweepPlan;
         let plan = SweepPlan {
