@@ -163,13 +163,13 @@ pub struct CodebaseComparison {
 pub struct CompareOpts {
     pub significance_pct: f64,
     pub cross_runtime: bool,
-    /// Mask exactly the eight launch-flag fields — a flag experiment on one
+    /// Mask exactly the fifteen launch-flag fields — a flag experiment on one
     /// runtime, one engine, one model. Composes with `cross_runtime`.
     pub cross_flags: bool,
 }
 
 /// The fields `--cross-runtime` permits to differ, and no others.
-const CROSS_RUNTIME_ALLOWED: [&str; 14] = [
+const CROSS_RUNTIME_ALLOWED: [&str; 21] = [
     "runtime",
     "timing_source",
     "engine_build_commit",
@@ -183,13 +183,20 @@ const CROSS_RUNTIME_ALLOWED: [&str; 14] = [
     "flash_attn",
     "spec_type",
     "spec_draft_n_max",
+    "reasoning",
+    "reasoning_format",
+    "reasoning_effort",
+    "reasoning_budget",
+    "reasoning_budget_message",
+    "reasoning_preserve",
+    "chat_template_kwargs",
     "prompt_set_hash",
 ];
 
 /// The fields `--cross-flags` permits to differ: the launch flags a stamp
 /// reads off the argv, and nothing else — runtime, engine, ctx and the
 /// sampling fields still refuse.
-const CROSS_FLAGS_ALLOWED: [&str; 8] = [
+const CROSS_FLAGS_ALLOWED: [&str; 15] = [
     "kv_unified",
     "n_batch",
     "n_ubatch",
@@ -198,6 +205,13 @@ const CROSS_FLAGS_ALLOWED: [&str; 8] = [
     "flash_attn",
     "spec_type",
     "spec_draft_n_max",
+    "reasoning",
+    "reasoning_format",
+    "reasoning_effort",
+    "reasoning_budget",
+    "reasoning_budget_message",
+    "reasoning_preserve",
+    "chat_template_kwargs",
 ];
 
 pub fn compare_runs(
@@ -267,37 +281,23 @@ fn assert_same_environment(pair: &RunPair, opts: &CompareOpts) -> Result<(), Che
     stamp::mismatch_error(a, &b_env).map_or(Ok(()), Err)
 }
 
-/// Masks exactly the eight launch-flag fields onto `b_env` — what a flag
+/// Masks exactly the fifteen launch-flag fields onto `b_env` — what a flag
 /// experiment under one runtime and one engine is permitted to differ on.
 fn mask_cross_flags(b_env: &mut Stamp, a: &Stamp) {
-    b_env.kv_unified.clone_from(&a.kv_unified);
-    b_env.n_batch.clone_from(&a.n_batch);
-    b_env.n_ubatch.clone_from(&a.n_ubatch);
-    b_env.type_k.clone_from(&a.type_k);
-    b_env.type_v.clone_from(&a.type_v);
-    b_env.flash_attn.clone_from(&a.flash_attn);
-    b_env.spec_type.clone_from(&a.spec_type);
-    b_env.spec_draft_n_max.clone_from(&a.spec_draft_n_max);
+    b_env.set_flags(&a.flags());
 }
 
-/// Masks exactly the 14-entry `--cross-runtime` allow-list (spec §7) onto
+/// Masks exactly the 21-entry `--cross-runtime` allow-list (spec §7) onto
 /// `b_env` — the fields a foreign runtime is permitted to differ on, and no
-/// others. A foreign server's speculative flags are as unobservable as its
-/// KV flags, which is why the two ride along.
+/// others. A foreign server's speculative and reasoning flags are as
+/// unobservable as its KV flags, which is why all fifteen ride along.
 fn mask_cross_runtime(b_env: &mut Stamp, a: &Stamp) {
     b_env.runtime.clone_from(&a.runtime);
     b_env.timing_source.clone_from(&a.timing_source);
     b_env.engine_build_commit.clone_from(&a.engine_build_commit);
     b_env.ctx = a.ctx;
     b_env.n_parallel = a.n_parallel;
-    b_env.kv_unified.clone_from(&a.kv_unified);
-    b_env.n_batch.clone_from(&a.n_batch);
-    b_env.n_ubatch.clone_from(&a.n_ubatch);
-    b_env.type_k.clone_from(&a.type_k);
-    b_env.type_v.clone_from(&a.type_v);
-    b_env.flash_attn.clone_from(&a.flash_attn);
-    b_env.spec_type.clone_from(&a.spec_type);
-    b_env.spec_draft_n_max.clone_from(&a.spec_draft_n_max);
+    b_env.set_flags(&a.flags());
     b_env.prompt_set_hash.clone_from(&a.prompt_set_hash);
 }
 
@@ -1249,6 +1249,13 @@ mod tests {
             flash_attn: "on".into(),
             spec_type: "engine-default".into(),
             spec_draft_n_max: "engine-default".into(),
+            reasoning: "engine-default".into(),
+            reasoning_format: "engine-default".into(),
+            reasoning_effort: "engine-default".into(),
+            reasoning_budget: "engine-default".into(),
+            reasoning_budget_message: "engine-default".into(),
+            reasoning_preserve: "engine-default".into(),
+            chat_template_kwargs: "engine-default".into(),
             allow_exec: false,
             cargo_version: None,
             exec_target: "none".into(),
@@ -1293,6 +1300,8 @@ mod tests {
                     cache_n: 0,
                     draft_n: 0,
                     draft_n_accepted: 0,
+                    thinking_chars: 0,
+                    answer_chars: 0,
                 },
                 grade: None,
                 codebase: None,
@@ -1311,13 +1320,13 @@ mod tests {
     }
 
     /// Two llama.cpp runs that differ only on launch flags are the flag
-    /// experiment `--cross-flags` exists for: exactly the eight flag fields
+    /// experiment `--cross-flags` exists for: exactly the fifteen flag fields
     /// are masked, the banner names the ones that differ and says what is
     /// being measured, and everything else still refuses (spec-stage
     /// follow-up (b), 2026-09-03).
     #[test]
-    fn cross_flags_masks_exactly_the_eight_launch_flags_and_names_them() {
-        assert_eq!(super::CROSS_FLAGS_ALLOWED.len(), 8);
+    fn cross_flags_masks_exactly_the_fifteen_launch_flags_and_names_them() {
+        assert_eq!(super::CROSS_FLAGS_ALLOWED.len(), 15);
         let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
         let mut flagged = stamp("dda1b0d67", "r1/s1");
         flagged.n_batch = "4096".into();
@@ -1488,7 +1497,7 @@ mod tests {
 
     #[test]
     fn timing_source_is_allow_listed_only_under_cross_runtime() {
-        assert_eq!(super::CROSS_RUNTIME_ALLOWED.len(), 14);
+        assert_eq!(super::CROSS_RUNTIME_ALLOWED.len(), 21);
 
         let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
         let mut foreign = stamp("dda1b0d67", "r1/s1");
@@ -1552,6 +1561,38 @@ mod tests {
             banner.contains("spec_draft_n_max: \"engine-default\" vs \"1\""),
             "{banner}"
         );
+    }
+
+    /// A run allowed to think and one whose thinking was budgeted are
+    /// different environments: refused by name, masked under both
+    /// `--cross-flags` and `--cross-runtime`, and named in the flags banner
+    /// (reasoning-stamp design §3, §11).
+    #[test]
+    fn a_differing_reasoning_budget_is_refused_and_masked_by_both_masks() {
+        let a = run("m1", stamp("dda1b0d67", "r1/s1"), &[38.0, 40.0, 41.0, 40.5]);
+        let mut budgeted = stamp("dda1b0d67", "r1/s1");
+        budgeted.reasoning_budget = "0".into();
+        let b = run("m1", budgeted, &[39.0, 40.0, 41.0, 40.5]);
+        let err = compare_runs(&a, &b, &opts(5.0)).expect_err("a differing budget refuses");
+        assert!(
+            matches!(&err, ChekovError::BenchStampMismatch { field, .. } if field == "reasoning_budget"),
+            "{err}"
+        );
+        let flags = CompareOpts {
+            cross_flags: true,
+            ..opts(5.0)
+        };
+        compare_runs(&a, &b, &flags).expect("masked under --cross-flags");
+        let banner = cross_flags_banner(&a.head, &b.head);
+        assert!(
+            banner.contains("reasoning_budget: \"engine-default\" vs \"0\""),
+            "{banner}"
+        );
+        let runtime = CompareOpts {
+            cross_runtime: true,
+            ..opts(5.0)
+        };
+        compare_runs(&a, &b, &runtime).expect("masked under --cross-runtime");
     }
 
     #[test]
@@ -1639,6 +1680,8 @@ mod tests {
                 cache_n: 0,
                 draft_n: 0,
                 draft_n_accepted: 0,
+                thinking_chars: 0,
+                answer_chars: 0,
             },
             grade: None,
             codebase: None,
@@ -1707,6 +1750,8 @@ mod tests {
             cache_n: 0,
             draft_n: 0,
             draft_n_accepted: 0,
+            thinking_chars: 0,
+            answer_chars: 0,
         }
     }
 

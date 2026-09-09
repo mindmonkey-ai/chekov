@@ -1047,6 +1047,8 @@ mod tests {
             cache_n: 0,
             draft_n: 0,
             draft_n_accepted: 0,
+            thinking_chars: 0,
+            answer_chars: 0,
             decode_samples: vec![30.0, 31.0, 31.2],
             prefill_samples: vec![400.0, 402.0, 401.0],
             decode: crate::core::stats::summarize(&[30.0, 31.0, 31.2]),
@@ -1250,6 +1252,31 @@ mod tests {
         assert!(back.winner.is_none());
         assert!((back.guard_tolerance_pct - 15.0).abs() < f64::EPSILON);
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_trials_stamp_reads_the_reasoning_flags_off_its_argv() {
+        let argv: Vec<String> = ["--reasoning-effort", "low", "--reasoning-budget", "-1"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let flags = crate::core::bench::stamp::launch_flags(&argv);
+        let record = sample_record(argv, flags);
+        let json = serde_json::to_string(&record).expect("ser");
+        let back: super::Record = serde_json::from_str(&json).expect("a record round-trips");
+        let stamp = &back.trials[0].stamp;
+        assert_eq!(
+            (
+                stamp.reasoning_effort.as_str(),
+                stamp.reasoning_budget.as_str()
+            ),
+            ("low", "-1")
+        );
+        assert_eq!(stamp.reasoning_format, "engine-default");
+        assert!(
+            json.contains("\"reasoning_budget\":\"-1\""),
+            "the record on disk carries the field: {json}"
+        );
     }
 
     /// A record written before the guard knob existed was judged on the

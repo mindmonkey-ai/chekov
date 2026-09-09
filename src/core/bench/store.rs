@@ -100,6 +100,13 @@ pub struct Measure {
     pub draft_n: u64,
     #[serde(default)]
     pub draft_n_accepted: u64,
+    /// Characters of the reply spent thinking and answering, summed over the
+    /// crossings the row holds (design §4). Zero-both on rows written before
+    /// the fields and on untimed crossings — "unmeasured", never "no thinking".
+    #[serde(default)]
+    pub thinking_chars: u64,
+    #[serde(default)]
+    pub answer_chars: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,13 +434,31 @@ pub struct RunLog {
     pub rows: Vec<TaskRow>,
 }
 
+/// The flag-sourced stamp fields, re-derived from the argv the head stores.
+///
+/// A stamp written before a flag field existed carries the honest value one
+/// key above it, in `launch_args`; reading it there instead of defaulting
+/// keeps every stored run comparable with, and resumable under, runs made
+/// after the field. Idempotent for a fresh stamp — the writer computed the
+/// same fields from the same argv. A foreign server's flags are unobserved.
+fn hydrate_flags(head: &mut RunHead) {
+    use crate::core::bench::stamp::{RUNTIME_LLAMA_CPP, launch_flags, unmanaged_flags};
+    let flags = if head.stamp.runtime == RUNTIME_LLAMA_CPP {
+        launch_flags(&head.launch_args)
+    } else {
+        unmanaged_flags()
+    };
+    head.stamp.set_flags(&flags);
+}
+
 impl RunLog {
     pub fn load(run_dir: &Path) -> Result<Self, ChekovError> {
         let stamp_path = run_dir.join("stamp.json");
         let head_text =
             std::fs::read_to_string(&stamp_path).map_err(|e| invalid(&stamp_path, e))?;
-        let head: RunHead =
+        let mut head: RunHead =
             serde_json::from_str(&head_text).map_err(|e| invalid(&stamp_path, e))?;
+        hydrate_flags(&mut head);
         let results = run_dir.join("results.jsonl");
         let rows = if results.exists() {
             read_rows(&results)?
@@ -601,6 +626,7 @@ fn suite_summaries(log: &RunLog) -> String {
     out.extend(tool_emit_line(log, Transport::Streamed));
     out.extend(instruction_line(log, Transport::Streamed));
     out.extend(tool_loop_line(log, Transport::Streamed));
+    out.extend(thinking_line(log));
     out.push_str(&asymmetry_lines(log));
     out
 }
@@ -994,6 +1020,94 @@ fn speculative_line(log: &RunLog) -> String {
         "speculative: {}, draft length {}{acceptance}\n",
         stamp.spec_type, stamp.spec_draft_n_max
     )
+}
+
+/// The suites in the order the line names them.
+const THINKING_SUITES: [&str; 6] = [
+    "throughput",
+    "tool_emit",
+    "grammar_gap",
+    "instruction",
+    "tool_loop",
+    "codebase",
+];
+
+/// `thinking     share of reply characters spent thinking, median per case:
+/// tool_emit 12%, …` — printed only when some row measured any characters,
+/// footnoted with what the launch said about thinking (design §5, §11).
+fn thinking_line(log: &RunLog) -> Option<String> {
+    let cells: Vec<String> = THINKING_SUITES
+        .iter()
+        .filter_map(|suite| suite_share(log, suite).map(|pct| format!("{suite} {pct}%")))
+        .collect();
+    if cells.is_empty() {
+        return None;
+    }
+    let grammar_measured = suite_share(log, "grammar_gap").is_some();
+    Some(format!(
+        "thinking     share of reply characters spent thinking, median per row: {}{}{}\n",
+        cells.join(", "),
+        forced_arm_note(log, grammar_measured),
+        reasoning_launch_note(&log.head.stamp)
+    ))
+}
+
+/// The median whole-percent share over the suite's measured rows, `None`
+/// when no row of the suite measured any characters. Rounded per row the
+/// way `percent` rounds, then the upper-middle median, both in integers.
+fn suite_share(log: &RunLog, suite: &str) -> Option<u128> {
+    let mut shares: Vec<u128> = rows_of(log, suite)
+        .map(|row| (row.measure.thinking_chars, row.measure.answer_chars))
+        .filter(|(thinking, answer)| thinking + answer > 0)
+        .map(|(thinking, answer)| {
+            (u128::from(thinking) * 200 / u128::from(thinking + answer))
+                .div_ceil(2)
+                .min(100)
+        })
+        .collect();
+    if shares.is_empty() {
+        return None;
+    }
+    shares.sort_unstable();
+    Some(shares[shares.len() / 2])
+}
+
+/// The grammar arm ran under its own extraction, whatever the launch said —
+/// said only when that arm has a cell on the line to be read against.
+fn forced_arm_note(log: &RunLog, grammar_measured: bool) -> String {
+    if !grammar_measured {
+        return String::new();
+    }
+    log.head
+        .forced_reasoning_format
+        .as_deref()
+        .map_or_else(String::new, |mode| {
+            format!("; grammar_gap measured with reasoning extracted ({mode})")
+        })
+}
+
+/// What the launch said about thinking: nothing at all, or unobservable.
+fn reasoning_launch_note(stamp: &crate::core::bench::stamp::Stamp) -> &'static str {
+    use crate::core::bench::stamp::{FLAG_ENGINE_DEFAULT, RUNTIME_LLAMA_CPP};
+    if stamp.runtime != RUNTIME_LLAMA_CPP {
+        return " (reasoning flags unmanaged on this runtime)";
+    }
+    let flagless = [
+        &stamp.reasoning,
+        &stamp.reasoning_format,
+        &stamp.reasoning_effort,
+        &stamp.reasoning_budget,
+        &stamp.reasoning_budget_message,
+        &stamp.reasoning_preserve,
+        &stamp.chat_template_kwargs,
+    ]
+    .iter()
+    .all(|f| *f == FLAG_ENGINE_DEFAULT);
+    if flagless {
+        " (launched with no reasoning flag)"
+    } else {
+        ""
+    }
 }
 
 /// `  accept 63% (300 drafted)` for a row the server drafted on; nothing for
@@ -1775,7 +1889,7 @@ fn probe_line(row: &TaskRow) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{
         AGENTIC, CodebaseRow, DecidedBy, GradeRow, JudgeRow, LoopEnd, LoopRow, Measure, PAIRED,
@@ -1783,6 +1897,7 @@ mod tests {
     };
     use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
+    use crate::core::bench::thinkspan::ReplyChars;
     use crate::error::ChekovError;
 
     fn scratch(name: &str) -> PathBuf {
@@ -1812,6 +1927,13 @@ mod tests {
             flash_attn: "on".into(),
             spec_type: "engine-default".into(),
             spec_draft_n_max: "engine-default".into(),
+            reasoning: "engine-default".into(),
+            reasoning_format: "engine-default".into(),
+            reasoning_effort: "engine-default".into(),
+            reasoning_budget: "engine-default".into(),
+            reasoning_budget_message: "engine-default".into(),
+            reasoning_preserve: "engine-default".into(),
+            chat_template_kwargs: "engine-default".into(),
             allow_exec: false,
             cargo_version: None,
             exec_target: "none".into(),
@@ -1824,14 +1946,39 @@ mod tests {
         }
     }
 
+    /// A head whose argv says what its stamp says — the loader re-derives
+    /// the flag fields from the argv, so the two must agree.
     fn head() -> RunHead {
         RunHead {
             model: "ornith-1.5-35b-a3b".into(),
             machine_brand: Some("Apple M3 Ultra".into()),
-            launch_args: vec!["-m".into(), "model.gguf".into()],
+            launch_args: [
+                "-m",
+                "model.gguf",
+                "-ctk",
+                "q8_0",
+                "-ctv",
+                "q8_0",
+                "-fa",
+                "on",
+            ]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
             forced_reasoning_format: None,
             stamp: stamp(),
         }
+    }
+
+    /// `head()` launched with extra flags, the stamp read off the argv the
+    /// way the writer and the loader read it.
+    fn launched_with(flags: &[&str]) -> RunHead {
+        use crate::core::bench::stamp::launch_flags;
+        let mut head = head();
+        head.launch_args
+            .extend(flags.iter().map(|s| (*s).to_owned()));
+        head.stamp.set_flags(&launch_flags(&head.launch_args));
+        head
     }
 
     fn measure(decode: &[f64]) -> Measure {
@@ -1843,6 +1990,8 @@ mod tests {
             cache_n: 0,
             draft_n: 0,
             draft_n_accepted: 0,
+            thinking_chars: 0,
+            answer_chars: 0,
         }
     }
 
@@ -1851,6 +2000,17 @@ mod tests {
         let row = r#"{"schema":1,"run_id":"r","seq":0,"suite":"throughput","task_id":"depth-1024","measure":{"prompt_n":10,"decode_samples":[1.0,2.0],"prefill_samples":[1.0,2.0],"warmup_dropped":1}}"#;
         let parsed: super::TaskRow = serde_json::from_str(row).expect("old row loads");
         assert_eq!(parsed.measure.cache_n, 0);
+    }
+
+    #[test]
+    fn a_row_written_before_the_thinking_counts_loads_as_unmeasured() {
+        let line = r#"{"schema":1,"run_id":"r","seq":0,"suite":"tool_emit","task_id":"te-001",
+            "measure":{"prompt_n":4,"decode_samples":[1.0],"prefill_samples":[1.0],"warmup_dropped":0}}"#;
+        let row: TaskRow = serde_json::from_str(line).expect("an old row still loads");
+        assert_eq!(
+            (row.measure.thinking_chars, row.measure.answer_chars),
+            (0, 0)
+        );
     }
 
     /// Unconstrained 1/2 on the call cases, forced 2/2 (gap +50%);
@@ -2025,6 +2185,105 @@ mod tests {
         }
     }
 
+    /// A row of `suite` with the given counts, buffered, passing.
+    fn thought(suite: &str, id: &str, chars: ReplyChars) -> Task {
+        let mut task = graded(suite, id, GradeRow::pass());
+        task.measure.thinking_chars = chars.thinking;
+        task.measure.answer_chars = chars.answer;
+        task
+    }
+
+    const fn spent(thinking: u64, answer: u64) -> ReplyChars {
+        ReplyChars { thinking, answer }
+    }
+
+    #[test]
+    fn the_thinking_line_prints_per_suite_medians_and_skips_unmeasured_suites() {
+        let eval = scratch("thinking-line");
+        let mut writer = RunWriter::create(&eval, "r-think", &head()).expect("create");
+        for task in [
+            thought("tool_emit", "te-001", spent(10, 90)),
+            thought("tool_emit", "te-002", spent(50, 50)),
+            thought("tool_emit", "te-003", spent(100, 0)),
+            thought("instruction", "if-001", spent(0, 0)),
+            thought("tool_loop", "tl-001", spent(30, 70)),
+        ] {
+            writer.append(task).expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("thinking     share of reply characters spent thinking, median per row: tool_emit 50%, tool_loop 30% (launched with no reasoning flag)\n"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("instruction 0%"),
+            "a suite with no measured row is omitted: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_thinking_line_is_absent_when_nothing_measured_any_characters() {
+        let eval = scratch("thinking-none");
+        let writer = graded_run(&eval);
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            !rendered.contains("thinking     "),
+            "zero-both everywhere prints nothing: {rendered}"
+        );
+    }
+
+    /// One `thinking` line from a head, its rows appended.
+    fn thinking_rendered(name: &str, head: &RunHead, rows: Vec<Task>) -> String {
+        let eval = scratch(name);
+        let mut writer = RunWriter::create(&eval, "r-think", head).expect("create");
+        for task in rows {
+            writer.append(task).expect("append");
+        }
+        render_run(&RunLog::load(writer.dir()).expect("load"))
+    }
+
+    #[test]
+    fn the_thinking_line_names_the_forced_arm_only_when_grammar_gap_has_a_cell() {
+        let mut forced = launched_with(&["--reasoning-format", "none"]);
+        forced.forced_reasoning_format = Some("deepseek".into());
+        let rendered = thinking_rendered(
+            "thinking-forced",
+            &forced,
+            vec![thought("grammar_gap", "gg-te-001", spent(20, 80))],
+        );
+        assert!(
+            rendered.contains("thinking     share of reply characters spent thinking, median per row: grammar_gap 20%; grammar_gap measured with reasoning extracted (deepseek)\n"),
+            "a run launched with a reasoning flag has no default footnote: {rendered}"
+        );
+        let rendered = thinking_rendered(
+            "thinking-forced-unmeasured",
+            &forced,
+            vec![
+                thought("tool_emit", "te-001", spent(1, 3)),
+                thought("grammar_gap", "gg-te-001", spent(0, 0)),
+            ],
+        );
+        assert!(
+            rendered.contains("median per row: tool_emit 25%\n"),
+            "no grammar_gap cell, no note about it: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_thinking_line_names_a_foreign_runtime_as_unmanaged() {
+        let mut foreign = head();
+        foreign.stamp.runtime = "mlx-lm 0.31.3".into();
+        let rendered = thinking_rendered(
+            "thinking-foreign",
+            &foreign,
+            vec![thought("tool_emit", "te-001", spent(1, 3))],
+        );
+        assert!(
+            rendered.contains("tool_emit 25% (reasoning flags unmanaged on this runtime)\n"),
+            "{rendered}"
+        );
+    }
+
     fn streamed(suite: &str, id: &str, grade: GradeRow) -> Task {
         Task {
             transport: Transport::Streamed,
@@ -2165,6 +2424,79 @@ mod tests {
             "measure":{"prompt_n":4,"decode_samples":[1.0],"prefill_samples":[1.0],"warmup_dropped":0}}"#;
         let row: TaskRow = serde_json::from_str(line).expect("an old row still loads");
         assert_eq!(row.transport, Transport::Buffered);
+    }
+
+    /// A run dir whose `stamp.json` predates the seven reasoning fields: the
+    /// argv says `--reasoning-format none -b 2048`, the stamp carries neither.
+    fn pre_reasoning_run(eval: &Path) -> PathBuf {
+        let mut old = head();
+        old.launch_args = [
+            "-m",
+            "model.gguf",
+            "--reasoning-format",
+            "none",
+            "-b",
+            "2048",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let dir = eval.join("old-run");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let mut json = serde_json::to_value(&old).expect("ser");
+        let stamp = json["stamp"].as_object_mut().expect("stamp object");
+        for field in [
+            "reasoning",
+            "reasoning_format",
+            "reasoning_effort",
+            "reasoning_budget",
+            "reasoning_budget_message",
+            "reasoning_preserve",
+            "chat_template_kwargs",
+        ] {
+            stamp.remove(field);
+        }
+        stamp["n_batch"] = serde_json::Value::String("engine-default".into());
+        std::fs::write(dir.join("stamp.json"), json.to_string()).expect("write");
+        dir
+    }
+
+    /// A run dir stamped by a foreign server with no argv at all.
+    fn foreign_run(eval: &Path) -> PathBuf {
+        let mut foreign = head();
+        foreign.launch_args = Vec::new();
+        foreign.stamp.runtime = "mlx-lm 0.31.3".into();
+        let dir = eval.join("foreign-run");
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(
+            dir.join("stamp.json"),
+            serde_json::to_string(&foreign).expect("ser"),
+        )
+        .expect("write");
+        dir
+    }
+
+    #[test]
+    fn a_stored_run_hydrates_its_flags_from_its_argv_and_a_foreign_one_reads_unmanaged() {
+        use crate::core::bench::stamp::{FLAG_UNMANAGED, Stamp};
+        let eval = scratch("hydrate-flags");
+        let loaded = RunLog::load(&pre_reasoning_run(&eval)).expect("loads");
+        assert_eq!(
+            loaded.head.stamp.reasoning_format, "none",
+            "read off the stored argv"
+        );
+        assert_eq!(
+            loaded.head.stamp.n_batch, "2048",
+            "every flag field is re-derived, not only the new ones"
+        );
+        assert_eq!(loaded.head.stamp.reasoning_effort, "engine-default");
+        let loaded = RunLog::load(&foreign_run(&eval)).expect("loads");
+        assert_eq!(loaded.head.stamp.reasoning, FLAG_UNMANAGED);
+        assert_eq!(
+            loaded.head.stamp.spec_type, FLAG_UNMANAGED,
+            "the two speculative fields hydrate the same way"
+        );
+        let _: &Stamp = &loaded.head.stamp;
     }
 
     /// A real `codebase` row from before slice C — no `judge` key at all.
@@ -3068,9 +3400,7 @@ mod tests {
     #[test]
     fn draft_acceptance_is_printed_per_depth_and_summed_on_the_header() {
         let eval = scratch("acceptance");
-        let mut drafted = head();
-        drafted.stamp.spec_type = "draft-mtp".into();
-        drafted.stamp.spec_draft_n_max = "1".into();
+        let drafted = launched_with(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]);
         let mut m = measure(&[19.0, 21.0, 22.0, 22.4]);
         m.draft_n = 300;
         m.draft_n_accepted = 190;
@@ -3095,17 +3425,14 @@ mod tests {
         let plain = rendered_with(&eval, "r-plain", &head());
         assert!(!plain.contains("speculative:"), "{plain}");
 
-        let mut drafted = head();
-        drafted.stamp.spec_type = "draft-mtp".into();
-        drafted.stamp.spec_draft_n_max = "1".into();
+        let drafted = launched_with(&["--spec-type", "draft-mtp", "--spec-draft-n-max", "1"]);
         let with_head = rendered_with(&eval, "r-draft", &drafted);
         assert!(
             with_head.contains("speculative: draft-mtp, draft length 1\n"),
             "{with_head}"
         );
 
-        let mut default_len = head();
-        default_len.stamp.spec_type = "draft-mtp".into();
+        let default_len = launched_with(&["--spec-type", "draft-mtp"]);
         let engine_len = rendered_with(&eval, "r-draft-default", &default_len);
         assert!(
             engine_len.contains("speculative: draft-mtp, draft length engine-default\n"),

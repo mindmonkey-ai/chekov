@@ -323,6 +323,8 @@ impl<'a> LoopState<'a> {
         self.measure.cache_n = self.measure.cache_n.max(t.cache_n);
         self.measure.draft_n += t.draft_n;
         self.measure.draft_n_accepted += t.draft_n_accepted;
+        self.measure.thinking_chars += t.thinking_chars;
+        self.measure.answer_chars += t.answer_chars;
     }
 
     fn outcome(self, end: LoopEnd, turns: u32) -> LoopOutcome {
@@ -655,6 +657,8 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
             cache_n: prompt_n / 2,
             draft_n: 4,
             draft_n_accepted: 3,
+            thinking_chars: 5,
+            answer_chars: 15,
         }
     }
 
@@ -727,6 +731,31 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
         assert_eq!(outcome.measure.prompt_n, 300, "the deepest turn's prompt");
         assert_eq!(outcome.measure.cache_n, 150, "the max seen");
         assert_eq!(outcome.measure.draft_n_accepted, 9, "drafts summed");
+    }
+
+    #[test]
+    fn the_loop_sums_thinking_and_answer_characters_over_its_turns() {
+        let set = unchanged_set();
+        let script = Scripted::new(vec![
+            reply(
+                vec![use_block(
+                    "t1",
+                    "read_file",
+                    json!({"path": "src/legacy.rs"}),
+                )],
+                "tool_use",
+            ),
+            reply(
+                vec![text_block("src/legacy.rs does not exist.")],
+                "end_turn",
+            ),
+        ]);
+        let outcome = drive(&mut script.door(), &run(&set, 8)).expect("drove");
+        assert_eq!(
+            (outcome.measure.thinking_chars, outcome.measure.answer_chars),
+            (10, 30),
+            "5 and 15 per timed turn, two turns"
+        );
     }
 
     #[test]

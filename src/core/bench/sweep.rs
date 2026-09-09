@@ -37,6 +37,10 @@ pub struct DepthResult {
     /// clock). Both zero when the server drafted nothing.
     pub draft_n: u64,
     pub draft_n_accepted: u64,
+    /// Characters of the replies spent thinking and answering, summed over
+    /// the repetitions, warmup included, like the drafts.
+    pub thinking_chars: u64,
+    pub answer_chars: u64,
     pub decode_samples: Vec<f64>,
     pub prefill_samples: Vec<f64>,
     pub decode: Option<Summary>,
@@ -65,6 +69,7 @@ pub fn measure_depth(
     let mut prompt_n = 0_u64;
     let mut cache_n = 0_u64;
     let (mut draft_n, mut draft_n_accepted) = (0_u64, 0_u64);
+    let (mut thinking_chars, mut answer_chars) = (0_u64, 0_u64);
     for _ in 0..plan.repetitions {
         let artifact = exec(&probes::throughput_probe(depth, plan.max_tokens))?;
         decode_samples.push(artifact.timings.predicted_per_second);
@@ -73,6 +78,8 @@ pub fn measure_depth(
         cache_n = cache_n.max(artifact.timings.cache_n);
         draft_n += artifact.timings.draft_n;
         draft_n_accepted += artifact.timings.draft_n_accepted;
+        thinking_chars += artifact.timings.thinking_chars;
+        answer_chars += artifact.timings.answer_chars;
     }
     Ok(DepthResult {
         depth,
@@ -80,6 +87,8 @@ pub fn measure_depth(
         cache_n,
         draft_n,
         draft_n_accepted,
+        thinking_chars,
+        answer_chars,
         decode: stats::summarize(&decode_samples),
         prefill: stats::summarize(&prefill_samples),
         decode_samples,
@@ -98,8 +107,9 @@ pub fn curve_note(distinct_depths: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SweepPlan, curve_note, run_sweep};
+    use super::{SweepPlan, curve_note, measure_depth, run_sweep};
     use crate::core::bench::runner::{ProbeArtifact, Timings};
+    use crate::core::proxy::http::HttpRequest;
     use crate::error::ChekovError;
 
     fn artifact(decode_tps: f64) -> ProbeArtifact {
@@ -113,6 +123,8 @@ mod tests {
                 cache_n: 64,
                 draft_n: 30,
                 draft_n_accepted: 19,
+                thinking_chars: 7,
+                answer_chars: 11,
             },
         }
     }
@@ -147,6 +159,21 @@ mod tests {
             (results[0].draft_n, results[0].draft_n_accepted),
             (90, 57),
             "draft counts are summed over the repetitions, warmup included"
+        );
+    }
+
+    #[test]
+    fn a_depth_sums_the_thinking_and_answer_characters_over_its_repetitions() {
+        let plan = SweepPlan {
+            depths: vec![1024],
+            repetitions: 3,
+            max_tokens: 64,
+        };
+        let mut exec = |_: &HttpRequest| Ok(artifact(20.0));
+        let result = measure_depth(&plan, 1024, &mut exec).expect("measured");
+        assert_eq!(
+            (result.thinking_chars, result.answer_chars),
+            (3 * 7, 3 * 11)
         );
     }
 

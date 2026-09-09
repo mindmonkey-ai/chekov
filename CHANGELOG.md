@@ -7,6 +7,60 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- The bench stamp reads the seven reasoning-side launch flags off the argv
+  (`--reasoning`, `--reasoning-format`, `--reasoning-effort`,
+  `--reasoning-budget`, `--reasoning-budget-message`,
+  `--reasoning-preserve`, `--chat-template-kwargs`), so two runs that differ
+  in how much the model was allowed to think refuse to compare by name;
+  `--cross-flags` masks fifteen launch-flag fields and `--cross-runtime`
+  twenty-one, and both banners name the ones that differ. Every stored run
+  under `eval/` keeps comparing and resuming: the loader re-derives every
+  flag-sourced field from the `launch_args` the head already stores (and
+  reads them `unmanaged` on a foreign runtime), so a run launched with
+  `--reasoning-format none` before this change reads `none` now, not
+  "engine-default" — and the two speculative fields on the stored foreign
+  runs, which loaded as engine-default while a fresh foreign run stamped
+  `unmanaged`, read `unmanaged` too. `--reasoning-budget -1` — llama-server's
+  own spelling of unrestricted — reads as `-1`, not as a switch. Tune
+  records carry the same fifteen fields per trial.
+- Every probe row records how many characters of the upstream reply were
+  thinking and how many were answer (`thinking_chars`, `answer_chars` on
+  the measure; loops and depths sum them), counted where the thinking still
+  exists — the `OpenAI` body before translation — on the buffered door and
+  on both streamed clocks. `reasoning_content` (or the `reasoning` spelling
+  other servers use) counts as thinking; so does every inline span of the
+  six families llama.cpp's parser leaves in `content` under
+  `--reasoning-format none` (`<think>` closed by `</think>`, `<tool_call>`
+  or DeepSeek's `<｜DSML｜tool_calls>` / `<｜DSML｜function_calls>`;
+  `[THINK]…[/THINK]`; `<|channel|>analysis<|message|>…<|end|>`;
+  `<|channel>thought…<channel|>`; `<mm:think>…</mm:think>`;
+  `<|START_THINKING|>…<|END_THINKING|>`); a span that never closes counts to
+  the end (the reply cut by `max_tokens`, or the one that went straight to a
+  tool call); tool-call arguments count as answer. Known gap, named because
+  it cannot be closed: Kimi K3's parser consumes its `<|open|>think<|sep|>`
+  markers even under `none`, so its thinking reaches chekov unmarked and
+  reads as answer. The report prints one line — `thinking     share of reply
+  characters spent thinking, median per row: tool_emit 12%, …` — over the
+  suites with a measured row (a llama.cpp case is two rows, one per door),
+  footnoted `(launched with no reasoning flag)`, `(reasoning flags unmanaged
+  on this runtime)` or `; grammar_gap measured with reasoning extracted
+  (deepseek)` — the last only when `grammar_gap` has a cell on the line. Characters, not
+  tokens: llama-server reports no reasoning token count anywhere, and a tool
+  reply's JSON tokenizes differently from prose. Time-to-first-visible-text
+  stays owed (IDEAS.md): the mark belongs in a streamed-read loop this repo
+  keeps closed to agents. Live check on this desk (run
+  `20260909T205926Z-ornith-1.5-35b-a3b`, the daily driver reused,
+  `--reasoning-format none`, `--suite agentic`): every one of the 63 rows
+  measured, and the line read `tool_emit 77%, grammar_gap 61%, instruction
+  90%, tool_loop 42%; grammar_gap measured with reasoning extracted
+  (deepseek)` — the unconstrained suites are the inline-span path proving
+  itself, identical door for door, and the driver spends nine-tenths of an
+  instruction reply thinking. Hydration proven the same evening: the
+  pre-change tool_loop run (`20260909T181700Z`) compares clean against this
+  one with no reasoning field named, the 2026-09-03 flag pair still refuses
+  on `spec_type` and passes under `--cross-flags` naming only the two draft
+  fields, and a stored mlx pair refuses on `prompt_set_hash`, not on a
+  reasoning field.
 - `capability bench --suite agentic` gains `tool_loop` (spec §7.2 row 4):
   six canned read→edit→verify cases, each driven to a terminal state through
   an in-process tool environment — `read_file`, `list_dir`, `grep`, an

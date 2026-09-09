@@ -48,6 +48,8 @@ pub(crate) const fn empty_measure() -> store::Measure {
         cache_n: 0,
         draft_n: 0,
         draft_n_accepted: 0,
+        thinking_chars: 0,
+        answer_chars: 0,
     }
 }
 
@@ -60,6 +62,8 @@ pub(crate) fn probe_measure(timings: &runner::Timings) -> store::Measure {
         cache_n: timings.cache_n,
         draft_n: timings.draft_n,
         draft_n_accepted: timings.draft_n_accepted,
+        thinking_chars: timings.thinking_chars,
+        answer_chars: timings.answer_chars,
     }
 }
 
@@ -510,39 +514,55 @@ mod tests {
         dir
     }
 
+    /// A llama.cpp head whose argv says what its stamp says, so loading it
+    /// hydrates to the same flags.
     fn run_head() -> RunHead {
         RunHead {
             model: "local-model".into(),
             machine_brand: None,
-            launch_args: vec![],
+            launch_args: ["-ctk", "q8_0", "-ctv", "q8_0", "-fa", "on"]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
             forced_reasoning_format: None,
-            stamp: crate::core::bench::stamp::Stamp {
-                machine_id: "8d41f0c2a917".into(),
-                runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
-                timing_source: crate::core::bench::stamp::TIMING_SERVER.to_owned(),
-                engine_build_commit: "dda1b0d67".into(),
-                weights_revision: "fbbaed45c2f0/model.gguf".into(),
-                quant: "Q8_0".into(),
-                ctx: 262_144,
-                n_parallel: 1,
-                kv_unified: "engine-default".into(),
-                n_batch: "engine-default".into(),
-                n_ubatch: "engine-default".into(),
-                type_k: "q8_0".into(),
-                type_v: "q8_0".into(),
-                flash_attn: "on".into(),
-                spec_type: "engine-default".into(),
-                spec_draft_n_max: "engine-default".into(),
-                allow_exec: false,
-                cargo_version: None,
-                exec_target: "none".into(),
-                seed: 42,
-                temperature_milli: 0,
-                chekov_version: "0.1.0".into(),
-                prompt_set_hash: "codebase-only".into(),
-                corpus_id: "codebase:4818813deeaa:abcdef123456".into(),
-                judge: None,
-            },
+            stamp: run_stamp(),
+        }
+    }
+
+    fn run_stamp() -> crate::core::bench::stamp::Stamp {
+        crate::core::bench::stamp::Stamp {
+            machine_id: "8d41f0c2a917".into(),
+            runtime: crate::core::bench::stamp::RUNTIME_LLAMA_CPP.to_owned(),
+            timing_source: crate::core::bench::stamp::TIMING_SERVER.to_owned(),
+            engine_build_commit: "dda1b0d67".into(),
+            weights_revision: "fbbaed45c2f0/model.gguf".into(),
+            quant: "Q8_0".into(),
+            ctx: 262_144,
+            n_parallel: 1,
+            kv_unified: "engine-default".into(),
+            n_batch: "engine-default".into(),
+            n_ubatch: "engine-default".into(),
+            type_k: "q8_0".into(),
+            type_v: "q8_0".into(),
+            flash_attn: "on".into(),
+            spec_type: "engine-default".into(),
+            spec_draft_n_max: "engine-default".into(),
+            reasoning: "engine-default".into(),
+            reasoning_format: "engine-default".into(),
+            reasoning_effort: "engine-default".into(),
+            reasoning_budget: "engine-default".into(),
+            reasoning_budget_message: "engine-default".into(),
+            reasoning_preserve: "engine-default".into(),
+            chat_template_kwargs: "engine-default".into(),
+            allow_exec: false,
+            cargo_version: None,
+            exec_target: "none".into(),
+            seed: 42,
+            temperature_milli: 0,
+            chekov_version: "0.1.0".into(),
+            prompt_set_hash: "codebase-only".into(),
+            corpus_id: "codebase:4818813deeaa:abcdef123456".into(),
+            judge: None,
         }
     }
 
