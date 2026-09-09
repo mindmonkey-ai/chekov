@@ -1903,6 +1903,17 @@ mod tests {
         assert_eq!(parsed.measure.cache_n, 0);
     }
 
+    #[test]
+    fn a_row_written_before_the_thinking_counts_loads_as_unmeasured() {
+        let line = r#"{"schema":1,"run_id":"r","seq":0,"suite":"tool_emit","task_id":"te-001",
+            "measure":{"prompt_n":4,"decode_samples":[1.0],"prefill_samples":[1.0],"warmup_dropped":0}}"#;
+        let row: TaskRow = serde_json::from_str(line).expect("an old row still loads");
+        assert_eq!(
+            (row.measure.thinking_chars, row.measure.answer_chars),
+            (0, 0)
+        );
+    }
+
     /// Unconstrained 1/2 on the call cases, forced 2/2 (gap +50%);
     /// instruction strict 1/2, loose 2/2 (chattiness gap 1).
     fn graded_run(eval: &std::path::Path) -> RunWriter {

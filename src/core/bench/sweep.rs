@@ -98,8 +98,9 @@ pub fn curve_note(distinct_depths: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SweepPlan, curve_note, run_sweep};
+    use super::{SweepPlan, curve_note, measure_depth, run_sweep};
     use crate::core::bench::runner::{ProbeArtifact, Timings};
+    use crate::core::proxy::http::HttpRequest;
     use crate::error::ChekovError;
 
     fn artifact(decode_tps: f64) -> ProbeArtifact {
@@ -149,6 +150,21 @@ mod tests {
             (results[0].draft_n, results[0].draft_n_accepted),
             (90, 57),
             "draft counts are summed over the repetitions, warmup included"
+        );
+    }
+
+    #[test]
+    fn a_depth_sums_the_thinking_and_answer_characters_over_its_repetitions() {
+        let plan = SweepPlan {
+            depths: vec![1024],
+            repetitions: 3,
+            max_tokens: 64,
+        };
+        let mut exec = |_: &HttpRequest| Ok(artifact(20.0));
+        let result = measure_depth(&plan, 1024, &mut exec).expect("measured");
+        assert_eq!(
+            (result.thinking_chars, result.answer_chars),
+            (3 * 7, 3 * 11)
         );
     }
 

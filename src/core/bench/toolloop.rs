@@ -732,6 +732,31 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
     }
 
     #[test]
+    fn the_loop_sums_thinking_and_answer_characters_over_its_turns() {
+        let set = unchanged_set();
+        let script = Scripted::new(vec![
+            reply(
+                vec![use_block(
+                    "t1",
+                    "read_file",
+                    json!({"path": "src/legacy.rs"}),
+                )],
+                "tool_use",
+            ),
+            reply(
+                vec![text_block("src/legacy.rs does not exist.")],
+                "end_turn",
+            ),
+        ]);
+        let outcome = drive(&mut script.door(), &run(&set, 8)).expect("drove");
+        assert_eq!(
+            (outcome.measure.thinking_chars, outcome.measure.answer_chars),
+            (10, 30),
+            "5 and 15 per timed turn, two turns"
+        );
+    }
+
+    #[test]
     fn the_transcript_carries_the_reply_verbatim_and_one_tool_result_per_call() {
         let set = edited_set();
         let script = Scripted::new(vec![
