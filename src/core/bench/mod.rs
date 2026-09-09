@@ -17,4 +17,5 @@ pub mod speeds;
 pub mod stamp;
 pub mod store;
 pub mod sweep;
+pub mod thinkspan;
 pub mod toolloop;
