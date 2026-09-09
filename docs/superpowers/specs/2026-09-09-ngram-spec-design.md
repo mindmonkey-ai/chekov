@@ -1,10 +1,10 @@
 # tune's spec stage trials the engine's n-gram drafters — design
 
-Date: 2026-09-09. Status: **DRAFT — awaiting approval.** Implements the
-IDEAS.md entry "tune's spec stage skips every model without an MTP head —
-the engine has five drafter-free n-gram types" (2026-09-06, approved
-2026-09-09). Touches ~9 files; the ">5 files — ask first" rule rides on the
-same approval.
+Date: 2026-09-09. Status: approved in chat 2026-09-09; this document is the
+binding spec. Implements the IDEAS.md entry "tune's spec stage skips every
+model without an MTP head — the engine has five drafter-free n-gram types"
+(2026-09-06, approved 2026-09-09). Touches ~9 files; the ">5 files — ask
+first" rule was satisfied by the same approval.
 
 ## 1. Purpose, and the evidence
 

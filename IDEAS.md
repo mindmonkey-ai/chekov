@@ -774,8 +774,8 @@ codebase check is the confirming measurement; and chaining
 (`draft-mtp,ngram-mod`) is a second candidate grammar, not this one. Not a
 quality question: every draft is verified by the target, so greedy output
 is unchanged.
-Design drafted 2026-09-09 (`docs/superpowers/specs/2026-09-09-ngram-spec-design.md`,
-awaiting approval): `ngram:<type>` as a third `spec_drafts` spelling, the
+Design APPROVED 2026-09-09 (`docs/superpowers/specs/2026-09-09-ngram-spec-design.md`,
+binding): `ngram:<type>` as a third `spec_drafts` spelling, the
 three skips narrowed (head gate on `mtp:` only, engine gate on the type name,
 foreign gate on draft-file types, chains and a static cache), the acceptance
 clause on every speculative stage line, and a closing caution that the
