@@ -6,11 +6,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::core::bench::grade::ToolUse;
+use crate::core::bench::codebase::run::empty_measure;
+use crate::core::bench::grade::{self, Grade, ToolUse};
+use crate::core::bench::probes;
 use crate::core::bench::probeset::{Goal, LoopCase, ToolDef, canned_text};
-use crate::core::bench::store::LoopEnd;
+use crate::core::bench::runner::Timings;
+use crate::core::bench::store::{LoopEnd, Measure};
+use crate::core::proxy::http::HttpRequest;
+use crate::error::ChekovError;
 
 /// The canned repository for one case, and the goal it is judged against.
 ///
@@ -220,6 +225,150 @@ fn dir_prefix(path: &str) -> String {
         String::new()
     } else {
         format!("{trimmed}/")
+    }
+}
+
+/// One door's answer to one turn.
+pub struct Turn {
+    pub body: String,
+    pub timings: Option<Timings>,
+}
+
+/// The door a loop crosses: the bench's own `agentic_cross`, or a scripted
+/// fake in tests. The driver never learns which transport it rode.
+pub type Door<'a> = dyn FnMut(&HttpRequest) -> Result<Turn, ChekovError> + 'a;
+
+/// One case's run: the case, the set's system text, and the turn budget.
+pub struct LoopRun<'a> {
+    pub case: &'a LoopCase,
+    pub system: &'a str,
+    pub max_turns: u32,
+}
+
+/// How a loop ended and what it cost.
+#[derive(Debug, Clone)]
+pub struct LoopOutcome {
+    pub end: LoopEnd,
+    pub turns: u32,
+    pub tool_calls: u32,
+    pub measure: Measure,
+}
+
+/// Drive one case to a terminal state (tool-loop design §5): a reply with no
+/// tool call ends the turn and is judged; a reply with calls is answered and
+/// the loop goes on; the budget ends it as exhausted.
+pub fn drive(door: &mut Door, run: &LoopRun) -> Result<LoopOutcome, ChekovError> {
+    let mut state = LoopState::new(run.case);
+    for turn in 1..=run.max_turns {
+        let req = probes::loop_probe(run.case, run.system, &state.messages);
+        let reply = door(&req)?;
+        state.fold(reply.timings.as_ref());
+        let parsed = Reply::parse(&reply.body)?;
+        if let Some(end) = state.step(&parsed) {
+            return Ok(state.outcome(end, turn));
+        }
+    }
+    Ok(state.outcome(LoopEnd::TurnsExhausted, run.max_turns))
+}
+
+struct LoopState<'a> {
+    env: ToolEnv<'a>,
+    messages: Vec<Value>,
+    tool_calls: u32,
+    measure: Measure,
+}
+
+impl<'a> LoopState<'a> {
+    fn new(case: &'a LoopCase) -> Self {
+        Self {
+            env: ToolEnv::new(case),
+            messages: vec![json!({"role": "user", "content": case.prompt})],
+            tool_calls: 0,
+            measure: empty_measure(),
+        }
+    }
+
+    /// One reply applied. `None` means the loop goes on.
+    fn step(&mut self, reply: &Reply) -> Option<LoopEnd> {
+        if reply.tool_uses.is_empty() {
+            return Some(if reply.stop_reason.as_deref() == Some("max_tokens") {
+                LoopEnd::Truncated
+            } else {
+                self.env.finish(&reply.text)
+            });
+        }
+        self.messages
+            .push(json!({"role": "assistant", "content": reply.content}));
+        let mut results = Vec::new();
+        for call in &reply.tool_uses {
+            self.tool_calls += 1;
+            match self.env.answer(call) {
+                Ok(text) => results
+                    .push(json!({"type": "tool_result", "tool_use_id": call.id, "content": text})),
+                Err(end) => return Some(end),
+            }
+        }
+        self.messages
+            .push(json!({"role": "user", "content": results}));
+        None
+    }
+
+    /// One sample per timed turn; the deepest prompt; the largest cache hit;
+    /// drafts summed. An untimed door adds nothing.
+    fn fold(&mut self, timings: Option<&Timings>) {
+        let Some(t) = timings else { return };
+        self.measure.decode_samples.push(t.predicted_per_second);
+        self.measure.prefill_samples.push(t.prompt_per_second);
+        self.measure.prompt_n = t.prompt_n;
+        self.measure.cache_n = self.measure.cache_n.max(t.cache_n);
+        self.measure.draft_n += t.draft_n;
+        self.measure.draft_n_accepted += t.draft_n_accepted;
+    }
+
+    fn outcome(self, end: LoopEnd, turns: u32) -> LoopOutcome {
+        LoopOutcome {
+            end,
+            turns,
+            tool_calls: self.tool_calls,
+            measure: self.measure,
+        }
+    }
+}
+
+/// A reply as the loop reads it.
+struct Reply {
+    content: Vec<Value>,
+    text: String,
+    stop_reason: Option<String>,
+    tool_uses: Vec<ToolUse>,
+}
+
+impl Reply {
+    /// A body the translator could not produce is chekov's fault, never the
+    /// model's: it fails the crossing rather than grading.
+    fn parse(body: &str) -> Result<Self, ChekovError> {
+        let unreadable = |g: Grade| ChekovError::ProxyBadRequest {
+            reason: format!("loop reply unreadable: {}", reason_of(&g)),
+        };
+        let content = grade::content_blocks(body).map_err(unreadable)?;
+        let text = grade::artifact_text(body).map_err(unreadable)?;
+        let tool_uses = grade::tool_use_blocks(body).map_err(unreadable)?;
+        let stop_reason = serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|v| v.get("stop_reason")?.as_str().map(str::to_owned));
+        Ok(Self {
+            content,
+            text,
+            stop_reason,
+            tool_uses,
+        })
+    }
+}
+
+fn reason_of(grade: &Grade) -> String {
+    match grade {
+        Grade::Pass => String::new(),
+        Grade::Fail { reason } => reason.clone(),
     }
 }
 
@@ -478,16 +627,19 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
     }
 
     fn reply(content: Vec<Value>, stop: &str) -> String {
-        json!({
+        let mut body = json!({
             "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
-            "content": content, "stop_reason": stop, "stop_sequence": null,
+            "stop_reason": stop, "stop_sequence": null,
             "usage": {"input_tokens": 1, "output_tokens": 1}
-        })
-        .to_string()
+        });
+        body["content"] = Value::Array(content);
+        body.to_string()
     }
 
     fn use_block(id: &str, name: &str, input: Value) -> Value {
-        json!({"type": "tool_use", "id": id, "name": name, "input": input})
+        let mut block = json!({"type": "tool_use", "id": id, "name": name});
+        block["input"] = input;
+        block
     }
 
     fn text_block(text: &str) -> Value {
@@ -535,7 +687,7 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
         }
     }
 
-    fn run<'a>(set: &'a ProbeSet, max_turns: u32) -> LoopRun<'a> {
+    fn run(set: &ProbeSet, max_turns: u32) -> LoopRun<'_> {
         LoopRun {
             case: case(set),
             system: &set.loop_system,
@@ -544,7 +696,7 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
     }
 
     #[test]
-    fn read_then_edit_then_stop_reaches_the_goal_and_the_transcript_echoes_the_ids() {
+    fn read_then_edit_then_stop_reaches_the_goal_with_one_sample_per_turn() {
         let set = edited_set();
         let script = Scripted::new(vec![
             reply(
@@ -575,8 +727,32 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
         assert_eq!(outcome.measure.prompt_n, 300, "the deepest turn's prompt");
         assert_eq!(outcome.measure.cache_n, 150, "the max seen");
         assert_eq!(outcome.measure.draft_n_accepted, 9, "drafts summed");
-        let sent = script.sent.borrow();
-        let third = &sent[2]["messages"];
+    }
+
+    #[test]
+    fn the_transcript_carries_the_reply_verbatim_and_one_tool_result_per_call() {
+        let set = edited_set();
+        let script = Scripted::new(vec![
+            reply(
+                vec![
+                    text_block("looking"),
+                    use_block("t1", "read_file", json!({"path": "src/a.rs"})),
+                ],
+                "tool_use",
+            ),
+            reply(
+                vec![use_block(
+                    "t2",
+                    "edit_file",
+                    json!({"path": "src/a.rs", "old": "A: u32 = 3", "new": "A: u32 = 5"}),
+                )],
+                "tool_use",
+            ),
+            reply(vec![text_block("done")], "end_turn"),
+        ]);
+        drive(&mut script.door(), &run(&set, 8)).expect("drove");
+        let requests = script.sent.borrow();
+        let third = &requests[2]["messages"];
         assert_eq!(third[1]["role"], "assistant");
         assert_eq!(
             third[1]["content"][1]["id"], "t1",
