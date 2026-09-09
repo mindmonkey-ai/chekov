@@ -15,16 +15,24 @@ pub struct ThinkTags {
     pub closes: &'static [&'static str],
 }
 
-/// The families llama.cpp's chat parser knows.
+/// The families whose thinking a reply can carry inline.
 ///
 /// Mirrored from `common/chat.cpp`'s `thinking_start_tag` /
-/// `thinking_end_tags` at the pinned commit. Under `--reasoning-format none`
-/// these are what a reply carries inline. A family missing here reads as
-/// answer, so the CHANGELOG names the table.
-pub const THINKING_TAGS: [ThinkTags; 5] = [
+/// `thinking_end_tags` at the pinned commit, for every family whose parser
+/// leaves the markers in `content` under `--reasoning-format none`. Kimi K3
+/// (`<|open|>think<|sep|>`) is deliberately absent: its parser consumes the
+/// markers as literals even under `none`, so its thinking reaches chekov
+/// unmarked and reads as answer — a known gap the CHANGELOG names. A family
+/// missing here reads as answer too, which is why the table is published.
+pub const THINKING_TAGS: [ThinkTags; 6] = [
     ThinkTags {
         open: THINK_OPEN,
-        closes: &[THINK_CLOSE, "<tool_call>"],
+        closes: &[
+            THINK_CLOSE,
+            "<tool_call>",
+            "<｜DSML｜tool_calls>",
+            "<｜DSML｜function_calls>",
+        ],
     },
     ThinkTags {
         open: "[THINK]",
@@ -41,6 +49,10 @@ pub const THINKING_TAGS: [ThinkTags; 5] = [
     ThinkTags {
         open: "<mm:think>",
         closes: &["</mm:think>"],
+    },
+    ThinkTags {
+        open: "<|START_THINKING|>",
+        closes: &["<|END_THINKING|>"],
     },
 ];
 
@@ -82,9 +94,11 @@ fn next_close(text: &str, tags: &ThinkTags) -> Option<(usize, usize)> {
 
 /// `content` split into thinking and answer characters.
 ///
-/// Every span of every family counts, tags themselves never do, and a span
-/// that never closes is thinking to the end — the reply the model was cut
-/// off in, or the one that went straight to a tool call (design §11).
+/// Every span of every family counts; the tags that open and close a span
+/// never do; a span that never closes is thinking to the end — the reply the
+/// model was cut off in, or the one that went straight to a tool call
+/// (design §11). An open tag inside an open span is thinking, and a close tag
+/// with no open before it is answer — llama.cpp's own until-first-closer rule.
 #[must_use]
 pub fn split_thinking(content: &str) -> ReplyChars {
     let mut rest = content;
@@ -223,6 +237,26 @@ mod tests {
             chars(2, 1),
             "MiniMax"
         );
+        assert_eq!(
+            split_thinking("<|START_THINKING|>ab<|END_THINKING|>c"),
+            chars(2, 1),
+            "Cohere"
+        );
+        assert_eq!(
+            split_thinking("<think>ab<｜DSML｜tool_calls>c"),
+            chars(2, 1),
+            "DeepSeek's tool block closes the span"
+        );
+    }
+
+    #[test]
+    fn a_nested_open_is_thinking_and_a_stray_close_is_answer() {
+        assert_eq!(
+            split_thinking("<think>a<think>b</think>c"),
+            chars(9, 1),
+            "the inner open tag is nine characters of thinking, not a new span"
+        );
+        assert_eq!(split_thinking("a</think>b"), chars(0, 10));
     }
 
     #[test]

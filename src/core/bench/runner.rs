@@ -367,15 +367,21 @@ pub fn cross_stream_timed(
         runtime: "unknown".to_owned(),
         reason: "no usage object in the stream".to_owned(),
     })?;
-    let chars = crate::core::bench::thinkspan::stream_reply_chars(data_lines(&sse));
     Ok(ProbeArtifact {
         anthropic_body,
-        timings: Timings {
-            thinking_chars: chars.thinking,
-            answer_chars: chars.answer,
-            ..timings_from_stream(&usage, &marks)?
-        },
+        timings: with_reply_chars(timings_from_stream(&usage, &marks)?, &sse),
     })
+}
+
+/// The stream's thinking and answer characters attached to a `Timings` —
+/// the same splice for both streamed clocks.
+fn with_reply_chars(timings: Timings, sse: &str) -> Timings {
+    let chars = crate::core::bench::thinkspan::stream_reply_chars(data_lines(sse));
+    Timings {
+        thinking_chars: chars.thinking,
+        answer_chars: chars.answer,
+        ..timings
+    }
 }
 
 /// The probe's Anthropic body with `stream: true`, as Claude Code sends it.
@@ -413,13 +419,7 @@ fn stream_timings(sse: &str) -> Result<Timings, ChekovError> {
         .filter(|frame| frame.get("timings").is_some())
         .last()
         .ok_or(ChekovError::BenchNoTimings)?;
-    let timings = read_timings(&last.to_string())?;
-    let chars = crate::core::bench::thinkspan::stream_reply_chars(data_lines(sse));
-    Ok(Timings {
-        thinking_chars: chars.thinking,
-        answer_chars: chars.answer,
-        ..timings
-    })
+    Ok(with_reply_chars(read_timings(&last.to_string())?, sse))
 }
 
 /// Token counts off an `OpenAI` `usage` object — the foreign-timing measure's

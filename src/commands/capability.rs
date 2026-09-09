@@ -72,7 +72,7 @@ pub struct CompareMasks {
     /// banner prints before any other output.
     #[arg(long)]
     pub cross_runtime: bool,
-    /// Permit exactly the eight launch-flag fields to differ — a flag
+    /// Permit exactly the fifteen launch-flag fields to differ — a flag
     /// experiment on one runtime and one engine; a banner names the flags.
     #[arg(long)]
     pub cross_flags: bool,

@@ -1043,10 +1043,11 @@ fn thinking_line(log: &RunLog) -> Option<String> {
     if cells.is_empty() {
         return None;
     }
+    let grammar_measured = suite_share(log, "grammar_gap").is_some();
     Some(format!(
-        "thinking     share of reply characters spent thinking, median per case: {}{}{}\n",
+        "thinking     share of reply characters spent thinking, median per row: {}{}{}\n",
         cells.join(", "),
-        forced_arm_note(log),
+        forced_arm_note(log, grammar_measured),
         reasoning_launch_note(&log.head.stamp)
     ))
 }
@@ -1071,8 +1072,12 @@ fn suite_share(log: &RunLog, suite: &str) -> Option<u128> {
     Some(shares[shares.len() / 2])
 }
 
-/// The grammar arm ran under its own extraction, whatever the launch said.
-fn forced_arm_note(log: &RunLog) -> String {
+/// The grammar arm ran under its own extraction, whatever the launch said —
+/// said only when that arm has a cell on the line to be read against.
+fn forced_arm_note(log: &RunLog, grammar_measured: bool) -> String {
+    if !grammar_measured {
+        return String::new();
+    }
     log.head
         .forced_reasoning_format
         .as_deref()
@@ -1892,6 +1897,7 @@ mod tests {
     };
     use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
+    use crate::core::bench::thinkspan::ReplyChars;
     use crate::error::ChekovError;
 
     fn scratch(name: &str) -> PathBuf {
@@ -2180,11 +2186,15 @@ mod tests {
     }
 
     /// A row of `suite` with the given counts, buffered, passing.
-    fn thought(suite: &str, id: &str, (thinking, answer): (u64, u64)) -> Task {
+    fn thought(suite: &str, id: &str, chars: ReplyChars) -> Task {
         let mut task = graded(suite, id, GradeRow::pass());
-        task.measure.thinking_chars = thinking;
-        task.measure.answer_chars = answer;
+        task.measure.thinking_chars = chars.thinking;
+        task.measure.answer_chars = chars.answer;
         task
+    }
+
+    const fn spent(thinking: u64, answer: u64) -> ReplyChars {
+        ReplyChars { thinking, answer }
     }
 
     #[test]
@@ -2192,17 +2202,17 @@ mod tests {
         let eval = scratch("thinking-line");
         let mut writer = RunWriter::create(&eval, "r-think", &head()).expect("create");
         for task in [
-            thought("tool_emit", "te-001", (10, 90)),
-            thought("tool_emit", "te-002", (50, 50)),
-            thought("tool_emit", "te-003", (100, 0)),
-            thought("instruction", "if-001", (0, 0)),
-            thought("tool_loop", "tl-001", (30, 70)),
+            thought("tool_emit", "te-001", spent(10, 90)),
+            thought("tool_emit", "te-002", spent(50, 50)),
+            thought("tool_emit", "te-003", spent(100, 0)),
+            thought("instruction", "if-001", spent(0, 0)),
+            thought("tool_loop", "tl-001", spent(30, 70)),
         ] {
             writer.append(task).expect("append");
         }
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
-            rendered.contains("thinking     share of reply characters spent thinking, median per case: tool_emit 50%, tool_loop 30% (launched with no reasoning flag)\n"),
+            rendered.contains("thinking     share of reply characters spent thinking, median per row: tool_emit 50%, tool_loop 30% (launched with no reasoning flag)\n"),
             "{rendered}"
         );
         assert!(
@@ -2212,8 +2222,7 @@ mod tests {
     }
 
     #[test]
-    fn the_thinking_line_is_absent_without_a_measurement_and_names_the_forced_arm_and_the_foreign_runtime()
-     {
+    fn the_thinking_line_is_absent_when_nothing_measured_any_characters() {
         let eval = scratch("thinking-none");
         let writer = graded_run(&eval);
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
@@ -2221,27 +2230,54 @@ mod tests {
             !rendered.contains("thinking     "),
             "zero-both everywhere prints nothing: {rendered}"
         );
-        let eval = scratch("thinking-forced");
-        let mut forced = head();
+    }
+
+    /// One `thinking` line from a head, its rows appended.
+    fn thinking_rendered(name: &str, head: &RunHead, rows: Vec<Task>) -> String {
+        let eval = scratch(name);
+        let mut writer = RunWriter::create(&eval, "r-think", head).expect("create");
+        for task in rows {
+            writer.append(task).expect("append");
+        }
+        render_run(&RunLog::load(writer.dir()).expect("load"))
+    }
+
+    #[test]
+    fn the_thinking_line_names_the_forced_arm_only_when_grammar_gap_has_a_cell() {
+        let mut forced = launched_with(&["--reasoning-format", "none"]);
         forced.forced_reasoning_format = Some("deepseek".into());
-        forced.launch_args = vec!["--reasoning-format".into(), "none".into()];
-        let mut writer = RunWriter::create(&eval, "r-forced", &forced).expect("create");
-        writer
-            .append(thought("grammar_gap", "gg-te-001", (20, 80)))
-            .expect("append");
-        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        let rendered = thinking_rendered(
+            "thinking-forced",
+            &forced,
+            vec![thought("grammar_gap", "gg-te-001", spent(20, 80))],
+        );
         assert!(
-            rendered.contains("thinking     share of reply characters spent thinking, median per case: grammar_gap 20%; grammar_gap measured with reasoning extracted (deepseek)\n"),
+            rendered.contains("thinking     share of reply characters spent thinking, median per row: grammar_gap 20%; grammar_gap measured with reasoning extracted (deepseek)\n"),
             "a run launched with a reasoning flag has no default footnote: {rendered}"
         );
-        let eval = scratch("thinking-foreign");
+        let rendered = thinking_rendered(
+            "thinking-forced-unmeasured",
+            &forced,
+            vec![
+                thought("tool_emit", "te-001", spent(1, 3)),
+                thought("grammar_gap", "gg-te-001", spent(0, 0)),
+            ],
+        );
+        assert!(
+            rendered.contains("median per row: tool_emit 25%\n"),
+            "no grammar_gap cell, no note about it: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_thinking_line_names_a_foreign_runtime_as_unmanaged() {
         let mut foreign = head();
         foreign.stamp.runtime = "mlx-lm 0.31.3".into();
-        let mut writer = RunWriter::create(&eval, "r-foreign", &foreign).expect("create");
-        writer
-            .append(thought("tool_emit", "te-001", (1, 3)))
-            .expect("append");
-        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        let rendered = thinking_rendered(
+            "thinking-foreign",
+            &foreign,
+            vec![thought("tool_emit", "te-001", spent(1, 3))],
+        );
         assert!(
             rendered.contains("tool_emit 25% (reasoning flags unmanaged on this runtime)\n"),
             "{rendered}"

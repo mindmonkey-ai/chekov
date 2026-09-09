@@ -1262,7 +1262,9 @@ mod tests {
             .collect();
         let flags = crate::core::bench::stamp::launch_flags(&argv);
         let record = sample_record(argv, flags);
-        let stamp = &record.trials[0].stamp;
+        let json = serde_json::to_string(&record).expect("ser");
+        let back: super::Record = serde_json::from_str(&json).expect("a record round-trips");
+        let stamp = &back.trials[0].stamp;
         assert_eq!(
             (
                 stamp.reasoning_effort.as_str(),
@@ -1271,6 +1273,10 @@ mod tests {
             ("low", "-1")
         );
         assert_eq!(stamp.reasoning_format, "engine-default");
+        assert!(
+            json.contains("\"reasoning_budget\":\"-1\""),
+            "the record on disk carries the field: {json}"
+        );
     }
 
     /// A record written before the guard knob existed was judged on the

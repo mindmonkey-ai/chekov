@@ -199,8 +199,8 @@ pub const FLAG_ENGINE_DEFAULT: &str = "engine-default";
 /// third spelling distinct from "engine-default" (foreign-runtime spec §5).
 pub const FLAG_UNMANAGED: &str = "unmanaged";
 
-/// A stamp or record written before the speculative fields existed was
-/// decoded without speculation.
+/// A flag field a stamp or record was written before: absent on disk means
+/// the argv never set it (and a stored run re-reads its argv at load).
 fn engine_default_flag() -> String {
     FLAG_ENGINE_DEFAULT.to_owned()
 }
@@ -209,8 +209,8 @@ fn engine_default_flag() -> String {
 ///
 /// Read the same way for a bench stamp and a tune trial so the two describe a
 /// configuration in the same words (tune spec-stage design §6). The two
-/// speculative fields default so every tune record under `tune/` written
-/// before them still loads.
+/// speculative and the seven reasoning fields default so every tune record
+/// under `tune/` written before them still loads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchFlags {
@@ -684,37 +684,37 @@ mod tests {
     /// (spec §6).
     #[test]
     fn launch_flags_read_all_fifteen() {
-        let argv: Vec<String> =
-            "-fa on --cache-type-k q8_0 -ctv q8_0 -b 4096 --spec-type draft-mtp --spec-draft-n-max 1"
-                .split(' ')
-                .map(String::from)
-                .collect();
-        let flags = launch_flags(&argv);
+        let argv: Vec<String> = "-kvu -fa on --cache-type-k q8_0 -ctv q8_0 -b 4096 -ub 512 \
+                                 --spec-type draft-mtp --spec-draft-n-max 1 -rea on \
+                                 --reasoning-format none --reasoning-effort low \
+                                 --reasoning-budget 0 --reasoning-budget-message hurry \
+                                 --reasoning-preserve --chat-template-kwargs {}"
+            .split(' ')
+            .map(String::from)
+            .collect();
         assert_eq!(
-            (
-                flags.flash_attn.as_str(),
-                flags.type_k.as_str(),
-                flags.type_v.as_str(),
-                flags.n_batch.as_str(),
-                flags.n_ubatch.as_str(),
-                flags.kv_unified.as_str(),
-                flags.spec_type.as_str(),
-                flags.spec_draft_n_max.as_str(),
-            ),
-            (
-                "on",
-                "q8_0",
-                "q8_0",
-                "4096",
-                "engine-default",
-                "engine-default",
-                "draft-mtp",
-                "1"
-            )
+            launch_flags(&argv),
+            LaunchFlags {
+                kv_unified: "on".into(),
+                n_batch: "4096".into(),
+                n_ubatch: "512".into(),
+                type_k: "q8_0".into(),
+                type_v: "q8_0".into(),
+                flash_attn: "on".into(),
+                spec_type: "draft-mtp".into(),
+                spec_draft_n_max: "1".into(),
+                reasoning: "on".into(),
+                reasoning_format: "none".into(),
+                reasoning_effort: "low".into(),
+                reasoning_budget: "0".into(),
+                reasoning_budget_message: "hurry".into(),
+                reasoning_preserve: "on".into(),
+                chat_template_kwargs: "{}".into(),
+            }
         );
         let plain = launch_flags(&[]);
         assert_eq!(plain.spec_type, "engine-default");
-        assert_eq!(flags.reasoning_format, "engine-default");
+        assert_eq!(plain.reasoning_format, "engine-default");
     }
 
     /// The foreign sentinel is fifteen of the same word, and an eight-field
@@ -840,10 +840,15 @@ mod tests {
             .iter()
             .map(|s| (*s).to_owned())
             .collect();
+        let read = launch_flags(&argv);
         let mut hydrated = parsed;
-        hydrated.set_flags(&launch_flags(&argv));
+        hydrated.set_flags(&read);
+        assert_eq!(
+            hydrated.flags(),
+            read,
+            "every one of the fifteen round-trips"
+        );
         assert_eq!(hydrated.reasoning_format, "none");
         assert_eq!(hydrated.n_batch, "4096");
-        assert_eq!(hydrated.reasoning_effort, "engine-default");
     }
 }
