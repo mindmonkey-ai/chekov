@@ -1695,8 +1695,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        CodebaseRow, DecidedBy, GradeRow, JudgeRow, Measure, RunHead, RunLog, RunWriter, Task,
-        TaskKey, TaskRow, Transport, render_codebase, render_run,
+        CodebaseRow, DecidedBy, GradeRow, JudgeRow, LoopEnd, LoopRow, Measure, RunHead, RunLog,
+        RunWriter, Task, TaskKey, TaskRow, Transport, render_codebase, render_run,
     };
     use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
@@ -1993,6 +1993,33 @@ mod tests {
             codebase: None,
             judge: Some(verdict),
         }
+    }
+
+    #[test]
+    fn a_tool_loop_row_round_trips_and_an_old_row_loads_without_one() {
+        let row: TaskRow = serde_json::from_str(PRE_C_ROW).expect("loads");
+        assert!(
+            row.tool_loop.is_none(),
+            "rows from before the field carry none"
+        );
+        let end = LoopEnd::FabricatedTool { name: "rm".into() };
+        let json = serde_json::to_string(&LoopRow {
+            turns: 2,
+            tool_calls: 3,
+            end: end.clone(),
+        })
+        .expect("ser");
+        assert_eq!(
+            json,
+            r#"{"turns":2,"tool_calls":3,"end":{"kind":"fabricated_tool","name":"rm"}}"#
+        );
+        let back: LoopRow = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.end, end);
+        assert_eq!(
+            serde_json::to_string(&LoopEnd::GoalMet).expect("ser"),
+            r#"{"kind":"goal_met"}"#
+        );
+        assert!(AGENTIC.contains(&"tool_loop") && PAIRED.contains(&"tool_loop"));
     }
 
     #[test]
