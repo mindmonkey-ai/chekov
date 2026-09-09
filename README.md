@@ -77,6 +77,7 @@ chekov pull unsloth/MiniMax-M2.7-GGUF:UD-Q5_K_XL
 chekov use minimax-m2.7
 chekov run                # starts in the background by default
 chekov doctor            # six health checks; non-zero exit on any failure
+chekov tune --dry-run    # later: what a launch-flag measurement would run here, without launching
 ```
 
 Already have the weights on an external drive (huggingface-cli layout)?
@@ -431,6 +432,84 @@ chekov pull unsloth/DeepSeek-V3-GGUF   # errors with the available tags
 
 No file edits needed. `chekov show <name>` prints the exact invocation.
 
+### Tuning launch flags
+
+Every model launches with the flags its `models.toml` entry carries. Whether
+any of a small set of alternatives beats them on **this** Mac is a
+measurement, not a guess, and `chekov tune` makes it:
+
+```sh
+chekov tune --dry-run                          # the plan: stages, launch ceiling, wall clock; nothing starts
+chekov tune                                    # measure the active model; a confirm gate before the first launch
+chekov tune ornith-1.5-35b-a3b --stages spec   # one stage only (any subset, always in the fixed order)
+chekov tune --apply --yes                      # write the winner into models.toml; refused on `defaults won`
+```
+
+The plan, as printed on this desk:
+
+```
+tune ornith-1.5-35b-a3b @ ctx 262144, probe depth 4096 × 5 reps
+  baseline   --jinja --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 -np 1 --reasoning-format none --temp 0.6 --top-p 0.95 --top-k 20 --spec-type draft-mtp --spec-draft-n-max 1   (current flags)
+  server     will stop the running 'ornith-1.5-35b-a3b' first — it is not restarted
+  spec       4 candidates   (1 is the incumbent; needs an MTP head in the GGUF)
+  fa         2 candidates   (1 is the incumbent)
+  kv         2 candidates   (1 is the incumbent; the f16 KV is footprint-gated per trial)
+  batch      4 candidates   (1 is the incumbent)
+  ubatch     4 candidates   (1 is the incumbent; values ≤ the incumbent batch)
+  ≤ 12 launches, ~58 min estimated (load ≈ 4 s/GiB × 35.2 GiB, probe ≈ 148 s each)
+```
+
+Read the `server` line before you confirm. tune stops the server it can name
+and does not bring it back — `chekov run` afterwards. It never stops a server
+it cannot name (`ServerModelUnknown` refuses instead), it never launches a
+candidate it can tell in advance will not load (`skipped:` on the line, with
+the reason), and a candidate that dies at load is reported as died within
+seconds, not after the readiness budget. Every trial answers the same
+4096-token probe; `pmset -g therm` is read before and after, and a throttled
+clock is noted on the line rather than hidden in the number.
+
+Five stages in a fixed order, each descending from the previous stage's
+winner: `spec` (the model's own MTP draft head at each `[tune] spec_drafts`
+length, or off), `fa`, `kv`, judged on **decode**; then `batch`, `ubatch`,
+judged on **prefill**. A candidate wins its stage only when `stats::compare`
+says `Faster` on the stage's metric at `[bench] significance_pct` and the
+other metric is not worse by more than `[tune] guard_tolerance_pct` of the
+incumbent's median. Every line says what it saw and what it decided. This is
+the `spec` stage of the 2026-09-05 run on this desk, rebuilt verbatim from
+its record:
+
+```
+tune ornith-1.5-35b-a3b (Q8_0@fbbaed45c2f0e200276ffa51701a24d45dc7f57e) — machine c057455fb3a1, engine 0f194b907, probe depth 4096 × 5
+  baseline   decode 67.9 [67.6..68.4]  prefill 150 [149..154]   --jinja --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 -np 1 --reasoning-format none --temp 0.6 --top-p 0.95 --top-k 20
+  spec       mtp:1    decode 74.7 [72.1..76.7]  prefill 126 [121..130]   faster on decode but prefill -16% is beyond the 15% guard — incumbent kept
+  spec       mtp:2    decode 66.2 [64.7..67.1]  prefill 124 [120..128]   no significant difference vs 67.9 — incumbent kept
+  spec       mtp:3    decode 55.9 [54.3..57.0]  prefill 127 [119..129]   slower on decode — incumbent kept
+  defaults won — no candidate beat the current flags at p < 5% on its metric within a 15% guard on the other
+  record     tune/20260906T022935Z-ornith-1.5-35b-a3b.json
+```
+
+`defaults won` is a first-class result, not a failure. With a winner the block
+reads `winner <flags>` over a `decode X vs Y (+N%)   prefill X vs Y (…)` line
+and ends `apply with: chekov tune <name> --apply`. The record holds every
+trial's argv, samples, thermal readings and verdict, and the thresholds they
+were judged under, so a run from before a knob existed still reads under the
+rule it actually used.
+
+**What tune cannot see.** One depth (`[tune] depth`, 4096 tokens) of one
+prose-shaped probe. Measured 2026-09-03 on this desk: the `spec` stage
+rejected `mtp:1` at 4K, yet the same two flags hand-applied and benched on
+chekov's own repository gave +29/+31/+21% decode at depths 1024/4096/16384
+with every quality metric identical, compile and test tiers included. Two
+things follow. `guard_tolerance_pct` is a per-machine number: the same trade
+measured −13%, −13% and −16% prefill across three runs here, one point either
+side of the shipped 15, so this desk sets 20 in `config.toml`. And a `spec`
+rejection is a prompt to measure your real work, not a verdict on it: bench
+the model on your own repository as launched and again with the candidate in
+`extra_flags`, then `capability compare A B --cross-flags`, which masks
+exactly the eight launch-flag fields and says so in its banner. The daily
+driver above runs `--spec-type draft-mtp --spec-draft-n-max 1` on that
+evidence.
+
 ### Updating
 
 ```sh
@@ -722,6 +801,7 @@ logs/chekov.engine   # the commit the engine was built from — the rollback poi
 llama.cpp/           # engine checkout + Metal build (managed by setup)
 eval/<run-id>/       # one stored bench run: stamp.json + results.jsonl
 eval/.scratch/       # transient `--codebase` worktree; hidden from every enumerator
+tune/<utc>-<model>.json  # one tune run: every trial's argv, samples, verdict and the thresholds it used
 reports/             # default destination for `capability graph --svg`
 agents/<agent>/      # generated agent settings for `chekov launch` (gitignored)
 bin/cclocal          # generated by `chekov integrate claude`

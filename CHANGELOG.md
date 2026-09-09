@@ -172,6 +172,15 @@ All notable changes to chekov are recorded here. The format follows
   in the reason.
 
 ### Changed
+- README gains a "Tuning launch flags" runbook section between "Swapping
+  models" and "Updating": the real `--dry-run` plan and the 2026-09-05 spec-
+  stage report from this desk, what the `server` line means before you
+  confirm, how a stage is judged (significance on its metric,
+  `guard_tolerance_pct` on the other), what `defaults won` is, and what tune
+  cannot see — one depth of one prose probe — with the 2026-09-03 real-code
+  measurement and the `compare --cross-flags` follow-up as the remedy. The
+  Quickstart points at `tune --dry-run`; the `tune/` record directory joins
+  the Layout listing.
 - `[limits] wired_limit_mb` no longer has a built-in value. The old default,
   187000 MB, was one 256 GB desk's number: on any Mac below ~250 GB a fresh
   install refused every model as "unreachable" before looking at it, `setup`

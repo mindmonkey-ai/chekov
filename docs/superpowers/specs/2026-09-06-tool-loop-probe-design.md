@@ -1,11 +1,10 @@
 # `capability bench` — the `tool_loop` probe: a canned read→edit→verify loop — design
 
-Date: 2026-09-06. Status: **DRAFT — awaiting approval.** Not binding until
-approved in chat; written so the human can review a concrete design rather
-than a paragraph. Implements spec §7.2 row 4 (`tool_loop`, N = 6) of the
+Date: 2026-09-06. Status: approved in chat 2026-09-09; this document is the
+binding spec. Implements spec §7.2 row 4 (`tool_loop`, N = 6) of the
 approved capability entry in IDEAS.md ("Machine capability scan, frontier
 graph, recommendations and agent bench", 2026-08-25). Touches ~13 files, so
-AGENTS.md's ">5 files — ask first" rule applies on top of the design gate.
+AGENTS.md's ">5 files — ask first" rule was satisfied by the same approval.
 
 ## 1. Purpose, and the evidence
 

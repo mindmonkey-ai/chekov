@@ -138,8 +138,8 @@ probes and the seed counts. Ordered by what the evidence says pays next:
 `tool_loop` — single-turn `tool_emit` is saturating here (8/10, 8/10, 10/10,
 9/10 across the four face-off models) and in the field (a 0.97 frontier on
 BFCL-style single calls against a real spread on BFCL-v4 Multi-Turn and
-tau-bench); design drafted for approval in
-`docs/superpowers/specs/2026-09-06-tool-loop-probe-design.md`. Then
+tau-bench); design APPROVED 2026-09-09 —
+`docs/superpowers/specs/2026-09-06-tool-loop-probe-design.md` is binding. Then
 `long_ctx_trace`, which only pays once a run reaches past the 16K depth the
 sweep stops at today (see "tune judges at 4096 tokens" below) — at the
 current depths its recommended `ctx_size` would read "≥16384, the largest
@@ -774,7 +774,7 @@ codebase check is the confirming measurement; and chaining
 (`draft-mtp,ngram-mod`) is a second candidate grammar, not this one. Not a
 quality question: every draft is verified by the target, so greedy output
 is unchanged.
-Proposed 2026-09-06 — status: OPEN
+Proposed 2026-09-06 — status: APPROVED 2026-09-09
 
 ## tune judges at 4096 tokens; the workload lives at 50–165K (2026-09-06)
 `[tune] depth = 4096` is the only depth any stage measures, and a flag's
@@ -799,7 +799,7 @@ deliberately when this is built, not a default to flip. The config-only
 half needs no code: `[bench] depths` gaining 65536/131072 puts a measured
 point where the agent regime is, and `--metric tok-s` on the frontier then
 shows it; the same wall-clock honesty applies.
-Proposed 2026-09-06 — status: OPEN
+Proposed 2026-09-06 — status: APPROVED 2026-09-09
 
 ## Reasoning effort is a launch flag nobody stamps, and a cost nobody measures (2026-09-06)
 Three findings point one way. (1) chekov's own 2026-08-31 foreign run: a
@@ -831,7 +831,7 @@ sees that today. A per-entry registry key is NOT proposed — `extra_flags`
 already is one, and a second spelling of the same flag is the
 knob-for-a-value-that-never-varied mistake. The `think_leak` probe (§13 Q5)
 is a different question — where the thoughts land, not how many.
-Proposed 2026-09-06 — status: OPEN
+Proposed 2026-09-06 — status: APPROVED 2026-09-09
 
 ## New tool-use lane candidates for the agentic bench (survey 2026-09-06)
 Two Aug-2026 30B-class releases aim at the axis where our benched models
@@ -851,7 +851,7 @@ for `tool_loop`, since single-turn emission will not separate them. Not
 benchable here from the same survey: Tencent Hy4 preview (770B-A49B; the
 1-bit GGUF is 229 GB against a 182.62 GiB budget); GLM-5.3-Flash stays
 upstream-blocked (BLOCKED entry above).
-Proposed 2026-09-06 — status: OPEN (measurement)
+Proposed 2026-09-06 — status: APPROVED 2026-09-09 (measurement)
 
 ## Upstream engine work to watch, not build (2026-09-06)
 Recorded so the next round does not re-research it. (a) Speculative prefill
@@ -871,4 +871,4 @@ a draft-FILE path, which tune's spec stage deliberately does not model.
 (d) `draft-eagle3`, `draft-dflash`, `draft-dspark` are in the pinned
 engine's `--spec-type` list already, but each needs a trained draft head
 shipped as a file — same reason, same deferral.
-Proposed 2026-09-06 — status: DEFERRED (upstream)
+Proposed 2026-09-06 — status: APPROVED 2026-09-09 as DEFERRED (upstream) — revisit when upstream merges
