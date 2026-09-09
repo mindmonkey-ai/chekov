@@ -207,6 +207,31 @@ pub fn grade_instruction(anthropic_body: &str, case: &InstructionCase) -> (Grade
     (verdict(true), verdict(false))
 }
 
+/// The loop's end IS the grade (tool-loop design §6): reached, or why not.
+/// Turn and call counts go in the reason; a model that needed six turns and
+/// one that needed two both pass.
+#[must_use]
+pub fn grade_tool_loop(outcome: &crate::core::bench::toolloop::LoopOutcome) -> Grade {
+    use crate::core::bench::store::LoopEnd;
+    let turns = outcome.turns;
+    let fail = |reason: String| Grade::Fail { reason };
+    match &outcome.end {
+        LoopEnd::GoalMet => Grade::Pass,
+        LoopEnd::GoalUnmet { wanted } => fail(format!(
+            "stopped with the goal unmet after {turns} turns: {wanted}"
+        )),
+        LoopEnd::TurnsExhausted => fail(format!(
+            "no terminal state in {turns} turns ({} tool calls)",
+            outcome.tool_calls
+        )),
+        LoopEnd::Truncated => fail("final reply hit max_tokens".to_owned()),
+        LoopEnd::FabricatedTool { name } => {
+            fail(format!("called '{name}' — not in this case's palette"))
+        }
+        LoopEnd::MalformedCall { name, key } => fail(format!("'{name}' called without {key}")),
+    }
+}
+
 /// Whether a check name is in the grader's fixed vocabulary — probeset
 /// validation refuses unknown names at load.
 #[must_use]
