@@ -597,8 +597,10 @@ fn suite_summaries(log: &RunLog) -> String {
     out.extend(tool_emit_line(log, Transport::Buffered));
     out.extend(grammar_gap_line(log));
     out.extend(instruction_line(log, Transport::Buffered));
+    out.extend(tool_loop_line(log, Transport::Buffered));
     out.extend(tool_emit_line(log, Transport::Streamed));
     out.extend(instruction_line(log, Transport::Streamed));
+    out.extend(tool_loop_line(log, Transport::Streamed));
     out.push_str(&asymmetry_lines(log));
     out
 }
@@ -1609,6 +1611,57 @@ fn tool_emit_line(log: &RunLog, transport: Transport) -> Option<String> {
     ))
 }
 
+/// `tool_loop    4/6 reached   turns 2/3/6 (min/median/max over reached)` —
+/// the count is the grade; the turns are printed beside it, never scored.
+fn tool_loop_line(log: &RunLog, transport: Transport) -> Option<String> {
+    let rows: Vec<&TaskRow> = rows_via(log, "tool_loop", transport).collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let label = door_label(transport);
+    let tally = Tally::of(&rows);
+    if tally.total == 0 {
+        return Some(format!(
+            "tool_loop    {label}N/A — nothing was measured ({})\n",
+            unavailable_reason(&rows)
+        ));
+    }
+    Some(format!(
+        "tool_loop    {label}{} reached{}{}{}\n",
+        tally.cell(),
+        turns_note(&rows),
+        saturation_note(tally),
+        excluded_note(tally.excluded)
+    ))
+}
+
+/// `   turns min/median/max (…)` over the rows that reached the goal; nothing
+/// when none did.
+fn turns_note(rows: &[&TaskRow]) -> String {
+    let mut turns: Vec<u32> = rows
+        .iter()
+        .filter(|r| r.grade.as_ref().is_some_and(|g| g.pass))
+        .filter_map(|r| r.tool_loop.as_ref())
+        .map(|l| l.turns)
+        .collect();
+    if turns.is_empty() {
+        return String::new();
+    }
+    turns.sort_unstable();
+    let (min, max) = (turns[0], turns[turns.len() - 1]);
+    let median = turns[turns.len() / 2];
+    format!("   turns {min}/{median}/{max} (min/median/max over reached)")
+}
+
+/// A run every case of which reached, or none did, ranks nothing by itself.
+const fn saturation_note(tally: Tally) -> &'static str {
+    if tally.total > 0 && (tally.passed == 0 || tally.passed == tally.total) {
+        " (saturated: rank across candidates, not on this line)"
+    } else {
+        ""
+    }
+}
+
 /// The §7.2 anti-self-deception line: forced vs unconstrained ON THE SAME
 /// CASES — a large gap means "works only with a babysitter".
 ///
@@ -2004,7 +2057,21 @@ mod tests {
         render_run(&RunLog::load(writer.dir()).expect("load"))
     }
 
-    fn looped(id: &str, grade: GradeRow, turns: u32, end: LoopEnd) -> Task {
+    /// A loop row graded the way the bench grades it, so the FAIL text the
+    /// report prints is the grader's own.
+    fn looped(id: &str, turns: u32, end: LoopEnd) -> Task {
+        use crate::core::bench::grade::{Grade, grade_tool_loop};
+        use crate::core::bench::toolloop::LoopOutcome;
+        let outcome = LoopOutcome {
+            end: end.clone(),
+            turns,
+            tool_calls: turns,
+            measure: crate::core::bench::codebase::run::empty_measure(),
+        };
+        let grade = match grade_tool_loop(&outcome) {
+            Grade::Pass => GradeRow::pass(),
+            Grade::Fail { reason } => GradeRow::fail(reason),
+        };
         Task {
             tool_loop: Some(LoopRow {
                 turns,
@@ -2015,34 +2082,35 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_tool_loop_line_counts_reached_and_prints_the_turns_beside_it() {
-        let eval = scratch("tool-loop-line");
+    /// Three reached (2, 3, 6 turns), one stopped unmet, and tl-001 truncated
+    /// through the streamed door.
+    fn loop_run(name: &str) -> String {
+        let eval = scratch(name);
         let mut writer = RunWriter::create(&eval, "r-tl", &head()).expect("create");
-        let unmet = "stopped with the goal unmet after 2 turns: src/a.rs containing \"x\"";
         for task in [
-            looped("tl-001", GradeRow::pass(), 2, LoopEnd::GoalMet),
-            looped("tl-002", GradeRow::pass(), 3, LoopEnd::GoalMet),
-            looped("tl-003", GradeRow::pass(), 6, LoopEnd::GoalMet),
+            looped("tl-001", 2, LoopEnd::GoalMet),
+            looped("tl-002", 3, LoopEnd::GoalMet),
+            looped("tl-003", 6, LoopEnd::GoalMet),
             looped(
                 "tl-004",
-                GradeRow::fail(unmet.to_owned()),
                 2,
-                LoopEnd::GoalUnmet { wanted: "x".into() },
+                LoopEnd::GoalUnmet {
+                    wanted: "src/a.rs containing \"x\"".into(),
+                },
             ),
             Task {
                 transport: Transport::Streamed,
-                ..looped(
-                    "tl-001",
-                    GradeRow::fail("final reply hit max_tokens".to_owned()),
-                    1,
-                    LoopEnd::Truncated,
-                )
+                ..looped("tl-001", 1, LoopEnd::Truncated)
             },
         ] {
             writer.append(task).expect("append");
         }
-        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        render_run(&RunLog::load(writer.dir()).expect("load"))
+    }
+
+    #[test]
+    fn the_tool_loop_line_counts_reached_and_prints_the_turns_beside_it() {
+        let rendered = loop_run("tool-loop-line");
         assert!(
             rendered
                 .contains("tool_loop    3/4 reached   turns 2/3/6 (min/median/max over reached)\n"),
@@ -2054,8 +2122,15 @@ mod tests {
             ),
             "no turns note when nothing reached; a 0/N or N/N is flagged: {rendered}"
         );
+    }
+
+    #[test]
+    fn a_tool_loop_failure_is_listed_and_the_doors_are_paired() {
+        let rendered = loop_run("tool-loop-pairs");
         assert!(
-            rendered.contains(&format!("tool_loop FAIL tl-004  {unmet}")),
+            rendered.contains(
+                "tool_loop FAIL tl-004  stopped with the goal unmet after 2 turns: src/a.rs containing \"x\""
+            ),
             "{rendered}"
         );
         assert!(
