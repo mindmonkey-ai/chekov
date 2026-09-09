@@ -51,7 +51,7 @@ ureq = "3.4"
 # Home-directory resolution for the default CHEKOV root.
 directories = "6"
 # Signals + pid liveness for server lifecycle (SIGTERM/SIGKILL escalation).
-nix = { version = "0.31", features = ["signal"] }
+nix = { version = "0.31", features = ["signal", "process"] }
 # Status/list tables are hand-rolled (core/table helper) instead of `tabled`:
 # two fixed tables do not justify a proc-macro dependency (§9, prompt allows
 # "tabled or hand-rolled").

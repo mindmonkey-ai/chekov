@@ -58,13 +58,17 @@ When installed from source, the clone directory is the chekov root:
 logs, weights (unless `--model-loc`), and the llama.cpp checkout all live
 under the clone. If you move the checkout, re-run `make install`.
 
-`setup` ends by verifying `iogpu.wired_limit_mb`. A sysctl value of `0`
-means "macOS system default" and is resolved as **75% of RAM** (e.g. 192 GiB
-on a 256 GB machine) — it is not treated as zero. If the effective limit is below
-`[limits] wired_limit_mb` in `config.toml`, setup prints the exact
-`sudo sysctl iogpu.wired_limit_mb=<N>` command and marks itself incomplete;
-run it yourself and re-run `make setup` to verify. **chekov never executes
-sudo.**
+`setup` ends by reading the GPU budget — what `llama-server --list-devices`
+reports, falling back to `iogpu.wired_limit_mb` (a sysctl value of `0` means
+"macOS system default", resolved as **75% of RAM**, never treated as zero).
+There is no built-in floor: on any Apple Silicon Mac, `run` judges each
+model's own footprint (weights + KV cache at its context) against that budget
+and refuses only a model that does not fit, naming the levers that exist
+(a smaller quant, a lower `ctx_size`, `chekov capability recommend`). If you
+set `[limits] wired_limit_mb` in `config.toml`, setup and `run` verify the
+budget against that floor instead and print the exact
+`sudo sysctl iogpu.wired_limit_mb=<N>` command when it is short. **chekov never
+executes sudo.**
 
 ## Quickstart
 
@@ -72,7 +76,8 @@ sudo.**
 chekov pull unsloth/MiniMax-M2.7-GGUF:UD-Q5_K_XL
 chekov use minimax-m2.7
 chekov run                # starts in the background by default
-chekov doctor            # five health checks; non-zero exit on any failure
+chekov doctor            # six health checks; non-zero exit on any failure
+chekov tune --dry-run    # later: what a launch-flag measurement would run here, without launching
 ```
 
 Already have the weights on an external drive (huggingface-cli layout)?
@@ -92,27 +97,176 @@ The registry stores the absolute path; everything else works unchanged.
 | Command | What it does |
 |---|---|
 | `run [name] [--foreground]` | Start llama-server (default: active model). Backgrounds by default; `--foreground` blocks the terminal instead. Refuses loudly if: shard missing, port occupied, wired limit below config, engine not built, or a server already running. |
-| `stop` | SIGTERM via pidfile, 20 s grace, SIGKILL escalation with a warning. Detects and cleans stale pidfiles. |
+| `stop [--if-running]` | SIGTERM via pidfile, 20 s grace, SIGKILL escalation with a warning. Detects and cleans stale pidfiles. Stopping a stopped server is an error (exit 1) unless `--if-running`, which prints "nothing to stop" and exits 0 — for idempotent teardown scripts. |
 | `restart [name]` | Stop (if running) then start in the background; swaps models in one motion. |
 | `status` | running/pid, model, revision, port, ctx, uptime, wired-limit actual (with system-default annotation) vs required, log tail path. |
-| `pull <spec> [--name N] [--dry-run] [--model-loc DIR] [--license-url URL]` | Resolve revision, download (or adopt) quant-matching files, snapshot license + provenance, register. Idempotent: same spec+revision is a verified no-op; a NEW revision downloads but never repoints (that is `update`'s gated job). |
+| `capability [scan] [--json]` | What this Mac is and what it can hold: chip, GPU cores, performance threads, macOS, and the GPU budget **with its provenance**. `scan` is the default action, so the bare command is the scan; `--json` emits it as JSON instead of a table. The budget is read from the engine (`llama-server --list-devices`) when it is built, from `iogpu.wired_limit_mb` when set, and only otherwise from the 75%-of-RAM formula — which measures 31457 MiB low on a 256 GiB M3 Ultra, so the source is always printed. |
+| `capability graph [--metric fit\|tok-s] [--svg [PATH]] [--ctx N]...` | Grid of registered models against context lengths. Each cell is two characters: the fit verdict, then whether its inputs were measured or predicted. A predicted GPU ceiling is announced in the header and changes the legend, because every verdict below it is then measured against a guess. `--metric tok-s` turns the first character into a band digit 1–9 of the **measured** decode median from the stored runs under `eval/` — fixed band edges printed in the legend, an exact model+quant+ctx+machine match required, and `??` wherever no run exists: predicted and measured are never blended in one column. `--svg` writes the same frontier as a self-contained SVG (bare, into `reports/`); the path is **printed, never opened**. |
+| `capability recommend [--ctx N] [--role agent\|chat] [--refresh] [--limit N]` | Ranks the registered models for this machine. Gates first — anything that exceeds the budget, or cannot be sized, is listed with its reason rather than dropped. Then sorts: under `--role agent` a model whose chat template has no dedicated llama.cpp tool parser is **downranked with a note, not refused**; under `--role chat` the tool parser is ignored. `--refresh` is the **only** networked path — without it chekov ranks registered models only and never reaches out. |
+| `capability explain [name] [--ctx N]` | Read one model's GGUF header and print its fit arithmetic line by line: block count, the MTP/interval layer ladder, padded context, cache type, KV bytes, weights on disk. Local file read; no network. |
+| `tune [NAME] [--dry-run] [--yes] [--apply] [--stages spec,fa,kv,batch,ubatch]` | Measure, on **this** machine, whether any of a small set of launch flags beats what the model launches with today. A five-stage descent — `spec` (llama.cpp's native MTP draft head via `--spec-type draft-mtp`, at each configured `--spec-draft-n-max`, or off) then `fa` (`--flash-attn`) then `kv` (`--cache-type-k`/`-v`) judged on **decode**, then `batch` (`--batch-size`) then `ubatch` (`--ubatch-size`) judged on **prefill** — starting from the model's own flags as the baseline; a candidate wins its stage only when `stats::compare` at `[bench] significance_pct` says `Faster` on the stage's metric and the other metric is not `Slower` — or is slower by no more than `[tune] guard_tolerance_pct` of the incumbent's median (default 15; `0` is the strict rule), because a decode gain that costs a little prefill is a trade the stage may make, and the verdict line says which (`prefill -13% is within the 15% guard`). No stage winning is printed and recorded as **`defaults won`** — the honest verdict when nothing beats the current flags. The `spec` stage is skipped, with the reason on the plan and on every candidate line, when the GGUF carries no head (`nextn_predict_layers 0`), when the engine's `--help` has no `--spec-type`, or when the incumbent already runs a speculative type other than `draft-mtp`. Measured 2026-09-01 on `ornith-1.5-35b-a3b`: `mtp:1` +20–25% decode, the engine default `mtp:3` −15% — which is why it is measured, never assumed. Every run writes a JSON record under `tune/<utc>-<model>.json` (trials, verdicts, the significance threshold, thermal readings). Thermal state is read from `pmset -g therm` before and after every probe (no root needed) and noted on any trial where the clock was dirty. `--apply` prints the exact `extra_flags` diff for the model's `models.toml` entry and, after a confirm (`--yes` covers it), writes the winner through `Registry::save`; a `defaults won` run has nothing to apply and says so. `--dry-run` prints the stage plan, an upper-bound launch count and a wall-clock estimate without launching anything; `--stages` restricts the descent to the named stages in their fixed order. |
+| `capability bench [--models a,b] [--suite throughput\|agentic\|all] [--fixture F] [--resume RUN] [--dry-run] [--yes] [--allow-exec] [--judge NAME] [--runtime NAME@VERSION] [--upstream URL]` | Measure candidates through chekov's own Anthropic↔OpenAI translator and store every run. `--models` takes a **comma-separated** list and benches them **sequentially**: bench launches and tears down its own server behind `run`'s preflight gates and **never stops a server it did not start** — a running server is reused only when it *is* the single request, and is otherwise a refusal. `--suite` defaults to `throughput`: the depth sweep over `[bench] depths`, `[bench] repetitions` per depth with the first dropped as warmup; when the server drafted (any `--spec-type`), each depth line also prints the draft acceptance (`accept 63% (300 drafted)`, from the server's own `draft_n`/`draft_n_accepted` timings) and the `speculative:` header sums it over the sweep. `agentic` runs the probe set (`tool_emit`, `grammar_gap`, `instruction`), with each unconstrained case crossing both the buffered and the streamed door so an asymmetry between them is named. `all` runs both. Each run lands in `eval/<timestamp>-<model>/` as `stamp.json` (the configuration stamp plus the exact launch argv) and `results.jsonl` (one flushed append per task), so a crash loses at most one task and `--resume <RUN>` skips what that run already holds — resuming under a changed stamp is refused. `--dry-run` prints the plan and a rough wall-clock estimate as data; `--yes` pre-approves the launch confirmation; `--fixture` supplies graded probes from your own TOML (there is deliberately no compiled-in fixture). `--judge` names a registered `role = "judge"` model of a different family from every candidate, loaded once after they are all down; it answers one position-swapped, grammar-forced binary question per `function_body` crossing, and the `equiv` column is voided below `[bench] judge_min_consistency_pct`. The 2026-08-30 probe recommends `gpt-oss-20b` (Apache-2.0); Gemma 3 12B also clears the gate. `--runtime <name>@<version>` [`--upstream <url>`] benches a foreign OpenAI-compatible server you already started instead of chekov's own llama-server — see **Foreign runtimes** below. |
+| `capability bench --codebase <PATH>` | The repository at PATH (clean tree required) as 24 deterministic infill tasks, sampled from HEAD (`[bench] codebase_tasks`, split 12 `in_file` / 6 `function_body` / 6 `cross_file_first`), run through `/infill`, graded on tiers 1–5 (exact, edit similarity, identifier F1, parse, repo-symbol existence); tiers 6–7 (compile gate, covering test) run only under `--allow-exec`, which is the single gate on every path that executes repository code. A `cross_file_first` task masks the first use in a file of a symbol defined in **another** file, and is crossed **twice** — without that file and with it in `input_extra` — so the report can print what reading the repository buys. Masks are boundary-scanned, not AST, and the report says so. A model without FIM tokens is N/A, never zero. Given without `--suite`, the codebase corpus is the whole run — the throughput sweep does not come along. |
+| `capability compare <A> <B> [--cross-runtime] [--cross-flags]` | Compare two stored bench runs, named by run id under `eval/` or by run directory, across all three sections: **throughput** per depth, **agentic** (the report's own pass counts side by side over the cases both runs graded, then the disagreements — the cases exactly one run passed, with the losing side's reason; cases graded in only one run are named, never dropped), and **codebase** (per tier group and ladder tier: both means, a signed delta, per-task win counts, and an exact two-sided binomial sign test at p < 0.05). **Same environment only**: it refuses on the FIRST differing stamp field and names it, because llama.cpp does not promise bit-identical results across configurations. The subject fields (`weights_revision`, `quant`) are exempt — they are what is being compared — and a differing task set always refuses. Verdicts name the model, never "A"/"B"; `no significant difference` is a first-class printed outcome, never resolved into a winner; a section one run never measured says so rather than vanishing. `--cross-runtime` relaxes the refusal for a named allow-list so a foreign-runtime run can be read against a llama.cpp one — see **Foreign runtimes** below. `--cross-flags` relaxes it for exactly the eight launch-flag fields (`kv_unified`, `n_batch`, `n_ubatch`, `type_k`, `type_v`, `flash_attn`, `spec_type`, `spec_draft_n_max`) and nothing else — a flag experiment on one runtime, one engine, one model — opening with a banner that names the flags that differ and ends "this measures the launch flags, not the model." The two masks compose. |
+| `pull <spec> [--name N] [--dry-run] [--model-loc DIR] [--license-url URL]` | Resolve revision, download (or adopt) quant-matching files, snapshot license + provenance, register. Shows a per-shard progress line on stderr (bytes, percent, rate, ETA) and resumes a partial shard from its `.part` with an HTTP `Range` request, size-verified before it is renamed into place. Idempotent: same spec+revision is a verified no-op; a NEW revision downloads but never repoints (that is `update`'s gated job). |
 | `list` | Table: active marker, name, quant, size on disk, revision. |
 | `use <name>` | Set the active model. Never auto-restarts — prints the restart hint. |
 | `rm <name> [--yes]` | Remove a model and its files. Confirmation required; refuses the active or currently running model. |
 | `show [name]` | Fully resolved server invocation + license provenance — zero mystery about what will run. |
-| `doctor` | Five checks (below) — four probe the server, one compares configuration. Skipped is reported as SKIP, never PASS. |
-| `capability recommend [--ctx N] [--role agent\|chat] [--refresh] [--limit N]` | Ranks the registered models for this machine. Gates first — anything that exceeds the budget, or cannot be sized, is listed with its reason rather than dropped. Then sorts: under `--role agent` a model whose chat template has no dedicated llama.cpp tool parser is **downranked with a note, not refused**; under `--role chat` the tool parser is ignored. `--refresh` is the **only** networked path — without it chekov ranks registered models only and never reaches out. |
-| `capability explain [name] [--ctx N]` | Read one model's GGUF header and print its fit arithmetic line by line: block count, the MTP/interval layer ladder, padded context, cache type, KV bytes, weights on disk. Local file read; no network. |
-| `capability graph [--ctx N]...` | Grid of registered models against context lengths. Each cell is two characters: the fit verdict, then whether its inputs were measured or predicted. A predicted GPU ceiling is announced in the header and changes the legend, because every verdict below it is then measured against a guess. |
-| `capability [--json]` | What this Mac is and what it can hold: chip, GPU cores, performance threads, macOS, and the GPU budget **with its provenance**. The budget is read from the engine (`llama-server --list-devices`) when it is built, from `iogpu.wired_limit_mb` when set, and only otherwise from the 75%-of-RAM formula — which measures 31457 MiB low on a 256 GiB M3 Ultra, so the source is always printed. |
+| `doctor` | Six checks (below) — five probe the server, one compares configuration. Skipped is reported as SKIP, never PASS. |
 | `setup [--dry-run]` | Engine clone/pull + cmake Metal build; creates `models/`/`logs/`; wired-limit verification (see Installation). Idempotent. |
-| `update --engine\|--model\|--all [--dry-run]` | Engine: git pull + rebuild, reports old→new commit. Model: re-resolve the active repo; new revisions land in a new `@rev` dir, license is diffed and **any change stops for explicit confirmation (STOP-4)** before an atomic registry repoint. Old revisions are never auto-deleted. |
+| `update --engine\|--model\|--all [--dry-run]` | Engine: fetch the pinned `[engine] git_ref` (or git pull), rebuild, verify the built `llama-server` runs, report old→new commit. Model: re-resolve the active repo; new revisions land in a new `@rev` dir, license is diffed and **any change stops for explicit confirmation (STOP-4)** before an atomic registry repoint. Old revisions are never auto-deleted. |
+| `env` | Stdout-only `ANTHROPIC_*` exports; diagnostics to stderr; safe for `eval "$(chekov env)"`. |
 | `integrate hermes [--yes]` | Surgical merge into `~/.hermes/config.yaml` (details below). |
 | `integrate claude` | Generate `bin/cclocal`; global Claude settings untouched. |
-| `env` | Stdout-only `ANTHROPIC_*` exports; diagnostics to stderr; safe for `eval "$(chekov env)"`. |
 | `launch <agent> [--model N] [--print] [--proxy-only [--port N]] [-- args]` | Start the agent wired to the local model: proxy in-thread, generated config dir, agent as a child (auto-starts the server if it isn't running). `--print` emits the command instead of running it. `--proxy-only` runs just the foreground protocol translator (Anthropic `/v1/messages` → the server's OpenAI endpoint) on `--port` (default 8787), with no child and no generated settings — for hand-wiring a different client. |
+| `completions <shell>` | Emit shell completions for `bash`, `elvish`, `fish`, `powershell` or `zsh` on stdout — what `make install` runs to write `shell/_chekov`. |
 
-### The five doctor checks
+**Codebase mode** (`capability bench --codebase <PATH>`) turns the user's own
+repository into a graded infill benchmark: 24 deterministic Rust tasks — 12
+same-file `in_file` spans, 6 `function_body` bodies, 6 `cross_file_first`
+call sites — are sampled from `HEAD` (`[bench] codebase_tasks` in
+`config.toml`), masked out, and run through `/infill`. It requires a clean tree and runs in a
+detached worktree, so the benchmark never touches uncommitted changes or the
+branch you're on — with work in progress, bench a clone rather than the copy
+you are editing. Six of the 24 tasks are `cross_file_first`: the mask is the
+first use in a file of a symbol declared in exactly one other file, and each
+is crossed twice — once with nothing but its own file, once with the
+defining file sent as llama.cpp's `input_extra` (capped at 32 KiB, windowed
+on the declaration line when the file is larger, and the row records which).
+The pairing is **textual, not resolved**: chekov is not a compiler, so it
+matches a declaration name against a call shape, and — since 2026-08-30 —
+requires the calling file to name the defining file's module, in a `use`
+statement or before a `::`. Without that second condition a bare `x.next()`
+matched whichever file happened to declare `fn next`. So the `context lift`
+measures what the defining file buys on tasks where the calling file already
+imports it; it is not a claim that the symbol is unrecoverable otherwise.
+Tiers 1–4 score the first `gold_lines` lines of each fill: `n_predict` is
+generous, and a model that answers a one-line span and then keeps writing
+should be graded on the answer, not on the token budget. Tier 5 reads the
+whole prediction. A name declared in two or more files is ambiguous and
+never masked, a name whose defining module the file never mentions is not a
+candidate, and the shortfall line counts both. Tiers 6–7 (compile gate, covering test) run only under
+`--allow-exec`. Because the task set now includes the new tier's ids, its
+hash — and so `corpus_id` changed: runs recorded before this are not
+comparable with runs after it, and `compare` refuses them by that field.
+Masks are boundary-scanned, not AST-derived, and the report always says so. A file with
+inline unit tests is kept and its `#[cfg(test)]` items are cut out before
+anything is sampled — the header's `tests elided: L lines in F files` says what
+that came to, so the model is never offered a test module as its answer. chekov
+sends the whole file and grades over the whole file, but llama.cpp's `/infill`
+windows the prompt at its batch size (about ¾·`n_batch` tokens of prefix and
+¼·`n_batch` of suffix), so a long file reaches the model only in part — the
+report's `engine window ≤ n_batch` says as much. `--dry-run` still creates and
+removes a detached worktree in the target repository: the task set is sampled
+from `HEAD` before anything is printed. A model without FIM tokens reports as
+N/A, never as a zero — an unsupported capability is not a failing score.
+
+**`--allow-exec`** turns on tiers 6 and 7. Tier 6 splices the fill into the
+worktree's copy of the file, runs `cargo check --message-format=json
+--offline`, and passes when the JSON stream carries no `error` diagnostic
+anywhere in the workspace — a fill that breaks a caller in another file fails,
+which is the point of the cross-file tier. Tier 7 then runs the repository's
+own tests for the masked symbol: the enclosing function's name (plus the
+cross-file symbol, when there is one), the nearest `Cargo.toml` above the file
+for the crate, up to five `#[test]` functions in that crate whose bodies name
+the symbol as a whole word — `tests/*.rs` included — and `cargo test -p <crate>
+--offline -- <t> --exact` for each. Tier 7 passes only when every candidate
+passes. **This runs the repository's code.** `cargo check` and `cargo test`
+execute its `build.rs` scripts, its proc-macros and its tests — the same trust
+as building the repository yourself. chekov bounds it and does not sandbox it:
+the detached worktree is the only place written (your checkout is never
+touched), one `cargo fetch` before the loop is the only networked step and
+every invocation after it carries `--offline`, `CARGO_TARGET_DIR` points at
+`eval/.scratch/target-<head12>` so nothing lands in the repository's own
+`target/`, each check gets 120 seconds and each test run 300 with the whole
+process group killed at the deadline, and every crossing is reverted with `git
+checkout --` and the bytes compared before the next one starts — a worktree
+that will not restore stops the run rather than measuring against a file
+nobody can vouch for. Nothing here is a silent zero: a missing toolchain, an
+offline registry, a timeout, a span outside every function, a crate with no
+covering test are each a counted, printed reason, and the report's `compile`
+mean is taken over crossings with a verdict only. Only Rust is implemented;
+the module is shaped for `tsc --noEmit` and `python -m py_compile` behind the
+same gate. Without the flag the ladder stops at tier 5 and the trailer reads
+`tiers 6-7 skipped: --allow-exec not given`. Because the stamp records
+`allow_exec`, `cargo_version` and `exec_target`, `compare` refuses across a run
+that executed and one that did not — they are different environments.
+
+**Foreign runtimes** (`capability bench NAME --runtime <name>@<version>
+[--upstream <url>] [--served-model <id>]`) let an OpenAI-compatible server you
+already started — MTPLX, MLX, anything on the same wire — stand in as the
+bench subject.
+`--runtime` is `UseRunning`-only for the subject: chekov never launches,
+installs, or tears down a foreign server, and refuses before any measurement
+if the named model isn't already serving (`--judge` is exempt — it still
+launches chekov's own local llama.cpp judge exactly as today, though
+`--runtime` together with `--judge` is refused by the existing memory-budget
+gate, since a foreign server chekov did not launch never comes down for the
+judge to load beside). Readiness is one plain `GET /v1/models`; the served
+ids are **printed, never asserted** — chekov cannot know how a foreign server
+names its own weights. The request wire's OpenAI `model` field is addressed
+by what the server actually serves, never by chekov's own registry name:
+`--served-model <id>` names it explicitly; absent the flag, a single served
+id is used automatically, and a server listing zero or several is a refusal
+(`RuntimeServedModelRequired`) naming the count rather than guessing. This
+matters because llama.cpp ignores the `model` field but mlx-lm **routes** on
+it, 404ing trying to download chekov's registry name from Hugging Face — a
+live finding serving under the registry name works around, `--served-model`
+fixes properly. The registry name still names everything else: the run
+directory, the stamp's weights identity, and the report header. A
+thinking-default model must be served with reasoning disabled (mlx-lm:
+`--chat-template-args '{"enable_thinking": false}'`) or the codebase suite's
+chat-FIM fills burn the gold-bounded budget on reasoning and fail loudly as
+`chat fill has no text content` — a second live finding, not yet automated.
+Launch flags chekov cannot observe are stamped with
+fixed sentinels (`ctx`/`n_parallel` `0`; the six flag fields `"unmanaged"`,
+a third spelling distinct from `"engine-default"`) rather than invented, and
+the stamp's new `runtime` field (`llama.cpp` unless declared — every run on
+disk already reads that way) sits ahead of `engine_build_commit`, so a
+cross-runtime pair mismatches there first. Codebase mode's FIM crossing rides
+`/infill` for llama.cpp and a deterministic chat-completions instruction for
+a runtime with none; the report names which (`fim transport: /infill` or
+`fim transport: chat`). `capability compare --cross-runtime` permits exactly
+`runtime`, `engine_build_commit`, the eight unmanaged fields and
+`prompt_set_hash` to differ, opens with a loud banner ending "this measures
+the runtimes, not the model.", and still refuses on everything else — plain
+`compare` refuses a cross-runtime pair on `runtime` like any other mismatch.
+Throughput and codebase chat-FIM crossings on a foreign run no longer need
+llama.cpp's non-standard `timings` object: they are timed by chekov's own
+wall clock over the streamed response instead. OpenAI-shaped `usage` token
+counts (`prompt_tokens`, `completion_tokens`) combine with two measured
+windows — request written → first SSE data frame, first data frame → stream
+end — to derive the same `prompt_per_second`/`predicted_per_second` shape
+the report already prints (decode divides by n−1 tokens, since the first
+token lands at the first-data mark; `cache_n` is recorded `0`, unknowable
+through a foreign server). This is honest client-wall-clock timing: it
+includes wire and translator overhead (microseconds on localhost, negligible
+against token times), and the first-data mark only approximates end-of-prefill
+because these servers stream tokens as they are generated — the report says
+so. A reply chekov cannot derive a timing from (no `usage` frame, fewer than
+2 completion tokens, a zero-length window) fails loudly per probe, naming the
+declared runtime and exactly what was missing. The stamp's `timing_source`
+field (`server-reported` by default — every run already on disk reads
+unaffected; `chekov-streamed` on a foreign run) drives one report line,
+`timing source: chekov-streamed (client wall-clock over SSE; includes wire
+overhead)`, printed only when it isn't `server-reported`; `--cross-runtime`
+now also permits `timing_source` to differ. The codebase mode's
+chat-completions FIM fallback rides the same timed crossing, so foreign
+codebase rows carry real timings too; the llama.cpp `/infill` arm and its
+timing path are untouched. The fixture and agentic suites now run on a
+foreign runtime too. Fixture crossings ride the same clock as throughput:
+llama.cpp keeps its buffered door, a foreign run times the streamed one.
+Agentic keeps both its doors' real transports — buffered vs. streamed is
+the suite's own point — but on a foreign run the buffered door, which an
+MLX-style server answers fine yet reports no `timings` object for, crosses
+untimed instead of failing; its rows carry a real grade with **no speed
+numbers**, by design, rather than an invented zero. The streamed door still
+derives real timings. llama.cpp's agentic/fixture rows are unaffected on
+every path. Live-verified against mlx-lm 0.31.3 serving
+Ornith-1.5-35B-A3B-MLX on this machine (see IDEAS.md).
+
+### The six doctor checks
 
 1. **OpenAI door** — `POST /v1/chat/completions` returns content
 2. **Anthropic door** — `POST /v1/messages` returns content
@@ -122,7 +276,11 @@ The registry stores the absolute path; everything else works unchanged.
    consecutive tokens or U+FFFD density over threshold (guards the known
    GGUF `blk.61` corruption class)
 5. **Context floor** — effective ctx ≥ 65536 when `hermes_ok = true`
-   (hard fail); advisory SKIP otherwise
+   (hard fail); advisory SKIP otherwise. Compares `models.toml` to
+   `config.toml` only — the one row that can pass with the server down
+6. **Context loaded** — the server's `/props` per-slot `n_ctx` equals the
+   effective `ctx_size`; the same assertion the bench makes before it records
+   a run. A mismatch names both numbers; an unreachable server is a FAIL
 
 ## Runbook
 
@@ -154,7 +312,8 @@ chekov runs any GGUF repo on Hugging Face. A workable way to choose:
    `UD-Q5_K_XL`, `Q8_0`, …) with a file size. The tag is what goes after the
    colon in the pull spec.
 3. **Size it against your memory.** Rule of thumb: `weights + KV cache + ~3 GiB`
-   must fit under `[limits] wired_limit_mb` (default: 187000 MB). KV cache at
+   must fit under the GPU budget `chekov capability` prints (`run` checks
+   exactly this, and `[limits] wired_limit_mb` can pin a floor). KV cache at
    q8_0 is roughly `ctx × cached_layers × kv_heads × head_dim × 2 × 1.0625
    bytes` — q8_0 is 34 bytes per 32 elements, not one byte, and
    `cached_layers` is **not** the model's layer count on modern architectures:
@@ -216,12 +375,44 @@ Then activate and verify:
 ```sh
 chekov use qwen3.8-27b
 chekov restart            # or `chekov run` if nothing is running
-chekov doctor             # both API doors, think-tags, NaN canary, ctx floor
+chekov doctor             # both doors, think-tags, NaN canary, ctx floor + loaded
 ```
 
 Pin a specific revision with `org/repo:QUANT@<sha>`; use `--dry-run` to see
 what would be downloaded; `--license-url` points the license snapshot at a
 non-standard location when the repo keeps it elsewhere.
+
+`--dry-run` prints the shard list with each file's byte size and the directory
+they would land in, and registers nothing. A download **resumes a partial
+shard**: each in-flight shard is written to a `.part` sibling, and the next
+`chekov pull` asks the hub for the rest of it with an HTTP `Range` request
+instead of starting the file again — which matters when a single shard is
+40 GB. The resumed bytes are checked before they are appended (the server has
+to answer `206` at exactly the offset already on disk, for a file of the size
+the API published) and the finished `.part` is checked against that size again
+before it is renamed into place: a short file is never renamed, and its `.part`
+is kept for the next run. A `.part` longer than the file can be is discarded
+rather than appended to. While a shard is in flight, a progress line — shard
+number, bytes, percent, rate, ETA — is written to **stderr**, so `chekov pull >
+log` keeps its one-line-per-shard stdout unchanged.
+
+**Which repo layouts `pull` reads.** The quant tag is matched against three
+shapes, and a repo only has to use one of them:
+
+- a folder per quant named by the tag — unsloth's `UD-Q5_K_XL/…`;
+- a folder per quant named after the model, with the tag in the shard's own
+  filename — bartowski's
+  `Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`;
+- flat files in the repo root — `Model-Q8_0.gguf`.
+
+The tag may be dot-separated (`Model.Q4_K_M.gguf`, the mradermacher style) and
+may be lowercase (`qwen2.5-0.5b-instruct-q4_k_m.gguf`, the `Qwen/*-GGUF`
+style): a spec matches a tag case-insensitively, and the registry records the
+repo's own spelling, because that spelling is also the download path. If one
+repo carries two spellings of the same tag, both are listed and an inexact
+spec is refused naming them — give the exact spelling. A repo that still
+reports "this repo exposes no .gguf files" has files whose names carry no
+`Q…`/`IQ…`/`BF16`/`F16`/`F32` token at all; check its file list.
 
 ### Swapping models
 
@@ -241,6 +432,84 @@ chekov pull unsloth/DeepSeek-V3-GGUF   # errors with the available tags
 
 No file edits needed. `chekov show <name>` prints the exact invocation.
 
+### Tuning launch flags
+
+Every model launches with the flags its `models.toml` entry carries. Whether
+any of a small set of alternatives beats them on **this** Mac is a
+measurement, not a guess, and `chekov tune` makes it:
+
+```sh
+chekov tune --dry-run                          # the plan: stages, launch ceiling, wall clock; nothing starts
+chekov tune                                    # measure the active model; a confirm gate before the first launch
+chekov tune ornith-1.5-35b-a3b --stages spec   # one stage only (any subset, always in the fixed order)
+chekov tune --apply --yes                      # write the winner into models.toml; refused on `defaults won`
+```
+
+The plan, as printed on this desk:
+
+```
+tune ornith-1.5-35b-a3b @ ctx 262144, probe depth 4096 × 5 reps
+  baseline   --jinja --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 -np 1 --reasoning-format none --temp 0.6 --top-p 0.95 --top-k 20 --spec-type draft-mtp --spec-draft-n-max 1   (current flags)
+  server     will stop the running 'ornith-1.5-35b-a3b' first — it is not restarted
+  spec       4 candidates   (1 is the incumbent; needs an MTP head in the GGUF)
+  fa         2 candidates   (1 is the incumbent)
+  kv         2 candidates   (1 is the incumbent; the f16 KV is footprint-gated per trial)
+  batch      4 candidates   (1 is the incumbent)
+  ubatch     4 candidates   (1 is the incumbent; values ≤ the incumbent batch)
+  ≤ 12 launches, ~58 min estimated (load ≈ 4 s/GiB × 35.2 GiB, probe ≈ 148 s each)
+```
+
+Read the `server` line before you confirm. tune stops the server it can name
+and does not bring it back — `chekov run` afterwards. It never stops a server
+it cannot name (`ServerModelUnknown` refuses instead), it never launches a
+candidate it can tell in advance will not load (`skipped:` on the line, with
+the reason), and a candidate that dies at load is reported as died within
+seconds, not after the readiness budget. Every trial answers the same
+4096-token probe; `pmset -g therm` is read before and after, and a throttled
+clock is noted on the line rather than hidden in the number.
+
+Five stages in a fixed order, each descending from the previous stage's
+winner: `spec` (the model's own MTP draft head at each `[tune] spec_drafts`
+length, or off), `fa`, `kv`, judged on **decode**; then `batch`, `ubatch`,
+judged on **prefill**. A candidate wins its stage only when `stats::compare`
+says `Faster` on the stage's metric at `[bench] significance_pct` and the
+other metric is not worse by more than `[tune] guard_tolerance_pct` of the
+incumbent's median. Every line says what it saw and what it decided. This is
+the `spec` stage of the 2026-09-05 run on this desk, rebuilt verbatim from
+its record:
+
+```
+tune ornith-1.5-35b-a3b (Q8_0@fbbaed45c2f0e200276ffa51701a24d45dc7f57e) — machine c057455fb3a1, engine 0f194b907, probe depth 4096 × 5
+  baseline   decode 67.9 [67.6..68.4]  prefill 150 [149..154]   --jinja --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 -np 1 --reasoning-format none --temp 0.6 --top-p 0.95 --top-k 20
+  spec       mtp:1    decode 74.7 [72.1..76.7]  prefill 126 [121..130]   faster on decode but prefill -16% is beyond the 15% guard — incumbent kept
+  spec       mtp:2    decode 66.2 [64.7..67.1]  prefill 124 [120..128]   no significant difference vs 67.9 — incumbent kept
+  spec       mtp:3    decode 55.9 [54.3..57.0]  prefill 127 [119..129]   slower on decode — incumbent kept
+  defaults won — no candidate beat the current flags at p < 5% on its metric within a 15% guard on the other
+  record     tune/20260906T022935Z-ornith-1.5-35b-a3b.json
+```
+
+`defaults won` is a first-class result, not a failure. With a winner the block
+reads `winner <flags>` over a `decode X vs Y (+N%)   prefill X vs Y (…)` line
+and ends `apply with: chekov tune <name> --apply`. The record holds every
+trial's argv, samples, thermal readings and verdict, and the thresholds they
+were judged under, so a run from before a knob existed still reads under the
+rule it actually used.
+
+**What tune cannot see.** One depth (`[tune] depth`, 4096 tokens) of one
+prose-shaped probe. Measured 2026-09-03 on this desk: the `spec` stage
+rejected `mtp:1` at 4K, yet the same two flags hand-applied and benched on
+chekov's own repository gave +29/+31/+21% decode at depths 1024/4096/16384
+with every quality metric identical, compile and test tiers included. Two
+things follow. `guard_tolerance_pct` is a per-machine number: the same trade
+measured −13%, −13% and −16% prefill across three runs here, one point either
+side of the shipped 15, so this desk sets 20 in `config.toml`. And a `spec`
+rejection is a prompt to measure your real work, not a verdict on it: bench
+the model on your own repository as launched and again with the candidate in
+`extra_flags`, then `capability compare A B --cross-flags`, which masks
+exactly the eight launch-flag fields and says so in its banner. The daily
+driver above runs `--spec-type draft-mtp --spec-draft-n-max 1` on that
+evidence.
+
 ### Updating
 
 ```sh
@@ -254,17 +523,61 @@ the license text changed between revisions — vendors have re-licensed
 post-release before; this gate is deliberate. Old revision dirs stay on disk
 until you `chekov rm` them.
 
+**Pinning the engine.** Weights are revision-pinned; without a pin the binary
+that runs them is whatever upstream HEAD was on the day of `setup` /
+`update --engine`. Set `[engine] git_ref` in `config.toml` to a branch, tag or
+commit and both commands `git fetch origin <ref>` + `git checkout --detach
+FETCH_HEAD` instead of fast-forwarding, and `update --engine` reports
+`engine: <old> → <new> (pinned to <ref>)`. Absent, nothing changes. A ref git
+would read as an option (`-…`) or that splits into several arguments is
+refused at config load, naming the key.
+
+Every engine build ends by running the binary it just produced
+(`llama-server --version`), so a llama.cpp change that breaks the build's
+output fails there as `EngineStepFailed` naming the step, rather than later as
+a failed `run`. There is no auto-rollback: `logs/chekov.engine` names the
+commit to go back to.
+
+**A diverged engine checkout.** If you have ever cherry-picked a fix into
+`llama.cpp/` by hand, that checkout carries a local commit and is no longer a
+descendant of `origin/master`, so the unpinned path — whose step is
+`git pull --ff-only` — fails at "update llama.cpp checkout" with git's
+`Not possible to fast-forward, aborting`. Nothing was rebuilt and the engine
+you have keeps working; only the update stopped. Either set `[engine] git_ref`
+to the ref you actually want, or reconcile and rebuild by hand with the same
+lines chekov itself runs:
+
+```sh
+git -C llama.cpp fetch origin && git -C llama.cpp rebase origin/master
+cmake -S llama.cpp -B llama.cpp/build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build llama.cpp/build --config Release --target llama-server -j
+llama.cpp/build/bin/llama-server --version     # the verify step
+```
+
+**Updating chekov itself.** `make` and `make setup` build into `target/`; they
+do **not** refresh the binary on your PATH. `make install` does — it re-runs
+`cargo install --path .` and regenerates the completions. After pulling new
+commits, run `make install` before blaming a missing flag on the tool: a
+days-old `~/.cargo/bin/chekov` is the likelier explanation.
+
 ### Troubleshooting
 
 | Symptom | Meaning / fix |
 |---|---|
 | `port 8080 is already in use` | `chekov status`; if it's a chekov server, `chekov stop`/`restart`; otherwise free the port or change `[server] port` in `config.toml`. |
-| `wired limit is X MB but Y MB is required` | Run the printed `sudo sysctl iogpu.wired_limit_mb=Y`, then retry. Reboots reset it. |
+| `model 'X' needs about N MiB at ctx C … but this Mac's GPU budget is B MiB` | The model does not fit this machine at that context: pull a smaller quant, lower its `ctx_size` in `models.toml`, or `chekov capability recommend` to see what fits. No sysctl changes this. |
+| `wired limit is X MB but Y MB is required` | You configured `[limits] wired_limit_mb`: run the printed `sudo sysctl iogpu.wired_limit_mb=Y`, then retry. Reboots reset it. |
 | `stale pidfile … cleaned` on `stop` | The server died earlier (check the log tail). Just `chekov run` again. |
 | Doctor: NaN canary FAIL | Matches the known GGUF corruption class — re-pull the shards (`chekov pull <spec>`, size-verified) and re-run doctor. |
 | Doctor: think-tag FAIL | The model's `extra_flags` lost `--reasoning-format none`, or the template ate the tags — check `chekov show`. |
 | First Claude Code call is slow (~5–6 min) | Expected: Claude Code's initial request carries a ~60k-token system+tools prompt; MiniMax prompt-processes at ~180 tok/s. The server's prompt cache makes subsequent calls fast. |
 | Registry corrupt | The error names the file; restore from a backup or delete `models.toml` and re-`pull` (weights are untouched). |
+| `Not possible to fast-forward` on `setup` / `update --engine` | The `llama.cpp/` checkout has diverged from `origin/master` (a hand-applied commit), and the step is a `git pull --ff-only`. The built engine is untouched. Pin `[engine] git_ref`, or rebase and rebuild by hand — see [Updating](#updating). |
+| `quant tag 'X' not found … (none — this repo exposes no .gguf files)` | Either the installed binary predates the folder-per-quant fix (`make install`), or the repo's filenames carry no `Q…`/`IQ…`/`BF16`/`F16`/`F32` token in any spelling (dot- and dash-separated, upper- and lowercase are all read). Check the repo's file list before assuming the tag is wrong. |
+| `WorkingTreeDirty` from `capability bench --codebase` | Codebase mode refuses a dirty tree so the task set is exactly what `HEAD` says. Commit, stash, or bench a clean clone of the repository. |
+| `ExecWorktreeDirty` from `capability bench --codebase --allow-exec` | A `git checkout --` did not restore the file tier 6 spliced. The run stopped rather than measure the next crossing against a file it cannot vouch for. Inspect the worktree the message names, delete it (`git worktree remove --force <path>`, then `git worktree prune`), and resume with `--resume <RUN>`: every row up to that crossing is intact. |
+| `codebase N/A — infill unsupported by this model` | The model's GGUF carries no FIM tokens, so `/infill` has nothing to fill. That is a missing capability, not a failing score — it is never reported as a zero. |
+| `tune: the baseline for 'X' could not be measured` | The model's own current flags did not survive a probe (the server never became ready, the probe returned no timings, or too few samples survived warmup) — there is nothing to compare candidates against. Run `chekov run X` and `chekov doctor` first; fix whatever they surface, then retry `chekov tune X`. |
 
 ## Integrations
 
@@ -357,9 +670,13 @@ chekov pull https://huggingface.co/org/repo        # normalized to org/repo
 
 Short names derive from the repo tail: `-GGUF` stripped, lowercased
 (`unsloth/MiniMax-M2.7-GGUF` → `minimax-m2.7`). Override with `--name`.
-Quant tags are matched by a single source of truth (subdir-style
-`UD-Q5_K_XL/…` and flat `…-Q8_0.gguf` both work), so `Q5_K_XL` can never
-accidentally select `UD-Q5_K_XL` files.
+Quant tags are matched by a single source of truth — subdir-style
+`UD-Q5_K_XL/…`, a model-named subdir carrying the tag in the shard filename
+(`Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`), flat `…-Q8_0.gguf`, and
+dot-separated `Model.Q4_K_M.gguf` all work — so `Q5_K_XL` can never
+accidentally select `UD-Q5_K_XL` files. Matching is case-insensitive
+(`Q4_K_M` selects a repo's `q4_k_m`) and the repo's spelling is what gets
+recorded; a repo with two spellings of one tag refuses an inexact spec.
 
 ## Registry: flags concatenate, never replace
 
@@ -388,6 +705,13 @@ extra_flags = ["--reasoning-format", "none",
                "--temp", "1.0", "--top-p", "0.95", "--top-k", "40"]
 ```
 
+An entry that `capability bench --judge <NAME>` should serve needs one more
+field, added by hand — `pull` never writes it, and `role` gates nothing else,
+though `chekov list` marks the entry that carries it in its `ROLE` column:
+`role = "judge"` on that `[models.<name>]` table. Any other value is refused
+at registry load, naming the one accepted value: `role = "candidate" is not a
+role chekov knows; the one accepted value is "judge"`.
+
 ## License snapshots — why
 
 Each pull writes `LICENSE.snapshot` and `LICENSE.provenance` (repo, revision,
@@ -406,14 +730,57 @@ port = 8080               # default
 api_key = "chekov-local"  # default; passed to llama-server --api-key
 
 [limits]
-wired_limit_mb = 187000   # required GPU wired memory before `run` proceeds
+# wired_limit_mb = 187000 # optional floor: `run` refuses below it. Absent (the
+                          # default), the model's own footprint is the requirement
 hermes_ctx_floor = 65536  # hard floor when a model is hermes_ok
 
 [doctor]
 canary_max_tokens = 1500
 degenerate_run_len = 30
 replacement_char_max_pct = 5
+
+[engine]
+# git_ref = "b7000"       # pin the engine to a branch, tag, or commit;
+                          # absent = upstream HEAD on the day of setup/update
+
+[bench]                          # `chekov capability bench`
+depths = [1024, 4096, 16384]     # prompt depths swept, in approximate tokens
+repetitions = 5                  # per depth; the first is dropped as warmup
+max_tokens = 128                 # decode length per probe
+significance_pct = 5             # median delta below this: no difference claimed
+ready_max_polls = 600            # readiness budget: polls × interval
+ready_interval_ms = 500
+seed = 42                        # sampling seed pinned onto every probe
+release_pct = 80                 # teardown waits for this % of the budget to free
+release_max_polls = 60           # release budget: polls × interval
+release_interval_ms = 500
+codebase_tasks = 24              # `--codebase` tasks per run (⅔ in_file, ⅓ function_body)
+judge_max_tokens = 512           # --judge reply budget; 2x the largest reply measured in the 2026-08-30 probe
+judge_min_consistency_pct = 70   # swap-agreement floor below which the equiv column is voided
+judge_reasoning_effort = "low"   # none|low|medium|high, forwarded to the judge's wire only
+
+[tune]                                    # `chekov tune`
+depth = 4096                              # probe prompt depth in tokens
+spec_drafts = ["off", "mtp:1", "mtp:2", "mtp:3"]   # stage spec: off, or draft-mtp at that draft length
+flash_attn = ["on", "off"]                # stage fa
+cache_types = ["q8_0", "f16"]             # stage kv (applied to K and V together)
+batch_sizes = [512, 1024, 2048, 4096]     # stage batch
+ubatch_sizes = [256, 512, 1024, 2048]     # stage ubatch (≤ the incumbent batch)
+guard_tolerance_pct = 15                  # a winner may lose this much on the other metric; 0 = strict
 ```
+
+`[limits] hermes_ctx_floor` is the hard context floor `doctor` enforces for a
+model marked `hermes_ok`; `[doctor] replacement_char_max_pct` is the U+FFFD
+density above which the NaN canary fails. `[bench] judge_max_tokens` bounds a
+`--judge` reply (default 512, twice the largest completion the 2026-08-30
+probe measured); `judge_min_consistency_pct` (default 70) is the swap-
+agreement floor below which the report's `equiv` column is voided rather than
+trusted; `judge_reasoning_effort` (default `low`) is forwarded to the judge's
+wire only — gpt-oss needs it to bound its thinking, Gemma's template ignores
+it. `[tune]`'s seven keys are `chekov tune`'s own probe depth, its five
+stages' candidate lists and the guard tolerance; `repetitions`, `max_tokens` and `significance_pct`
+come from `[bench]` — one definition of "how many samples" and "what is
+significant" for every measurement chekov makes.
 
 Unknown keys are rejected loudly (deny_unknown_fields), never ignored.
 `config.example.toml` is a commented starting point; `config.toml` itself is
@@ -430,7 +797,12 @@ models.toml          # the registry — managed by pull/use/rm/update (gitignore
 models/<name>@<rev12>/     # weights + REVISION + LICENSE.snapshot/.provenance
                            # (or an absolute --model-loc dir)
 logs/                # chekov.pid, chekov.model, llama-server.log
+logs/chekov.engine   # the commit the engine was built from — the rollback pointer
 llama.cpp/           # engine checkout + Metal build (managed by setup)
+eval/<run-id>/       # one stored bench run: stamp.json + results.jsonl
+eval/.scratch/       # transient `--codebase` worktree; hidden from every enumerator
+tune/<utc>-<model>.json  # one tune run: every trial's argv, samples, verdict and the thresholds it used
+reports/             # default destination for `capability graph --svg`
 agents/<agent>/      # generated agent settings for `chekov launch` (gitignored)
 bin/cclocal          # generated by `chekov integrate claude`
 shell/chekov.zsh     # PATH + cclocal alias + completions (sourced from ~/.zshrc)
@@ -454,7 +826,11 @@ make lint   # cargo fmt --check && cargo clippy --all-targets -- -D warnings
 - `deny.toml` is authored for CI supply-chain checks (`cargo deny`); CI
   (`.github/workflows/ci.yml`) runs fmt + clippy + tests on macOS and
   `cargo deny` on every push and PR
-- Changes are tracked in [CHANGELOG.md](CHANGELOG.md)
+- The pre-push gate is `pushkin floor` — fmt, clippy pedantic under
+  `-D warnings`, and the test suite in one command; the `make` targets above
+  are its individual halves
+- Changes are tracked in [CHANGELOG.md](CHANGELOG.md); open ideas and their
+  status live in [IDEAS.md](IDEAS.md)
 
 ### Cutting a release
 

@@ -33,7 +33,16 @@ weights are revision-pinned; the binary that runs them is not. Proposal: an
 FETCH_HEAD` instead of `pull --ff-only`, and `--branch <ref>` on the clone.
 Deferred from the provenance work, which only records the built commit — pinning
 adds config surface and changes what `setup` does on every machine.
-Proposed 2026-08-25 — status: OPEN
+SHIPPED 2026-08-29 as `[engine] git_ref` (branch, tag, or commit). Absent means
+today's behaviour exactly — nothing changes until a machine opts in. Pinned:
+`git fetch origin <ref>` + `checkout --detach FETCH_HEAD` (never a pull; no
+`--branch` on the clone, so a sha is a valid pin); `update --engine` prints
+`(pinned to <ref>)`. A ref starting with `-` or containing whitespace is
+refused at config load naming the key — git would read the first as an option.
+Why it earned its place: on 2026-08-28 the engine had to be moved to a
+master-plus-one-cherry-pick branch by hand to gain `qwen4exp`, and `update
+--engine` on the old fix branch reported `dda1b0d67 → dda1b0d67`.
+Proposed 2026-08-25 — status: SHIPPED
 
 ## Verify the engine binary after building it (2026-08-25)
 `update --engine` never runs the binary it just built: a llama.cpp change that
@@ -44,7 +53,11 @@ Auto-rollback was considered and rejected — `git checkout <before>` plus a ful
 rebuild is a multi-minute silent side effect, the opposite of the loud-failure
 creed. With the commit now recorded in `logs/chekov.engine`, a manual revert has
 something to name.
-Proposed 2026-08-25 — status: OPEN
+SHIPPED 2026-08-29: `setup_steps` ends with `<engine>/build/bin/llama-server
+--version` as its own `EngineStep` ("verify the built llama-server runs"), on
+both the pinned and the unpinned path; it prints under `--dry-run` and fails
+as `EngineStepFailed` naming the step. No rollback, as decided above.
+Proposed 2026-08-25 — status: SHIPPED
 
 ## Replace hf-hub with the ureq already in the tree (2026-08-25)
 `hf_hub` appears at exactly one call site (`core/hub.rs:363`) and its three-call
@@ -53,7 +66,14 @@ of the crate's 256 transitive dependencies — including tokio, reqwest, hyper a
 the xet stack. chekov already queries the HF API over ureq at `hub.rs:126`.
 Against it: hf-hub provides resume and Xet-accelerated transfer, which matter for
 100+ GB pulls; hand-rolling means Range-request resume and losing Xet.
-Proposed 2026-08-25 — status: OPEN
+DONE (commit 0bc0b0d, "drop hf-hub for a streaming ureq download — 256 crates
+to 66"): `hub::fetch_to` streams each file over ureq into a `.part` sibling
+and renames it into place; Xet-backed repos redirect to a CAS bridge that
+serves plain HTTPS with a content-length, verified against
+unsloth/MiniMax-M2.7-GGUF. Range-request resume was NOT built — an interrupted
+shard restarts from zero. Recorded here 2026-08-29 because the entry still
+read OPEN.
+Proposed 2026-08-25 — status: DONE (partial-shard resume SHIPPED 2026-08-29)
 
 ## `chekov stop --if-running` (2026-08-26)
 A teardown script cannot call `stop` idempotently: stopping an already-stopped
@@ -62,7 +82,10 @@ that benign case from a real failure. Proposal: an opt-in `--if-running` flag
 that prints "nothing to stop" and exits 0. Opt-in, not the default — a silent
 no-op by default would weaken the loud-failure creed. A new flag is new
 capability, so it waits here.
-Proposed 2026-08-26 — status: OPEN
+SHIPPED 2026-08-29 exactly as proposed: the flag covers only "no pidfile at
+all"; a stale pidfile is still cleaned and reported (already exit 0), and a
+stop that fails still fails, flag or not.
+Proposed 2026-08-26 — status: SHIPPED
 
 ## `update --accept-license-change` for unattended runs (2026-08-26)
 `update --model` cannot run in cron once a vendor changes their license text:
@@ -84,7 +107,13 @@ loaded, which can differ from the registry's intent indefinitely (the
 llama-server's `/props` for `n_ctx` and comparing it to the effective
 `ctx_size`. A new check is new capability, and it touches every "five checks"
 doc surface, so it waits here.
-Proposed 2026-08-27 — status: OPEN
+SHIPPED 2026-08-29 as the sixth row, "context loaded (server /props)",
+reusing the bench's `runner::assert_props_ctx` verbatim (doctor and bench
+cannot disagree). `/props` is behind `--api-key`, so doctor passes
+`serve::get_bearer` through the bench's `PropsFetch` seam — no change to the
+`HttpClient` trait or any fake. Unreachable = FAIL, like the other server
+rows. Every "five checks" surface now says six.
+Proposed 2026-08-27 — status: SHIPPED
 
 ## Machine capability scan, frontier graph, recommendations and agent bench (2026-08-25)
 `chekov capability {scan,graph,recommend,explain,bench,compare}` — probe the machine
@@ -97,7 +126,244 @@ machine where the engine reports 228065 MiB — chekov understates its own budge
 Verified 2026-08-27: `./llama.cpp/build/bin/llama-server --list-devices` prints
 `MTL0: Apple M3 Ultra (228065 MiB, 228064 MiB free)`.
 Supersedes the arithmetic in `references/model-fit-sizing.md` (see "Model-fit sizing", above).
-Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slices 5-6 OPEN**
+`--codebase` leftover: a crash between the worktree add and its removal leaves
+`<eval>/.scratch/codebase-tree-<head12>` on disk, registered in the target repo.
+It is hidden, so nothing that enumerates the eval dir reads it, and the next run
+removes and re-adds it itself — the manual cleanup, if you want the space back
+now, is `git worktree prune` in the target repo plus deleting that directory.
+Round check 2026-09-06: every slice-6 item in spec §12 has shipped (worktree
+isolation, `--allow-exec`, the leakage filter, HEAD-seeded sampling, `/infill`
+N/A, `--svg`, `--judge`), so what this entry still owes is §7.2's deferred
+probes and the seed counts. Ordered by what the evidence says pays next:
+`tool_loop` — single-turn `tool_emit` is saturating here (8/10, 8/10, 10/10,
+9/10 across the four face-off models) and in the field (a 0.97 frontier on
+BFCL-style single calls against a real spread on BFCL-v4 Multi-Turn and
+tau-bench); design APPROVED 2026-09-09 —
+`docs/superpowers/specs/2026-09-06-tool-loop-probe-design.md` is binding. Then
+`long_ctx_trace`, which only pays once a run reaches past the 16K depth the
+sweep stops at today (see "tune judges at 4096 tokens" below) — at the
+current depths its recommended `ctx_size` would read "≥16384, the largest
+measured", which recommends nothing. `hallucination` is largely covered by
+codebase tier 5 (repo-symbol existence) and `diff_fidelity` measures an edit
+shape (unified diffs) Claude Code does not emit — both stay deferred on
+purpose. `think_leak` still waits on §13 Q5. The agentic set stands at
+10/7/12 of the spec's 30/30/40; growing it breaks comparability with every
+stored agentic run by construction, so it is its own decision.
+Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) v0 SHIPPED 2026-08-28 (--suite agentic: tool_emit/grammar_gap/instruction seed set, growing toward 30/40; deferred: diff_fidelity+tool_loop+long_ctx_trace+hallucination need the §8/§9 corpora, think_leak waits on §13 Q5); slice-5 "`--metric tok-s` upgrades from predicted to measured" SHIPPED 2026-08-28 (fixed bands, deepest-depth median, exact-match + stale footer); fixture-v1 content release-gated; slice 6 OPEN (`--svg` SHIPPED 2026-08-28; --codebase slice A SHIPPED 2026-08-29 (Rust, same-file, tiers 1-5); `#[cfg(test)]` rule amended 2026-08-29 (items elided, file kept); slice B1 SHIPPED 2026-08-29 (cross_file_first, input_extra, two arms and the measured context lift; quota 12/6/6, corpus_id changed); slice B2 (exec tiers behind --allow-exec) SHIPPED 2026-08-30; slice C (--judge) SHIPPED 2026-08-30 (gpt-oss-20b recommended; probe in the spec §3.0))**
+
+## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
+`response_format` json_schema is refused (HTTP 400, "Failed to initialize
+samplers") by this engine for `ornith-1.5-35b-a3b`, so the §7.2 grammar_gap
+axis reports N/A on it. Root cause, verified in source and reproduced
+live: on `/v1/chat/completions` llama.cpp builds a grammar whose root is
+`"<|im_start|>assistant\n" space response-format`, then prefills the FULL
+generation prompt — which this template ends with `<|im_start|>assistant\n<think>\n`
+— through that grammar sampler. The root cannot accept the `<think>\n` the
+template itself emitted, so sampler init throws before a single token is
+generated. `/completion` (no generation prompt, no prefill) accepts every
+schema shape including oneOf+const, so the schema converter is not at fault.
+
+Candidate mechanisms, and where each stands:
+
+(a) **raw GBNF via the `grammar` field — REJECTED, do not build this.** It does
+    return 200 and did produce a correct forced call for te-002 (raw grammars
+    are USER-type and skip the prefill), which makes it look attractive. It is
+    strictly worse than the current N/A. The reply comes back as
+    `<think>\n{...}`: the template's `<think>` is prompt-emitted, so no grammar
+    rule can consume it, and because the grammar forbids `</think>` the span
+    never closes. `strip_thinking` refuses an unterminated span BY DESIGN, so
+    grading sees no text and every forced case becomes a SILENT failure —
+    trading loud engine errors for quiet fabricated model failures, the exact
+    trade this axis exists to prevent. Making it correct would mean hardcoding
+    each model family's reasoning-tag convention into the grammar root, and
+    would forbid reasoning in the forced arm while the unconstrained arm
+    reasons freely — a confound injected into the very number designed to
+    detect self-deception.
+
+(b) **per-request `"reasoning_format":"deepseek"` — VALIDATED 2026-08-29, SHIPPED.**
+    Returns 200 on the same schema that 400s, because that flag gates whether
+    the `<think>` alternative enters the grammar (`chat.cpp:1187`
+    `extract_reasoning`). Live on engine 0f194b907 with `max_tokens=200`:
+    `content` = `{"name": "get_weather", "arguments": {"location": "Paris"}}`,
+    the reasoning in `reasoning_content`, `finish_reason: stop`. The earlier
+    doubt was only the 30-token budget. Built as `runner::FORCED_REASONING_FORMAT`
+    on the forced wire ONLY (the unconstrained and streamed wires are
+    byte-identical to before); the run head records it and the `grammar_gap`
+    line prints `forced pass ran with reasoning extracted (deepseek)`, so the
+    one extra difference from the unconstrained arm is named, not hidden.
+    Also established 2026-08-29: the human's cherry-picked fix (0f194b907,
+    `chat-auto-parser-generator.cpp`) is correct for AUTOPARSER templates
+    (MiniMax-M2) but ornith's template (`<tool_call>` + `<think>` +
+    `<|im_start|>`) is routed to the SPECIALIZED handler at `chat.cpp:1166-1300`
+    (hardcoded `GEN_PREFIX`), whose grammar root the server logged as
+    `root ::= "<|im_start|>assistant\n" space response-format` — no `<think>`
+    alternative. The upstream re-port belongs at `chat.cpp:1233-1239`; chekov
+    does not wait for it.
+
+(c) **Patch llama.cpp upstream — worth a PR, but sequence nothing behind it.**
+    The narrow fix is in `chat.cpp`'s specialized handlers: build the prefix
+    from `data.generation_prompt` rather than the hardcoded `GEN_PREFIX`, or
+    admit the `<think>` alternative whenever `supports_reasoning` regardless of
+    `extract_reasoning`. chekov must never depend on it: chekov tracks
+    tip-of-master with no pin, users run whatever they built, and an upstream
+    merge does not retroactively repair anyone's binary.
+
+Open question for the human: §7.5 says an N/A axis withholds the composite,
+but §7.5's weight table gives `grammar_gap` ZERO weight — it is a diagnostic
+control, not a scored axis. Withholding on it would make the composite
+permanently unobtainable on any llama.cpp build with a thinking template.
+Decide before a composite is implemented.
+
+Note a false-pass hazard for whoever builds this: an EMPTY schema, and
+`response_format: {"type":"json_object"}`, both return 200 with UNCONSTRAINED
+prose — no grammar is attached at all. A preflight probing with `{}` would
+conclude structured output works and then fabricate passes, the mirror image
+of the failures this N/A change removed. Probe with a non-empty schema only.
+Proposed 2026-08-28 — status: RESOLVED (mechanism (b) shipped 2026-08-29, see
+above); the §7.5 composite question stays open until a composite exists
+
+## Streaming probes for bench (2026-08-28)
+Spec §7.1 asked for probes over the STREAMING seam as well ("what makes
+streaming-only defects reachable — interleaved parallel tool-call deltas, an
+upstream error frame swallowed into a fake `end_turn`, an unterminated
+`<think>` eating the turn"). Only the non-streaming half was built, and the
+first agentic run found exactly that class of bug: the streaming translator
+stripped thinking spans while the non-streaming one did not, so the two halves
+of the same translator disagreed about what the agent receives. Claude Code
+streams; the bench did not — so the bench was grading a path the agent never
+takes. Fixed for thinking, but the asymmetry class remains until probes cross
+`stream_translator()` the way `serve::relay` does.
+SHIPPED 2026-08-28: `runner::cross_streaming` puts `stream: true` on the
+Anthropic request, pumps the SSE body through a fresh `stream_translator()`
+exactly as `serve::relay` does, and reassembles the agent-side events into the
+message an SDK client holds at `message_stop`, so the same graders read it.
+Every unconstrained agentic case now crosses BOTH doors (no flag — Claude
+Code's door is not optional); rows carry `transport`; the report prints
+`asymmetry <suite> <case>: buffered PASS, streamed FAIL — <reason>` for every
+case that disagrees with itself. An `error` frame is `BenchStreamFailed` —
+recorded unavailable, never a forged `end_turn`. Still buffered by design: the
+throughput sweep (its numbers are upstream timings either way) and the
+grammar-forced pass (its axis is the grammar gap). Still out of reach, as §7.1
+states: the socket — `serve.rs`'s HTTP/1.1 framing and chunked encoding.
+Proposed 2026-08-28 — status: SHIPPED
+
+## `EndpointDown` claims "not answering" for a request that WAS answered (2026-08-28)
+A 400 refusal renders as "endpoint ... is not answering ... restart with
+`chekov restart`". The endpoint answered — it refused — and restarting cannot
+help when the request itself is unacceptable. Surfaced by the grammar_gap N/A
+message, whose remediation advice is actively misleading. Wants a distinct
+variant for "the upstream refused this request" carrying the server's own
+explanation, now that `hub::post_json` preserves it.
+SHIPPED 2026-08-29 as `ChekovError::UpstreamRefused { url, status, reason }`
+via one classifier, `serve::answered`, used by `hub::post_json` and
+`get_bearer`: 2xx is the body, anything else is a refusal carrying the
+status and the server's own words, and the message says the server is up and
+the request is what to fix (`chekov show`, logs/llama-server.log).
+`EndpointDown` keeps its meaning — connect/send/read failures, readiness
+timeouts, an unparseable `/props`. The bench's forced-pass latch now fires
+on `UpstreamRefused` only; before, a dead socket mid-run would have been
+written off as an engine limitation.
+Proposed 2026-08-28 — status: SHIPPED
+
+## The non-streaming translator drops `reasoning_content` (2026-08-28)
+`to_anthropic_response` reads `message.content` and `message.tool_calls` only.
+A model served with `--reasoning-format auto|deepseek` puts its reasoning in
+`message.reasoning_content`, which the streaming path turns into a `thinking`
+block and the non-streaming path silently discards (§C.2: nothing degrades
+silently). Not currently reachable — every registry entry uses
+`--reasoning-format none` — which is why it is filed rather than fixed.
+Became reachable 2026-08-29 when the bench's forced pass started asking for
+`reasoning_format: deepseek` per request. FIXED the same day: a non-empty
+`reasoning_content` is the first content block, `{type: thinking, thinking,
+signature: ""}` — the block `ClaudeStream::on_thinking` opens — ahead of the
+text and `tool_use` blocks; a test holds the two paths to the same block
+sequence. Graders read text blocks only, so bench verdicts are unchanged; the
+stored artifact simply stops losing the reasoning.
+Proposed 2026-08-28 — status: FIXED
+
+## Bench GLM-5.3-Flash — blocked on upstream llama.cpp (2026-08-28)
+`unsloth/GLM-5.3-Flash-GGUF` (arch `glm5_next`, released 2026-08-26) needs
+llama.cpp PR #27754 (https://github.com/ggml-org/llama.cpp/pull/27754), which
+is not on `master` as of 2026-08-28 (`d7bd3bfca`): `llama-arch.cpp` there has
+no `glm5*` entry. `chekov update --engine` tracks master only, so the engine
+cannot reach it, and building from a PR branch would stamp every run with a
+non-master commit that no later run could compare against. Human's call
+2026-08-28: skip until the PR merges. When it does: `chekov update --engine`,
+then `chekov pull unsloth/GLM-5.3-Flash-GGUF:UD-Q3_K_XL --model-loc
+/Volumes/jane/models` (137.4 GiB; UD-Q4_K_XL is 186 GiB and tight against the
+222.7 GiB budget before KV), then `chekov capability bench --models
+glm-5.3-flash`. Qwen3.8-Flash-Next (`qwen4exp`) IS on master and is being
+benched in the same pass.
+Status check 2026-08-30: PR #27754 is still an open DRAFT (unslothai branch,
+updated 2026-08-30, `mergeable_state: blocked`) — still not on master. The PR
+body confirms the model carries an MTP block at layer index 45 (relevant to the
+MTP-awareness idea below). Sizing note: 1-bit dynamic is ~93-100 GB, so even
+when the PR merges this model is Studio-class only — it cannot fit a 48 GB
+M4 Max under any published quant.
+2026-09-06: the Aug 24–31 upstream weekly report still lists `glm5next` among
+the OPEN pull requests — blocked as before; nothing to do here yet.
+Proposed 2026-08-28 — status: BLOCKED (upstream)
+
+## A cell's second character ignores the overhead's provenance (2026-08-28)
+`frontier::Cell::inputs()` reports `#` (measured) whenever KV is measured,
+regardless of `overhead_bytes.provenance` — and `build_frontier` gives every
+cell a flat predicted 3 GiB overhead. So a cell can print "measured" while one
+of its three summands is a constant guess. Defensible as shipped (KV is the
+term that varies with context and dominates the total; a second character that
+was always `·` would carry no information), but it is a real gap between the
+glyph and the arithmetic. The SVG's per-cell tooltip prints each part's own
+provenance, which is the honest version; the glyph is the lossy summary.
+Noticed while building `--svg`; not changed there, because it would alter
+shipped terminal output and its tests.
+RESOLVED 2026-08-29 (human's call: fix the legend, keep the glyph). The
+second character now says what it encodes — `#  kv measured   ·  kv
+predicted` — and the legend line ends with what it does not cover, derived
+from the cells: `overhead is a flat predicted 3.0 GiB in every cell`. A third
+"mixed" mark was rejected: with the overhead predicted everywhere it would
+replace every `#` and carry no information, whereas the legend line adds the
+fact the reader lacked. `Cell::inputs` is `kv_inputs` now, reading KV alone.
+Proposed 2026-08-28 — status: RESOLVED
+
+## Throughput dots in the SVG (2026-08-28)
+Spec §5 wants the SVG to carry measured throughput as filled dots with p10-p90
+whiskers and predicted throughput as hollow dots with a ±15% range. Not built:
+`Frontier` carries no speed at all, because the "`--metric tok-s` grid upgrades
+from predicted to measured" line is still deferred (see below). Blocked on the
+same work — once stored bench medians reach the frontier model, both the ASCII
+grid and the SVG gain the layer together, from one source.
+UNBLOCKED 2026-08-28: `Cell.speed` now carries the measured median with p10-p90,
+so the filled-dot layer has its source. The hollow predicted dots do not — no
+predicted tok/s reaches the frontier model, and the ±15% band is an unvalidated
+prior — so the layer should ship measured-only first.
+SHIPPED 2026-08-29, measured-only: a "decode tok/s (measured)" panel under the
+grid on the grid's own ctx columns — a filled dot at the median with a p10–p90
+whisker and the number + row name beside it (identity never rides on colour);
+nothing for a cell without a run, and no panel at all without a measurement.
+A label that would run across the next dot flips to its dot's left; same-side
+labels a line apart drop a line. The SVG legend states that predicted
+throughput is not drawn and why. Verified in Chrome (`getBBox`: no overlaps,
+no overflow). The hollow predicted dots stay out until a validated predictor
+exists.
+Proposed 2026-08-28 — status: SHIPPED (measured); predicted dots OPEN
+
+## Feed measured bench medians into `capability graph` (2026-08-27)
+Slice 5's spec line "the `--metric tok-s` grid upgrades from predicted to
+measured" is deliberately deferred from the harness change: wiring stored
+`logs/bench/` medians into the slice-2 grid touches every graph rendering
+surface and needs a staleness rule (a measurement from an older
+engine.build_commit must not silently pose as current). Do it as its own
+change once a few real runs exist.
+SHIPPED 2026-08-28 as `capability graph --metric tok-s`. Two decisions
+recorded here because they deviate from or sharpen the spec: (1) the band
+digit uses FIXED edges (5/10/15/20/30/40/60/80 tok/s), not the §5.2 "deciles
+of decode rate" — deciles of the peer set move a cell's digit when a
+different model is benched, the objection §7.5 already adopted for
+composites; (2) the headline per run is the decode median at the DEEPEST
+summarisable depth, named in the legend — the closest to an agent loop with a
+full context, where a shallow probe flatters every model. A run applies to a
+cell only on an exact model+quant+ctx+machine match; the latest of several is
+shown and the choice is a footnote; rule 8's stale footer names both builds.
+Proposed 2026-08-27 — status: SHIPPED
 
 ## Tool-parser gate: report, do not refuse (2026-08-27)
 Slice 4 of the capability spec makes "falls through to llama.cpp's generic PEG
@@ -112,3 +378,497 @@ still works. Fallthrough means "no dedicated parser", not "cannot call tools".
 RESOLVED 2026-08-27 by the human: `recommend --role agent` DOWNRANKS a
 fallthrough candidate with a printed note rather than rejecting it. Implemented.
 Proposed 2026-08-27 — status: RESOLVED
+
+## Downloader status bar for `pull` (2026-08-29)
+`pull` is silent for the minutes-to-hours a 40 GB shard takes, so a working
+download and a hung one look identical. Proposal: a per-shard progress line on
+stderr — bytes / total, MiB/s, ETA, shard N of M — plain text when stderr is not
+a TTY, and nothing new on stdout so `pull` stays scriptable. Sibling of the
+partial-shard resume ("Replace hf-hub…", 2026-08-25): both need the same
+per-shard bookkeeping, so whichever lands first should build it for the other.
+Rationale: today's 397B pull is 5 × ~39 GB with no feedback at all.
+SHIPPED 2026-08-29 together with the resume, as predicted: `core/progress.rs`
+holds `Progress` (a pure `line`), `CountingReader` (≤ 1 tick/second, always at
+EOF) and `Sink { Tty, Plain }`, and `hub::download_shard` builds one per shard
+and hands its resumed offset to the `Range` request.
+Proposed 2026-08-29 — status: SHIPPED 2026-08-29
+
+## Portability sweep: any Apple Silicon Mac, not this Mac Studio (2026-08-29)
+chekov says it is for Apple Silicon, but it has only ever run on one M3 Ultra
+with 256 GB. A first count (2026-08-29) finds no machine constant in production
+code — `M3 Ultra` / `228065` appear only in a doc-comment example and tests, and
+`187000` only in `config.toml`, the `config.example.toml` comments and README
+prose — so the audit surface is: the `iogpu.wired_limit_mb` handling (12 sites in
+5 files: the 75% default, the sysctl read, the "required vs actual" check) on
+macOS versions and chips where the default differs; the sysctl/ioreg keys and
+the `llama-server --list-devices` line shape on M1–M4 and 8–512 GB parts;
+`machine_id` and the stamp's machine fields; tests that assert this machine's
+numbers; and every doc example written about this desk. Proposal: audit each,
+move anything machine-specific behind config or detection, and rewrite the
+examples so they are illustrations rather than this machine's values.
+Acceptance: on a 16 GB M1, `chekov capability`, `doctor`, `recommend` and `graph`
+give honest output — every model reads "exceeds", nothing crashes, no number is
+invented; the docs' examples do not assume this machine; and CI or a test pins
+that no machine constant is hard-coded outside config. Rationale: the tool is
+"for Apple Silicon", not "for this desk".
+Part 1 SHIPPED 2026-08-30 — the one constant that bit: the compiled-in
+`wired_limit_mb = 187000` refused every model on any Mac under ~250 GB. The
+floor is now opt-in (`Option`, default absent) and `run` judges the model's own
+footprint against the live budget through one shared `core::footprint`;
+`setup`/`status` say what is checked; a test pins that no production path in
+config/checks/machine/footprint/run/setup/status/pull decides with this desk's
+numbers (doc comments may still illustrate with them). Still open: the
+`--list-devices` line shape and sysctl keys on M1–M4 parts other than this one
+(only verifiable on those machines), and the spec's worked examples.
+Proposed 2026-08-29 — status: PART 1 SHIPPED; hardware sweep OPEN
+
+## `compare` shows the cross-file arms and the lift side by side (2026-08-30)
+The codebase section of `capability compare` pairs rows by task id and groups them
+by tier label, so a `cross_file_first` task's two arms (`<id>` and `<id>+extra`)
+land in one group of twelve and the per-model `context lift` — the number B1
+exists to produce — is not compared at all. On the first B1 pair (pushkin,
+`20260830T070907Z-ornith-1.5-397b` vs `20260830T072140Z-qwen3.8-flash-next`) the
+lifts were `+0.17/−0.01/−0.02/−0.17/−0.13` vs `+0.33/+0.31/+0.37/−0.17/+0.24`, the
+clearest separation in the run, and the section printed a single blended
+`cross_file_first` line. Proposal: split the group into `cross_file_first` and
+`cross_file_first+extra` (pair by full task id, as the report does) and add a
+`context lift` row comparing the two models' lifts per tier with the same paired
+sign test over tasks present in both arms of both runs. Rationale: the tier that
+separates models should be the tier `compare` reads best.
+SHIPPED 2026-08-30 as proposed: groups are (tier, arm) — `cross_file_first` and
+`cross_file_first+extra` — and a `context lift` group compares the per-task
+lifts (extra − no_extra) on tiers 1-5, compile and test under the paired sign
+test; a task both runs touched but one measured on one arm only is dropped
+from the lift with its own drop line.
+Proposed 2026-08-30 — status: SHIPPED
+
+## Bench a foreign runtime: MTPLX and MLX servers as first-class candidates (2026-08-30)
+MTPLX (mtplx.com, Apache-2.0, MLX-native) decodes Qwen 3.5/3.6/3.8 — and
+community MTP-grafted builds of our own bench subjects, e.g.
+`philipjohnbasile/ornith-ai-Ornith-1.5-35B-A3B-V2-MTPLX` and
+`wang-yang/Ornith-1.0-35B-MTPLX` (measured 1.53x on an M3 Max) — around
+1.4-2.2x faster than autoregressive on the same Apple hardware, by running the
+model's own multi-token-prediction head as a drafter with exact rejection
+sampling (claim: output distribution unchanged). One independent write-up also
+measured the same 27B model at 10.5 tok/s under llama.cpp vs 18.3 under MLX —
+runtime choice alone was +74%. chekov already benches through its own
+translator against a running server (`StepAction::UseRunning`), so most of the
+plumbing exists; the gaps are (a) codebase mode rides llama.cpp's `/infill`,
+so a foreign OpenAI/Anthropic-compatible server needs a chat-completions FIM
+fallback for the codebase corpus, and (b) the stamp assumes a llama.cpp engine
+commit — it needs a runtime name+version field so `compare` refuses across
+runtimes by a named field instead of comparing incomparables. Payoff: chekov
+becomes the referee that can measure MTPLX's speed claim AND test its
+exactness claim empirically — same corpus, same HEAD, tiers 1-7 llama.cpp vs
+MTPLX, with the B2 exec tiers checking that the "identical" fills still
+compile and pass. Nobody else's harness can do that today.
+SHIPPED 2026-08-31: `capability bench NAME --runtime <name>@<version>
+[--upstream <url>]` makes a foreign OpenAI-compatible server a
+`UseRunning`-only bench subject — chekov never launches one, and refuses
+(`RuntimeNeedsRunningServer`) before any measurement if the subject isn't
+already serving. Readiness is a plain `GET /v1/models` with served ids
+printed, never asserted; unmanaged launch flags stamp as fixed sentinels
+(`ctx`/`n_parallel` `0`, six flag fields `"unmanaged"`) instead of invented
+ones. `Stamp` gains `runtime` (serde-default `llama.cpp`; every run already
+on disk reads unaffected), and `BenchStampMismatch` is now engine-neutral.
+Codebase mode gained a chat-completions FIM fallback for runtimes with no
+`/infill` (the report names the transport), and `capability compare
+--cross-runtime` permits exactly the runtime/build/unmanaged/prompt-hash
+fields to differ, behind a loud banner ("this measures the runtimes, not the
+model."). Cut from this pass: `--runtime` together with `--judge` is refused
+by the existing memory-budget gate — a
+foreign server chekov did not launch never comes down, so the judge has
+nowhere to load beside it — and live verification against a real MLX/MTPLX
+server is approval-gated and still owed; the plumbing ships unit-tested
+against fakes on the existing `HttpClient` seam.
+SHIPPED 2026-08-31 (timing design): foreign runs no longer need llama.cpp's
+`timings` object at all — a foreign run is stream-timed by chekov's own wall
+clock over the SSE response instead (OpenAI `usage` token counts plus two
+measured windows, request-to-first-frame and first-frame-to-stream-end;
+decode divides by n-1 tokens; `cache_n` recorded `0`), and it is honest
+about its own limit: client-side timestamps include wire and translator
+overhead, and the first-frame mark only approximates end-of-prefill because
+these servers stream tokens as they are generated. That two-window split is
+the honesty limit of a buffered SSE read. A reply chekov cannot derive a
+timing from (no `usage`, fewer than 2 completion tokens, a zero-length
+window) still fails loudly per probe, naming the runtime and the exact
+reason. `Stamp` gains `timing_source` (`server-reported` default; every run
+already on disk reads unaffected), the report prints a `timing source:` line
+only when it isn't the default, and `--cross-runtime` permits it to differ.
+SHIPPED 2026-09-01: agentic and fixture suites now ride the same clock.
+Fixture crosses via `pass.clock.cross` exactly like throughput — llama.cpp's
+buffered door unchanged, a foreign run timed over the stream. Agentic keeps
+both doors' real transports (comparing them is the suite's point), but a
+foreign run's buffered door — where an MLX-style server answers chat fine
+yet reports no `timings` object — now rides a new untimed crossing
+(`runner::cross_untimed`) instead of failing `BenchNoTimings`; its row
+records the empty measure (`codebase::run::empty_measure()`) beside a real
+grade, never an invented zero. The streamed door, and the grammar-forced
+probe on a foreign run, still derive real timings via `cross_stream_timed`.
+llama.cpp's agentic/fixture rows are byte-for-byte unchanged.
+LIVE VERIFICATION DONE 2026-08-31 against mlx-lm 0.31.3 serving
+ornith-ai/Ornith-1.5-35B-A3B-MLX (bf16) on this machine: stream-timed
+throughput measured 55.5/56.0/54.4 tok/s decode at depths 1024/4096/16384
+(prefill 1.9-2.7K), the codebase suite graded all 24 tasks over the chat
+arm (`fim transport: chat`; in_file exact 0.17, cross_file 0.33 -> 0.50
+with the extra file), and `--cross-runtime` against the 2026-08-28
+llama.cpp Q8_0 run printed the banner and read llama.cpp faster at every
+depth (78.6/77.7/68.1) — a quant-confounded number (Q8_0 vs bf16), noted
+on the record, not a runtime verdict. Two interop findings:
+(a) SHIPPED 2026-08-31 (this change): chekov sent its registry name as the
+OpenAI `model` id; llama-server ignores it but mlx-lm routes on it and
+404s trying to download that name. `--served-model <id>` now names which
+served id is the subject explicitly; absent it, a single served id is
+used automatically, and a server listing zero or several without the flag
+refuses (`RuntimeServedModelRequired`) rather than guessing — the
+registry name still names the run directory, the stamp and the report,
+never the request wire on a foreign run. (b) DOCUMENTED 2026-08-31: a
+thinking-default model burns the gold-bounded fill budget on reasoning
+and every chat fill fails loudly as "chat fill has no text content"
+(honest N/A, recorded in run 20260831T201602Z); serving with
+`enable_thinking: false` fixed it live, and the README's foreign-runtime
+section now says so — still owed: growing the chat-FIM arm its own
+thinking-budget strategy instead of relying on the operator to disable it.
+2026-09-06: the live MTPLX referee run is still owed and still approval-gated
+(installing MTPLX is a machine-level dependency). New data point for when it
+runs: MTPLX 2.10.x publishes 64.3 tok/s on Qwen3.8-27B at 3K context on an
+M5 Max, 18.4 at 147K, and a Claude Code follow-up turn with 165,165 of
+165,502 tokens served from cache — the deep-context regime chekov's sweep
+does not reach today. `--runtime` needs nothing new for it.
+Proposed 2026-08-30 — status: SHIPPED; foreign-timing measurement SHIPPED
+2026-08-31; live MLX verification DONE 2026-08-31; finding (a) SHIPPED and
+finding (b) documented 2026-08-31; foreign agentic/fixture timing SHIPPED
+2026-09-01 — remaining: a thinking-budget strategy for the chat-FIM arm
+(finding (b))
+
+## MTP-head awareness: `explain` reports it, bench measures it (2026-08-30)
+Qwen 3.5+/3.8, Gemma 4 and GLM-5.x ship native MTP heads in their weights
+(GLM-5.3-Flash's llama.cpp PR names its MTP block at layer 45), and llama.cpp
+currently drops them on the floor — the entire MTPLX niche exists because
+runtimes ignore a ~2x decode speedup already sitting in the artifact.
+`capability explain` reads GGUF headers; teach it to detect and report "carries
+a native MTP head (unused by this engine)" so the fit/recommend story names the
+latent speed. When llama.cpp lands an MTP decode path, bench grows a
+speculative row (accept rate by depth, measured speedup vs the AR baseline);
+until then it is an honest "engine has no MTP path" skip in the existing
+skip-with-reason machinery, never a zero.
+SHIPPED 2026-09-01 (spec `docs/superpowers/specs/2026-09-01-tune-spec-stage-design.md`):
+the engine gained `--spec-type draft-mtp` (runs on the main weights' nextn
+tensors; no draft file) in August, so the "engine has no MTP path" skip never
+had to exist — the measurement landed as `chekov tune`'s first stage instead
+of a bench row. Spike on ornith-1.5-35b-a3b Q8_0 @ ctx 262144: baseline 71
+tok/s; draft length 3 (engine default) 61–63; length 2 70–77; length 1 85–89
+at 58–81% acceptance — a 3B-active MoE trunk is cheap, so only a one-token
+draft pays. `explain` now points at the stage; the stamp names `spec_type`
+and `spec_draft_n_max`; compare refuses across them. A bench-side accept-rate
+row (from `/metrics` `spec_decode_*`) is a possible later slice.
+ACCEPT-RATE SHIPPED 2026-09-05, and not from `/metrics`: llama-server puts
+`draft_n`/`draft_n_accepted` on every response's `timings` object when it
+drafted, so bench reads them where it already reads the four rates — no
+extra flag, nothing polled. Summed per depth into the row, printed as
+`accept N% (M drafted)` on the depth line and as a sweep total on the
+`speculative:` header; zero rows and pre-field rows print nothing.
+Proposed 2026-08-30 — status: SHIPPED 2026-09-01
+
+## `chekov tune`: per-machine launch-flag autotune with an honest verdict (2026-08-30)
+Sweep `n_batch`/`n_ubatch`/KV cache types/`flash_attn` against a fixed probe on
+THIS machine, save the winning argv per model with the measured before/after,
+and print "defaults won" when nothing beats them — the honest-verdict pattern
+`mtplx tune` uses (it keeps the AR baseline and refuses to save a depth that
+did not win). Optionally record thermal pressure at run start/end in the stamp
+so a throttled run explains its own variance — MTPLX pins fans for clean
+timing; chekov can at least say when the clock was dirty. Fits the §12
+portability-sweep idea: tuned-per-machine beats tuned-for-this-desk.
+SHIPPED 2026-08-30 as proposed: `chekov tune [NAME] [--dry-run] [--yes]
+[--apply] [--stages fa,kv,batch,ubatch]` runs a four-stage descent from the
+model's own flags (`fa`/`kv` judged on decode, `batch`/`ubatch` judged on
+prefill), each candidate winning its stage only against `[bench]
+significance_pct`, degenerate trials excluded from every comparison and never
+saved, and the honest **`defaults won`** verdict — with the threshold it was
+reached under — printed and stamped on every run with nothing to beat the
+baseline. Every run writes a JSON record under `tune/<utc>-<model>.json`.
+Thermal pressure is read via `pmset -g therm`'s `CPU_Speed_Limit` before and
+after every probe (no root needed); the true pressure API is a C notification
+this crate cannot link under `#![forbid(unsafe_code)]`, so a nominal reading
+is honestly `None`, not a false "fine". `--apply` writes the winner into the
+model's `extra_flags` only after printing the exact diff and a confirm —
+`defaults.flags` is never touched. Left out, as scoped: `--exhaustive` (the
+full 64-launch grid), any axis beyond the four (`--threads`,
+`--n-gpu-layers`, `--kv-unified`, `--fit`), and looping several models in one
+invocation.
+Proposed 2026-08-30 — status: SHIPPED
+
+## New benchable models on a 48 GB Mac (survey 2026-08-30)
+Qwen3.8-27B dense (released ~2026-08; qwen3_5-family arch, llama.cpp support
+live, Ollama ships `qwen3.8:27b`): Q4 is ~16-18 GiB — fits the 48 GB M4 Max
+beside `ornith-1.5-35b-a3b`, and is the natural head-to-head since Ornith 1.5
+builds on the Qwen 3.5 base line. A Qwen3.8-9B exists (community quants on HF)
+for the small lane vs `ornith-1.5-9b`. NOT benchable on 48 GB:
+Qwen3.8-Flash-Next (125B-A6B + 51B n-gram; 1-bit GGUF ~73 GB, ~83 GB resident
+even with the n-gram table on SSD — 96 GB+ machines) and GLM-5.3-Flash
+(320B-A18B; 1-bit ~93-100 GB, and still blocked upstream — see the BLOCKED
+entry above). Both remain Studio-class candidates only.
+HEAD-TO-HEAD DONE 2026-09-01 (runs 20260901T070018Z-ornith-1.5-35b-a3b vs
+20260901T064618Z-qwen3.8-27b — same engine 0f194b907, ctx 131072, flags,
+seed, corpus, exec tiers, judge gpt-oss-20b at 100% swap consistency;
+ornith re-benched at qwen's ctx because compare correctly refuses a ctx
+mismatch): decode 80.7/79.8/74.3 vs 23.3/23.2/22.3 tok/s at depths
+1024/4096/16384 — ornith 3.5x faster everywhere, as MoE 3B-active vs 27B
+dense predicts. Quality tied: tool_emit 8/10 both, grammar_gap 6/7 both,
+instruction 12/12 vs 11/12 (one separating case, if-009, both doors), and
+NO codebase metric separates at p < 5% under the paired sign test (qwen
+ahead on in_file exact 0.42 vs 0.25, ornith ahead on cross-file
+parse/symbols — none significant at n = 6-12). Verdict: ornith-1.5-35b-a3b
+stays the daily driver; qwen3.8-27b buys no measured quality for 3.5x
+slower decode. The 9B small-lane face-off remains unrun.
+9B FACE-OFF DONE 2026-09-02 — first, a correction to the survey: Qwen
+never released a Qwen3.8-9B. The repos by that name are `empero-ai`'s
+community distill of Qwen3.8-27B into the official `Qwen/Qwen3.5-9B` base
+(~350K downloads, so it is what the small lane actually runs), and the
+official small model is Qwen3.5-9B itself. All three were benched, Q8_0
+each, ctx 131072, engine 0f194b907, same corpus (chekov @ 00874d1), exec
+tiers, judge gpt-oss-20b (runs 20260902T214520Z-ornith-1.5-9b,
+20260902T215041Z-qwen3.5-9b, 20260902T215800Z-qwen3.8-9b-distill):
+SPEED is a three-way tie — 55.9 / 55.3 / 55.6 tok/s decode at depth
+1024, 53.3 / 53.0 / 52.4 at 16384, no pair separates (dense 9B is dense
+9B). AGENTIC splits by axis: tool_emit 8/10 (ornith: te-003 read_file for
+edit_file, te-010 a fabricated call) vs 10/10 (qwen3.5) vs 9/10
+(distill); grammar_gap 6/7 vs 7/7 vs 7/7; instruction 11/12 (ornith) vs
+6/12 (qwen3.5 — five `fenced_rust_only` failures, one `contains`) vs 9/12
+(distill), both doors agreeing on every case. CODEBASE: ornith-1.5-9b
+leads in_file exact 0.42 vs 0.17 vs 0.17 and edit_sim 0.71 vs 0.61 vs
+0.56, ties or trails on function_body and cross-file symbols — nothing
+significant at n = 6-12 under the paired sign test, and the judge column
+is n/a (0-1 eligible crossings per run). Verdict: no 9B wins outright.
+ornith-1.5-9b is the small-lane pick for instruction-bound coding work
+(constraints, in-file fills); qwen3.5-9b is the pick when tool selection
+is the whole job; the distill sits between them on both axes and buys
+nothing the official base does not. Note that ornith-1.5-9b's in_file
+exact (0.42) matches qwen3.8-27b's and beats ornith-1.5-35b-a3b's 0.25
+from the 2026-09-01 pair — a dense 9B fills a masked line as well as the
+big models on this corpus; what the 35B buys is the 3.5x decode speed and
+the agentic ceiling (12/12 instruction, 8/10 tool_emit at 80 tok/s).
+Proposed 2026-08-30 — status: DONE (both face-offs measured)
+
+## The MTP draft head on real code: +21-31% decode, identical output — and tune's prefill guard says no (2026-09-03)
+Measured 2026-09-03 on `ornith-1.5-35b-a3b` Q8_0 @ ctx 262144, chekov's own
+codebase at 6a6458a as the corpus, exec tiers, judge gpt-oss-20b. First the
+full five-stage `chekov tune --apply`: **defaults won** — `kv f16`, every
+`batch` and every `ubatch` candidate is "no significant difference", `fa off`
+is the named skip under q8_0 KV, and the only candidate that moved anything,
+`spec mtp:1`, was rejected by the stage's own rule: decode 75.4 vs 69.3 but
+prefill 128 vs 147 ("faster on decode but slower on prefill — incumbent
+kept"). Then `--spec-type draft-mtp --spec-draft-n-max 1` hand-applied to
+`extra_flags` and the same bench again (runs
+`20260903T031503Z-ornith-1.5-35b-a3b` untuned vs
+`20260903T044019Z-ornith-1.5-35b-a3b` drafted; `compare --cross-runtime` to
+mask the two flag fields the stamp now carries): decode 86.2 / 88.6 / 76.4
+vs 66.8 / 67.5 / 63.2 tok/s at depths 1024 / 4096 / 16384 (+29 / +31 /
++21%, every depth significant); prefill 145 / 144 / 113 vs 147 / 137 / 125
+(a cost only at 16K, and a wash at 4K); and EVERY quality metric identical —
+tool_emit 8/10, grammar_gap 6/7, instruction 11/12 with no disagreements on
+any case, and all 30 codebase crossings tie on every tier including compile
+and test. The head is a free 21-31% on the daily driver's actual work.
+Two follow-ups this exposes. (a) `tune`'s spec stage judges "not slower on
+prefill" at one depth (4096) and rejects a candidate the workload wants —
+the guard is right in spirit (a second graph does cost prefill) but wrong in
+threshold: proposal, judge the spec stage's prefill on a tolerance
+(`[tune] prefill_tolerance_pct`, default maybe 15) rather than on
+significance alone, or on a combined tokens-per-second-at-workload figure —
+a design choice to make deliberately, not a default to flip. (b)
+`compare --cross-runtime` is the only way to compare two llama.cpp runs that
+differ on a launch flag, and its banner then reads "cross-runtime
+comparison: llama.cpp vs llama.cpp … this measures the runtimes, not the
+model", which is the wrong sentence for a flag experiment: proposal, a
+`--cross-flags` mask (the six flag fields plus the two speculative ones,
+nothing else) with a banner that names the flags and says "this measures
+the launch flags, not the model". The flags were LEFT APPLIED on
+`ornith-1.5-35b-a3b` after this measurement.
+(b) SHIPPED 2026-09-03 as `capability compare --cross-flags`: exactly the
+eight flag fields masked, the banner names the differing flags, a differing
+runtime still refuses, and the two masks compose.
+(a) SHIPPED 2026-09-03 as `[tune] guard_tolerance_pct` (default 15, `0` =
+the strict rule), the human's choice of the tolerance over a workload
+figure: the verdict line names the trade and the tolerance, the `defaults
+won` line names both thresholds, and the record stamps the tolerance it
+judged under. The workload-figure alternative stays unbuilt.
+Live check of (a) 2026-09-05 (`tune ornith-1.5-35b-a3b --stages spec`,
+untuned incumbent, record `tune/20260906T022935Z-ornith-1.5-35b-a3b.json`):
+`mtp:1` decode 74.7 vs 67.9, prefill 126 vs 150 — "faster on decode but
+prefill -16% is beyond the 15% guard — incumbent kept"; defaults won. The
+same trade measured −13% on 2026-09-01 and 2026-09-03 and −16% here, so on
+this machine it sits ON the default tolerance, not inside it: three runs,
+one point either side. The knob behaved exactly as designed and the phrase
+says why; whether the default should be 20 rather than 15 is a per-machine
+call (`[tune] guard_tolerance_pct` in config.toml), not a reason to move
+the shipped default after one candidate. The draft flags remain applied on
+the daily driver from the 2026-09-03 codebase measurement, which is the
+stronger evidence.
+Proposed 2026-09-03 — status: MEASURED; (a) and (b) SHIPPED
+
+## tune's fa stage cannot measure `fa off` under quantized KV, and a dead candidate reads as a timeout (2026-09-01)
+Two full live tunes (ornith-1.5-35b-a3b 2026-08-30, qwen3.8-27b 2026-09-01,
+records in `tune/`) both marked the `fa off` trial degenerate "not ready
+after 600 polls". A `--stages fa` reproduction with the server log captured
+shows the real cause: llama.cpp exits at load with `quantized V cache
+requires flash_attn to be enabled` — the fa-off candidate keeps the
+incumbent's `--cache-type-v q8_0`, an engine-invalid combination, so with
+this machine's q8_0-KV defaults the fa stage can never measure `fa off` at
+all. Three fixes, in order of value: (a) tune should refuse-or-rewrite the
+combination — either skip the fa-off candidate with a named reason when the
+incumbent KV is quantized (the mirror of the spec's kv-skip rule) or trial
+it with f16 KV, a design choice to make deliberately; (b) the trial's
+server DIED at load yet tune burned the full 600-poll budget and reported a
+timeout — the runner's own creed says "a server that dies while loading
+must fail as 'died' (go read the log), never as a timeout", so the
+pid-watch is not seeing the daemonized child's death; (c) every teardown in
+both tunes — including the already-dead fa-off pid — logged "ignored
+SIGTERM for 20s — escalating to SIGKILL", so `stop_pid` is likely
+signalling a stale or wrong pid (probably the same daemonization gap as
+(b)). The degenerate rule kept both tunes honest, so nothing recorded is
+wrong — but ~5 min per tune is wasted and the reported reason mislabels a
+knowable refusal.
+
+**(a) SHIPPED 2026-08-31** — `fa_skip` (src/commands/tune.rs, mirroring
+`kv_skip`) skips the `fa off` candidate before any spawn when the
+incumbent's V-cache (`-ctv`/`--cache-type-v`) is quantized, naming the
+incumbent's actual spelling in the reason. Not (b) as speculated: never
+trials with f16 KV substituted, since that would silently measure a
+different configuration than the one the descent is actually running.
+
+**(b) and (c) SHIPPED 2026-08-31** — root cause was neither pid-watch nor
+`stop_pid` picking the wrong pid: `spawn_daemon_with_env` spawns
+llama-server as a direct child and never reaps it, so a dead child sits as
+a ZOMBIE, and a zombie passes the signal-0 probe (`process_alive`)
+forever — for `chekov run` this is correct (chekov exits and launchd
+adopts the child), but bench/tune stay resident and never see the death.
+`server::child_alive` reaps via `waitpid(WNOHANG)` before answering (with
+a signal-0 fallback for a pid this process did not spawn), and now backs
+both `bench::runner::wait_ready`'s readiness poll and `server::stop_pid`'s
+grace-period poll — a candidate that dies at load now reports "died" in
+seconds instead of after 600 polls, and a cooperative teardown reports
+`Terminated` promptly instead of burning the full 20s grace on a corpse.
+Proposed 2026-09-01 — status: (a)/(b)/(c) SHIPPED 2026-08-31
+
+## tune's spec stage skips every model without an MTP head — the engine has five drafter-free n-gram types (2026-09-06)
+The stage's first skip is "no head in the GGUF" (`nextn_predict_layers 0`),
+which is most of this registry — `gpt-oss-20b`/`-120b`, `minimax-m2.7`,
+`gemma-3-12b-it`. But the pinned engine's `--spec-type` (checked 2026-09-06
+on `0f194b907`) accepts `none, draft-simple, draft-eagle3, draft-mtp,
+draft-dflash, draft-dspark, ngram-simple, ngram-map-k, ngram-map-k4v,
+ngram-mod, ngram-cache` as a comma-separated list tried in order, and the
+`ngram-*` types draft from the prompt's own repetition with no draft file
+and no head — the rewrite-a-file turn of an agent session is exactly that
+shape (MTPLX's "cache-copy drafting" is the same trick, +19% on that turn in
+its 2.10.0 note). Each has its own knobs (`--spec-ngram-mod-n-min/-max/
+-n-match`, `--spec-ngram-simple-size-n/-m/-min-hits`). Proposal: `[tune]
+spec_drafts` accepts `ngram:<type>` beside `off` and `mtp:<n>`; the
+head-absent skip narrows to the `mtp:` candidates and says so ("no head —
+MTP candidates skipped; n-gram trialed"); the engine's `--help` gate checks
+the type name in the list, not just the flag; the stamp's `spec_type`
+already carries whatever the flag says, so `compare` refuses by name
+unchanged. Two honesty limits to build in: n-gram acceptance is
+workload-bound and tune's 4096-token probe is prose-shaped, so a win or a
+loss there says little about code — the 2026-09-03-style decode-on-the-
+codebase check is the confirming measurement; and chaining
+(`draft-mtp,ngram-mod`) is a second candidate grammar, not this one. Not a
+quality question: every draft is verified by the target, so greedy output
+is unchanged.
+Proposed 2026-09-06 — status: APPROVED 2026-09-09
+
+## tune judges at 4096 tokens; the workload lives at 50–165K (2026-09-06)
+`[tune] depth = 4096` is the only depth any stage measures, and a flag's
+cost is not flat in depth: MTPLX's own release note has Qwen3.8-27B decoding
+3.5x slower at 147K than at 3K on one Mac; a 2026-08-31 A100 measurement of
+a llama.cpp KV fork had `q8_0`/`q4_0` KV at 64K under 30% of f16's decode
+(quantized-KV attention leaves the fast kernels at depth) — Metal is
+unmeasured, which is what tune is for. Claude Code's first turn on a real
+repo is 100–165K tokens (MTPLX logs 165,165 of 165,502 cached on a
+follow-up). So a `kv q8_0` or `mtp:1` verdict at 4K can invert where the
+user actually sits, and every guard debate of 2026-09-01/03/05 was a
+one-depth debate. Proposal: `[tune] depths = [4096, 65536]` (default stays
+`[4096]` — nothing changes until a machine opts in); a candidate wins only
+if it wins at the shallow depth AND is not `Slower` beyond
+`guard_tolerance_pct` at the deep one; the verdict names both depths; the
+record stamps the list. The cost is honest and large — 64K of prefill on
+`ornith-1.5-35b-a3b` is ~7.5 min per probe at 145 tok/s, ~40 min per
+candidate at the default five repetitions — so the plan line and the
+`--dry-run` estimate carry it; whether the deep depth gets the full
+repetition count or a single confirming probe is a design choice to make
+deliberately when this is built, not a default to flip. The config-only
+half needs no code: `[bench] depths` gaining 65536/131072 puts a measured
+point where the agent regime is, and `--metric tok-s` on the frontier then
+shows it; the same wall-clock honesty applies.
+Proposed 2026-09-06 — status: APPROVED 2026-09-09
+
+## Reasoning effort is a launch flag nobody stamps, and a cost nobody measures (2026-09-06)
+Three findings point one way. (1) chekov's own 2026-08-31 foreign run: a
+thinking-default model burned the whole bounded fill budget on reasoning
+and every chat fill was an honest N/A until the operator disabled thinking
+server-side — "growing the chat-FIM arm its own thinking-budget strategy"
+is still owed above. (2) Every Qwen3.8-27B guide says it "wildly overthinks
+by default" and to run it at low/medium effort; a 45-configuration RTX 5090
+sweep (2026-08-29) found reasoning effort moved time-to-visible-answer ~10x
+— more than any server flag it tried. (3) The pinned engine (checked
+2026-09-06) has `--reasoning [on|off|auto]`, `--reasoning-effort LEVEL`
+(`minimal` … `max`), `--reasoning-budget N` (`0` = end thinking at once)
+and `--reasoning-budget-message`; all four are launch flags a registry
+entry can carry in `extra_flags` today, with zero chekov code. What is
+missing is honesty about them. Proposal, two halves: (a) the bench `Stamp`
+reads `reasoning_effort` and `reasoning_budget` off the launch argv through
+the same `stamp::LaunchFlags` reader the six flags use (serde default
+`engine-default`; every stored run loads unchanged), so `compare` refuses
+two runs that differ only in how much the model was allowed to think —
+today that difference is invisible and would read as a model verdict — and
+`--cross-flags` masks them like the other eight; (b) bench records, per
+probe, reasoning tokens against answer tokens (the translator already
+splits `reasoning_content` into a `thinking` block — count it, never
+re-parse) and, on the streamed door, time-to-first-visible-text; the report
+prints a `think share` column beside the pass counts. Why chekov
+specifically: an agent backend that is right but 10x slower to its first
+visible token loses to one that is slightly wrong, and no chekov number
+sees that today. A per-entry registry key is NOT proposed — `extra_flags`
+already is one, and a second spelling of the same flag is the
+knob-for-a-value-that-never-varied mistake. The `think_leak` probe (§13 Q5)
+is a different question — where the thoughts land, not how many.
+Proposed 2026-09-06 — status: APPROVED 2026-09-09
+
+## New tool-use lane candidates for the agentic bench (survey 2026-09-06)
+Two Aug-2026 30B-class releases aim at the axis where our benched models
+sit near-saturated on single-turn `tool_emit`. Meta's Muse line — the ~30B
+dense checkpoint one guide calls Muse Glimmer and a release timeline lists
+as Muse Spark 1.3 (pin the HF repo before registering): ~29.6B incl. a 1.8B
+vision encoder, Apache-2.0, 131K ctx, self-reported MCP Atlas 75.5 against
+Qwen3.6-27B's 62.5, llama.cpp-supported, under 20 GB at a K-quant. And
+NVIDIA Nemotron 3.5 Lightning (30B-A3B MoE, 2026-08-11): tau-bench 0.640
+measured independently by Thoughtworks, a built-in speculative head that
+gave 1.46–1.96x there — hybrid Mamba-2, so llama.cpp support and a GGUF
+must be verified first, and `explain` should say whether the head appears
+as `nextn_predict_layers`. Both fit this Mac and the 48 GB seat. Proposal:
+register, `explain`, bench `all` + `--codebase` + `--judge gpt-oss-20b`
+against `ornith-1.5-35b-a3b` at ctx 131072 — and hold the tool-use verdict
+for `tool_loop`, since single-turn emission will not separate them. Not
+benchable here from the same survey: Tencent Hy4 preview (770B-A49B; the
+1-bit GGUF is 229 GB against a 182.62 GiB budget); GLM-5.3-Flash stays
+upstream-blocked (BLOCKED entry above).
+Proposed 2026-09-06 — status: APPROVED 2026-09-09 (measurement)
+
+## Upstream engine work to watch, not build (2026-09-06)
+Recorded so the next round does not re-research it. (a) Speculative prefill
+(open llama.cpp PR, Aug 24–31 report): a draft model scores token
+importance and only the "relevant" prompt chunks are prefilled — faster
+long-context prefill "at the cost of some potential accuracy degradation",
+i.e. NOT output-preserving. If it lands it belongs in the quality-graded
+suites, never in `tune`, whose stages assume a flag changes speed and not
+answers. (b) TurboQuant KV types (`turbo2/3/4`, 2–4-bit WHT-rotated KV,
+~4.3x vs f16 at ~98% speed on Metal per the MLX port): fork-only as of the
+Aug-2026 Debian `llama.cpp-tools` manpage and absent from the pinned
+engine's `--cache-type-k` list (`f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl,
+q5_0, q5_1`); when upstream merges they are one more `[tune] cache_types`
+entry and the kv stage measures them — no chekov code. (c) Gemma 4 MTP
+"assistant" drafter models (a separate GGUF; conversion support unmerged):
+a draft-FILE path, which tune's spec stage deliberately does not model.
+(d) `draft-eagle3`, `draft-dflash`, `draft-dspark` are in the pinned
+engine's `--spec-type` list already, but each needs a trained draft head
+shipped as a file — same reason, same deferral.
+Proposed 2026-09-06 — status: APPROVED 2026-09-09 as DEFERRED (upstream) — revisit when upstream merges

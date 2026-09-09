@@ -25,6 +25,7 @@ pub mod setup;
 pub mod show;
 pub mod status;
 pub mod stop;
+pub mod tune;
 pub mod update;
 pub mod use_;
 

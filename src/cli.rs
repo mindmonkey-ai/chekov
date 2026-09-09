@@ -41,7 +41,7 @@ pub enum Cmd {
     Rm(commands::rm::RmCmd),
     /// Print the resolved server invocation and license provenance
     Show(commands::show::ShowCmd),
-    /// Run the five health checks against the live server
+    /// Run the six health checks: five against the live server, one comparing configuration
     Doctor(commands::doctor::DoctorCmd),
     /// Build llama.cpp (Metal) and verify the environment
     Setup(commands::setup::SetupCmd),
@@ -53,6 +53,8 @@ pub enum Cmd {
     Integrate(commands::integrate::IntegrateCmd),
     /// Start an agent wired to the local model (proxy + settings; --proxy-only for the translator alone)
     Launch(commands::launch::LaunchCmd),
+    /// Measure which launch flags beat the current ones on this machine, and say so honestly
+    Tune(commands::tune::TuneCmd),
     /// Emit shell completions (used by `make install`).
     #[command(hide = true)]
     Completions {
@@ -92,6 +94,7 @@ pub fn dispatch(cmd: &Cmd, ctx: &Ctx) -> Result<ExitCode, ChekovError> {
         Cmd::Env(c) => c.run(ctx),
         Cmd::Integrate(c) => c.run(ctx),
         Cmd::Launch(c) => c.run(ctx),
+        Cmd::Tune(c) => c.run(ctx),
         Cmd::Completions { .. } => Ok(ExitCode::SUCCESS),
     }
 }
@@ -139,9 +142,34 @@ mod tests {
     }
 
     #[test]
+    fn stop_if_running_is_opt_in() {
+        let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "stop"]).expect("parse");
+        assert!(matches!(cli.cmd, Cmd::Stop(ref c) if !c.if_running));
+        let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "stop", "--if-running"])
+            .expect("parse");
+        assert!(matches!(cli.cmd, Cmd::Stop(ref c) if c.if_running));
+    }
+
+    #[test]
+    fn tune_flags_parse() {
+        let cli = <Cli as clap::Parser>::try_parse_from([
+            "chekov", "tune", "m", "--stages", "fa,kv", "--yes", "--apply",
+        ])
+        .expect("parse");
+        assert!(matches!(cli.cmd, Cmd::Tune(ref c)
+            if c.name.as_deref() == Some("m")
+                && c.stages == ["fa", "kv"]
+                && c.yes
+                && c.apply
+                && !c.dry_run));
+    }
+
+    #[test]
     fn update_flags_parse_independently() {
         let cli = <Cli as clap::Parser>::try_parse_from(["chekov", "update", "--all", "--dry-run"])
             .expect("parse");
-        assert!(matches!(cli.cmd, Cmd::Update(ref c) if c.all && c.dry_run && !c.engine));
+        assert!(
+            matches!(cli.cmd, Cmd::Update(ref c) if c.target.all && c.dry_run && !c.target.engine)
+        );
     }
 }

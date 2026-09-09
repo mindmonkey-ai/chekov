@@ -1,0 +1,216 @@
+# Probe set v0 — corpus-free deterministic cases (spec §7.2 rows 1, 2, 6).
+# The content of this file is hashed into every run's prompt_set_hash: editing
+# a case makes old runs incomparable BY CONSTRUCTION, which is the point.
+# Counts are a seed (7 call / 2 abstention / 1 missing-function; 12
+# instruction) — grow toward the spec's 30/40, never edit in place.
+
+version = 0
+
+# ---------------------------------------------------------------- tool_emit
+
+[[tool_emit]]
+id = "te-001"
+prompt = "Show me the contents of the file src/main.rs."
+expect = "call"
+golden_name = "read_file"
+golden_args = '{"path":"src/main.rs"}'
+[[tool_emit.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string","description":"Repository-relative file path"}},"required":["path"]}'
+
+[[tool_emit]]
+id = "te-002"
+prompt = "Search for the pattern spawn_daemon in the directory src."
+expect = "call"
+golden_name = "grep"
+golden_args = '{"pattern":"spawn_daemon","path":"src"}'
+[[tool_emit.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_emit.tools]]
+name = "grep"
+description = "Search files under a path for a pattern; returns matching lines."
+input_schema = '{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern","path"]}'
+
+[[tool_emit]]
+id = "te-003"
+prompt = "In the file Cargo.toml, replace the exact text version = \"0.1.0\" with version = \"0.2.0\"."
+expect = "call"
+golden_name = "edit_file"
+golden_args = '{"path":"Cargo.toml","old":"version = \"0.1.0\"","new":"version = \"0.2.0\""}'
+[[tool_emit.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_emit.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+
+[[tool_emit]]
+id = "te-004"
+prompt = "Run only the tests whose names contain the string stamp."
+expect = "call"
+golden_name = "run_tests"
+golden_args = '{"filter":"stamp"}'
+[[tool_emit.tools]]
+name = "run_tests"
+description = "Run the test suite, optionally filtered to test names containing a string."
+input_schema = '{"type":"object","properties":{"filter":{"type":"string"}},"required":["filter"]}'
+[[tool_emit.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+
+[[tool_emit]]
+id = "te-005"
+prompt = "List the entries in the directory tests."
+expect = "call"
+golden_name = "list_dir"
+golden_args = '{"path":"tests"}'
+[[tool_emit.tools]]
+name = "list_dir"
+description = "List the entries of a repository directory."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_emit.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+
+[[tool_emit]]
+id = "te-006"
+prompt = "Open the file logs/llama-server.log so I can see the tail of it."
+expect = "call"
+golden_name = "read_file"
+golden_args = '{"path":"logs/llama-server.log"}'
+[[tool_emit.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_emit.tools]]
+name = "grep"
+description = "Search files under a path for a pattern; returns matching lines."
+input_schema = '{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern","path"]}'
+
+[[tool_emit]]
+id = "te-007"
+prompt = "Search for the pattern BenchStampMismatch in the file src/error.rs."
+expect = "call"
+golden_name = "grep"
+golden_args = '{"pattern":"BenchStampMismatch","path":"src/error.rs"}'
+[[tool_emit.tools]]
+name = "grep"
+description = "Search files under a path for a pattern; returns matching lines."
+input_schema = '{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern","path"]}'
+[[tool_emit.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+
+# Abstention: the correct behavior is a plain answer — no tool should fire.
+
+[[tool_emit]]
+id = "te-008"
+prompt = "What does the acronym KV stand for in the context of transformer inference? Answer in one sentence."
+expect = "abstain"
+[[tool_emit.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_emit.tools]]
+name = "grep"
+description = "Search files under a path for a pattern; returns matching lines."
+input_schema = '{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern","path"]}'
+
+[[tool_emit]]
+id = "te-009"
+prompt = "Thanks, that fixed it — that's all I needed."
+expect = "abstain"
+[[tool_emit.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_emit.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+
+# Missing function: the palette cannot do what was asked — a model that
+# fabricates a delete_file tool fails; saying so in text passes.
+
+[[tool_emit]]
+id = "te-010"
+prompt = "Delete the file scratch/tmp.txt from the repository."
+expect = "abstain"
+[[tool_emit.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_emit.tools]]
+name = "grep"
+description = "Search files under a path for a pattern; returns matching lines."
+input_schema = '{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern","path"]}'
+
+# -------------------------------------------------------------- instruction
+
+[[instruction]]
+id = "if-001"
+prompt = "Write a Rust function with the exact signature fn add(a: i64, b: i64) -> i64 that returns the sum. Reply with exactly one fenced rust code block and no prose."
+checks = ["fenced_rust_only", "contains:fn add", "brace_balanced"]
+
+[[instruction]]
+id = "if-002"
+prompt = "Write a Rust function with the exact signature fn is_even(n: u64) -> bool. At most 6 lines in total. Reply with only a fenced rust code block."
+checks = ["fenced_rust_only", "max_lines:6", "contains:fn is_even"]
+
+[[instruction]]
+id = "if-003"
+prompt = "Write a Rust function with the exact signature fn parse_port(s: &str) -> Option<u16> that parses a port number, without using unwrap or expect anywhere. Reply with only a fenced rust code block."
+checks = ["fenced_rust_only", "no_unwrap", "contains:fn parse_port"]
+
+[[instruction]]
+id = "if-004"
+prompt = "Reply with the single word: ready"
+checks = ["contains:ready", "max_lines:1", "not_contains:```"]
+
+[[instruction]]
+id = "if-005"
+prompt = "Reply with valid JSON only, no code fence and no prose: an object with a key name whose value is a string, and a key port whose value is a number."
+checks = ["contains:\"name\"", "contains:\"port\"", "not_contains:```"]
+
+[[instruction]]
+id = "if-006"
+prompt = "Explain in one sentence what a pidfile is, without using the word process anywhere in your answer."
+checks = ["not_contains:process", "max_lines:2"]
+
+[[instruction]]
+id = "if-007"
+prompt = "Name the four seasons, one per line, in lowercase, and write nothing else."
+checks = ["max_lines:4", "contains:winter", "contains:summer", "not_contains:```"]
+
+[[instruction]]
+id = "if-008"
+prompt = "Write a Rust function with the exact signature fn max3(a: i32, b: i32, c: i32) -> i32 using std::cmp::max. Reply with exactly one fenced rust code block."
+checks = ["fenced_rust_only", "contains:cmp::max", "contains:fn max3"]
+
+[[instruction]]
+id = "if-009"
+prompt = "Reply with exactly this text and nothing else: chekov ready"
+checks = ["contains:chekov ready", "max_lines:1", "not_contains:```"]
+
+[[instruction]]
+id = "if-010"
+prompt = "Write a single Rust function named status that returns the string ok as a String. No comments anywhere in the code. Reply with only a fenced rust code block."
+checks = ["fenced_rust_only", "contains:fn status", "not_contains://"]
+
+[[instruction]]
+id = "if-011"
+prompt = "Reply with exactly this text on one line and nothing else: 1, 2, 3, 4, 5"
+checks = ["contains:1, 2, 3, 4, 5", "max_lines:1"]
+
+[[instruction]]
+id = "if-012"
+prompt = "Write a Rust function with the exact signature fn clamp01(x: f64) -> f64 that clamps x into the range 0.0 to 1.0. At most 8 lines. Reply with only a fenced rust code block."
+checks = ["fenced_rust_only", "brace_balanced", "max_lines:8", "contains:fn clamp01"]

@@ -101,6 +101,7 @@ mod tests {
                 hermes_ok: true,
                 ctx_size: None,
                 extra_flags: vec![],
+                role: None,
             },
         );
         let eff = reg.effective("m").expect("registered");
@@ -133,6 +134,7 @@ mod tests {
                 hermes_ok: true,
                 ctx_size: None,
                 extra_flags: vec!["--temp".into(), "1.0".into()],
+                role: None,
             },
         );
         let eff = reg.effective("m").expect("registered");

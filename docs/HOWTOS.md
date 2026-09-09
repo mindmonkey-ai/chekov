@@ -405,6 +405,22 @@ more `.gguf` files, sometimes alongside:
    `https://huggingface.co/api/models/<repo>/tree/main?recursive=true`
    — keep entries where the path ends in `.gguf`.
 
+Three layouts are common, and which one a repo uses decides where the quant tag
+appears in the path:
+
+- **a folder per quant, named by the tag** — unsloth's
+  `UD-Q5_K_XL/Model-UD-Q5_K_XL-00001-of-00005.gguf`;
+- **a folder per quant, named after the model**, with the tag in the shard's
+  own filename — bartowski's
+  `Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`;
+- **flat in the repo root** — `Model-Q8_0.gguf`.
+
+`chekov pull` reads all three, plus a dot-separated tag (`Model.Q4_K_M.gguf`,
+the mradermacher style) and lowercase tags (`…-q4_k_m.gguf`, the `Qwen/*-GGUF`
+style). Specs match case-insensitively; the repo's own spelling is what the
+registry stores. A repo that still reports it exposes no `.gguf` files has
+filenames with no recognisable quant token — check its file list.
+
 ---
 
 ## 10. Sampling / generation parameters

@@ -38,7 +38,9 @@ impl Command for RestartCmd {
             {
                 println!("{note}");
             }
-            super::stop::StopCmd {}.run(ctx)?;
+            // The live_pid guard above already established there is something
+            // to stop, so the loud form is the right one here.
+            super::stop::StopCmd { if_running: false }.run(ctx)?;
         }
         super::run::RunCmd {
             name: self.name.clone(),

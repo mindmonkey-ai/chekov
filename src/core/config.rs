@@ -15,6 +15,42 @@ pub struct FileConfig {
     pub server: ServerSection,
     pub limits: LimitsSection,
     pub doctor: DoctorSection,
+    pub bench: BenchSection,
+    pub engine: EngineSection,
+    pub tune: TuneSection,
+}
+
+/// Which llama.cpp the engine is built from.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EngineSection {
+    /// A branch, tag, or commit to pin the engine to — anything `git fetch
+    /// origin <ref>` accepts. Absent means whatever upstream HEAD is on the
+    /// day `setup` or `update --engine` runs (a fast-forward pull).
+    pub git_ref: Option<String>,
+}
+
+impl EngineSection {
+    /// A ref git would read as an option, or one that would split into
+    /// several arguments, cannot be a pin — refused at load, naming the key.
+    fn validate(&self, path: &Path) -> Result<(), ChekovError> {
+        let Some(git_ref) = self.git_ref.as_deref() else {
+            return Ok(());
+        };
+        let reason = if git_ref.is_empty() {
+            "[engine] git_ref is empty — remove the key to leave the engine unpinned"
+        } else if git_ref.starts_with('-') {
+            "[engine] git_ref starts with '-', which git would read as an option"
+        } else if git_ref.chars().any(char::is_whitespace) {
+            "[engine] git_ref contains whitespace — one branch, tag, or commit only"
+        } else {
+            return Ok(());
+        };
+        Err(ChekovError::ConfigInvalid {
+            path: path.to_path_buf(),
+            reason: reason.to_owned(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -38,8 +74,11 @@ impl Default for ServerSection {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LimitsSection {
-    /// Minimum `iogpu.wired_limit_mb` required before `run` will start.
-    pub wired_limit_mb: u64,
+    /// An opt-in floor: `run` refuses when the GPU budget is below it. Absent
+    /// — the default — means the model is the requirement: `run` judges the
+    /// model's own footprint against the live budget instead. A number chosen
+    /// for one machine must never refuse every model on another.
+    pub wired_limit_mb: Option<u64>,
     /// Hermes needs at least this effective ctx when a model is `hermes_ok`.
     pub hermes_ctx_floor: u32,
 }
@@ -47,7 +86,7 @@ pub struct LimitsSection {
 impl Default for LimitsSection {
     fn default() -> Self {
         Self {
-            wired_limit_mb: 187_000,
+            wired_limit_mb: None,
             hermes_ctx_floor: 65_536,
         }
     }
@@ -74,6 +113,131 @@ impl Default for DoctorSection {
     }
 }
 
+/// llama.cpp's `reasoning_effort` spellings, as the judge wire sends them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// `chekov capability bench` tunables (§6: knobs live here, not in code).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BenchSection {
+    /// Prompt depths (approximate tokens) the sweep measures, ascending.
+    pub depths: Vec<u32>,
+    /// Probes per depth; `core::stats` drops the first as warmup.
+    pub repetitions: u32,
+    /// Decode length per probe — long enough to measure, short enough to end.
+    pub max_tokens: u32,
+    /// Median delta (percent) below which two runs are "no significant difference".
+    pub significance_pct: u32,
+    /// Readiness poll budget: attempts × interval. 600 × 500ms covers the
+    /// ~2-minute load of a ~158 GiB model with headroom.
+    pub ready_max_polls: u32,
+    pub ready_interval_ms: u64,
+    /// Sampling seed pinned onto every probe (greedy removes sampler
+    /// nondeterminism; the seed pins what remains).
+    pub seed: u32,
+    /// Teardown waits until this percentage of the GPU budget is free again
+    /// before the next candidate loads.
+    pub release_pct: u32,
+    pub release_max_polls: u32,
+    pub release_interval_ms: u64,
+    /// Tasks per `--codebase` run: two-thirds `in_file`, one-third
+    /// `function_body`, sampled deterministically from HEAD.
+    pub codebase_tasks: u32,
+    /// `max_tokens` on every judge request. 512 is twice the longest reply
+    /// the 2026-08-30 probe saw from a thinking judge; a non-thinking judge
+    /// stops at ~8 tokens regardless.
+    pub judge_max_tokens: u32,
+    /// Below this swap-agreement rate the `equiv` column is voided, never
+    /// down-weighted (spec §10).
+    pub judge_min_consistency_pct: u32,
+    /// `reasoning_effort` on every judge request — gpt-oss needs it, Gemma's
+    /// template ignores it.
+    pub judge_reasoning_effort: ReasoningEffort,
+}
+
+impl Default for BenchSection {
+    fn default() -> Self {
+        Self {
+            depths: vec![1024, 4096, 16384],
+            repetitions: 5,
+            max_tokens: 128,
+            significance_pct: 5,
+            ready_max_polls: 600,
+            ready_interval_ms: 500,
+            seed: 42,
+            release_pct: 80,
+            release_max_polls: 60,
+            release_interval_ms: 500,
+            codebase_tasks: 24,
+            judge_max_tokens: 512,
+            judge_min_consistency_pct: 70,
+            judge_reasoning_effort: ReasoningEffort::Low,
+        }
+    }
+}
+
+/// `chekov tune` sweep parameters (spec §10): a probe depth plus the five
+/// candidate lists staged one dimension at a time (spec, then fa, then kv,
+/// then batch, then ubatch).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TuneSection {
+    /// Probe prompt depth, in tokens, used to measure every candidate.
+    pub depth: u32,
+    /// Stage spec: `off`, or `mtp:<n>` — llama.cpp's native MTP draft head
+    /// at draft length `n`. Validated at plan time, not here.
+    pub spec_drafts: Vec<String>,
+    /// Stage fa: `--flash-attn` candidates, tried in order.
+    pub flash_attn: Vec<String>,
+    /// Stage kv: `--cache-type-k`/`--cache-type-v` candidates, applied to K
+    /// and V together.
+    pub cache_types: Vec<String>,
+    /// Stage batch: `--batch-size` candidates.
+    pub batch_sizes: Vec<u32>,
+    /// Stage ubatch: `--ubatch-size` candidates, each ≤ the incumbent batch.
+    pub ubatch_sizes: Vec<u32>,
+    /// How much a stage's winner may lose on the OTHER metric (median, in
+    /// percent) and still win: a decode gain that costs prefill is a trade,
+    /// not a regression, inside this band. `0` is the strict rule — any
+    /// significant loss keeps the incumbent.
+    pub guard_tolerance_pct: u32,
+}
+
+impl Default for TuneSection {
+    fn default() -> Self {
+        Self {
+            depth: 4096,
+            spec_drafts: ["off", "mtp:1", "mtp:2", "mtp:3"]
+                .map(String::from)
+                .to_vec(),
+            flash_attn: vec!["on".to_string(), "off".to_string()],
+            cache_types: vec!["q8_0".to_string(), "f16".to_string()],
+            batch_sizes: vec![512, 1024, 2048, 4096],
+            ubatch_sizes: vec![256, 512, 1024, 2048],
+            guard_tolerance_pct: 15,
+        }
+    }
+}
+
 /// Resolved runtime configuration: root directory + file settings.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -85,7 +249,7 @@ impl Config {
     /// Load `<root>/config.toml` (defaults when absent, loud when invalid).
     pub fn load(root: &Path) -> Result<Self, ChekovError> {
         let path = root.join("config.toml");
-        let file = if path.exists() {
+        let file: FileConfig = if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| ChekovError::io(format!("reading {}", path.display()), e))?;
             toml::from_str(&text).map_err(|e| ChekovError::ConfigInvalid {
@@ -95,6 +259,7 @@ impl Config {
         } else {
             FileConfig::default()
         };
+        file.engine.validate(&path)?;
         Ok(Self {
             root: root.to_path_buf(),
             file,
@@ -137,6 +302,24 @@ impl Config {
         self.root.join("llama.cpp")
     }
 
+    /// Bench run directories (spec §7.5): `eval/<run_id>/`.
+    #[must_use]
+    pub fn eval_dir(&self) -> PathBuf {
+        self.root.join("eval")
+    }
+
+    /// Rendered reports (`capability graph --svg`).
+    #[must_use]
+    pub fn reports_dir(&self) -> PathBuf {
+        self.root.join("reports")
+    }
+
+    /// Tune run records (`chekov tune`): `tune/<utc>-<model>.json`.
+    #[must_use]
+    pub fn tune_dir(&self) -> PathBuf {
+        self.root.join("tune")
+    }
+
     /// `http://host:port` — the base every probe and integration derives from.
     #[must_use]
     pub fn base_url(&self) -> String {
@@ -154,8 +337,7 @@ pub fn resolve_root(env_home: Option<&str>, user_home: &Path) -> PathBuf {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Config, LimitsSection, resolve_root};
-    use crate::core::checks::{WiredVerdict, effective_wired_mb, wired_verdict};
+    use super::{BenchSection, Config, LimitsSection, resolve_root};
 
     /// The README's config block is the only place a user learns these values.
     /// Nothing previously stopped it drifting from the code — which is exactly
@@ -179,16 +361,52 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_default_is_satisfiable_on_a_stock_mac() {
-        // A 256 GB Mac with `iogpu.wired_limit_mb` unset: macOS's own default
-        // is 75% of RAM. A fresh `cargo install` must not refuse there.
-        let (actual_mb, is_system_default) = effective_wired_mb(0, 274_877_906_944);
-        assert!(is_system_default, "0 means the macOS default, not zero");
-        assert_eq!(
-            wired_verdict(LimitsSection::default().wired_limit_mb, actual_mb, 262_144),
-            WiredVerdict::Satisfied,
-            "the built-in requirement must be met by a stock machine at {actual_mb} MB"
-        );
+    fn the_floor_is_absent_unless_configured() {
+        // A fresh install on a 16 GB M1 must not refuse every model against a
+        // number chosen for one 256 GB desk: with no floor, the model is the
+        // requirement, and a configured floor is an opt-in.
+        assert_eq!(LimitsSection::default().wired_limit_mb, None);
+        let cfg: super::FileConfig = toml::from_str("[limits]\nwired_limit_mb = 187000\n")
+            .expect("an explicit floor parses");
+        assert_eq!(cfg.limits.wired_limit_mb, Some(187_000));
+    }
+
+    /// The tool is "for Apple Silicon", not for the Mac it was written on:
+    /// the numbers that describe that desk may illustrate a comment, never
+    /// decide a branch.
+    #[test]
+    fn no_production_path_carries_this_desks_numbers() {
+        let sources = [
+            ("core/config.rs", include_str!("config.rs")),
+            ("core/checks.rs", include_str!("checks.rs")),
+            ("core/machine.rs", include_str!("machine.rs")),
+            ("core/footprint.rs", include_str!("footprint.rs")),
+            ("commands/run.rs", include_str!("../commands/run.rs")),
+            ("commands/setup.rs", include_str!("../commands/setup.rs")),
+            ("commands/status.rs", include_str!("../commands/status.rs")),
+            ("commands/pull.rs", include_str!("../commands/pull.rs")),
+            (
+                "commands/capability.rs",
+                include_str!("../commands/capability.rs"),
+            ),
+            ("error.rs", include_str!("../error.rs")),
+        ];
+        for (name, text) in sources {
+            let production: String = text
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for literal in ["187000", "187_000", "228065", "228_065", "M3 Ultra"] {
+                assert!(
+                    !production.contains(literal),
+                    "{name} decides something with this desk's {literal} outside its tests"
+                );
+            }
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -225,6 +443,106 @@ mod tests {
     }
 
     #[test]
+    fn bench_section_defaults_and_overrides_parse() {
+        let cfg: super::FileConfig = toml::from_str("").expect("empty config is all defaults");
+        assert_eq!(cfg.bench.depths, vec![1024, 4096, 16384]);
+        assert_eq!(cfg.bench.repetitions, 5);
+        assert_eq!(cfg.bench.significance_pct, 5);
+        let cfg: super::FileConfig =
+            toml::from_str("[bench]\ndepths = [2048]\nrepetitions = 3\n").expect("overrides parse");
+        assert_eq!(cfg.bench.depths, vec![2048]);
+        assert_eq!(cfg.bench.repetitions, 3);
+        assert_eq!(cfg.bench.max_tokens, 128, "unset keys keep their defaults");
+    }
+
+    #[test]
+    fn codebase_tasks_defaults_to_24_and_overrides() {
+        assert_eq!(BenchSection::default().codebase_tasks, 24);
+        let root = scratch("cfg-codebase-tasks");
+        std::fs::write(root.join("config.toml"), "[bench]\ncodebase_tasks = 12\n").expect("write");
+        assert_eq!(
+            Config::load(&root)
+                .expect("valid")
+                .file
+                .bench
+                .codebase_tasks,
+            12
+        );
+    }
+
+    #[test]
+    fn bench_section_refuses_unknown_keys() {
+        assert!(
+            toml::from_str::<super::FileConfig>("[bench]\ntypo = 1\n").is_err(),
+            "deny_unknown_fields (§C.7)"
+        );
+    }
+
+    #[test]
+    fn the_judge_knobs_default_and_parse() {
+        let cfg: super::FileConfig = toml::from_str("").expect("defaults");
+        assert_eq!(cfg.bench.judge_max_tokens, 512);
+        assert_eq!(cfg.bench.judge_min_consistency_pct, 70);
+        assert_eq!(
+            cfg.bench.judge_reasoning_effort,
+            super::ReasoningEffort::Low
+        );
+        assert_eq!(cfg.bench.judge_reasoning_effort.as_str(), "low");
+        let cfg: super::FileConfig = toml::from_str(
+            "[bench]\njudge_max_tokens = 64\njudge_min_consistency_pct = 80\njudge_reasoning_effort = \"none\"\n",
+        )
+        .expect("overrides parse");
+        assert_eq!(cfg.bench.judge_max_tokens, 64);
+        assert_eq!(cfg.bench.judge_min_consistency_pct, 80);
+        assert_eq!(
+            cfg.bench.judge_reasoning_effort,
+            super::ReasoningEffort::None
+        );
+        assert!(
+            toml::from_str::<super::FileConfig>("[bench]\njudge_reasoning_effort = \"max\"\n")
+                .is_err(),
+            "an effort llama.cpp does not spell is refused at load"
+        );
+    }
+
+    #[test]
+    fn engine_section_parses_git_ref_and_defaults_to_unpinned() {
+        assert_eq!(
+            super::FileConfig::default().engine.git_ref,
+            None,
+            "no pin means today's behaviour: whatever upstream HEAD is"
+        );
+        let root = scratch("cfg-engine-ref");
+        std::fs::write(root.join("config.toml"), "[engine]\ngit_ref = \"b7000\"\n").expect("write");
+        let cfg = Config::load(&root).expect("a pinned engine parses");
+        assert_eq!(cfg.file.engine.git_ref.as_deref(), Some("b7000"));
+    }
+
+    #[test]
+    fn an_engine_ref_git_would_read_as_an_option_is_refused_at_load() {
+        // `git fetch origin -x` would parse the ref as a flag; a ref with
+        // whitespace would split into several. Neither can be a pin.
+        for bad in ["-x", "--upload-pack=evil", "v1 v2", ""] {
+            let root = scratch("cfg-engine-bad");
+            std::fs::write(
+                root.join("config.toml"),
+                format!("[engine]\ngit_ref = {bad:?}\n"),
+            )
+            .expect("write");
+            let msg = Config::load(&root).expect_err("must refuse").to_string();
+            assert!(msg.contains("git_ref"), "names the key for {bad:?}: {msg}");
+            assert!(msg.contains("config.toml"), "names the file: {msg}");
+        }
+    }
+
+    #[test]
+    fn engine_section_refuses_unknown_keys() {
+        let root = scratch("cfg-engine-unknown");
+        std::fs::write(root.join("config.toml"), "[engine]\nbranch = \"master\"\n").expect("write");
+        assert!(Config::load(&root).is_err());
+    }
+
+    #[test]
     fn base_url_joins_host_and_port() {
         let root = scratch("cfg-baseurl");
         let cfg = Config::load(&root).expect("defaults");
@@ -238,6 +556,42 @@ mod tests {
         assert_eq!(
             resolve_root(None, home),
             PathBuf::from("/Users/nobody/.chekov")
+        );
+    }
+
+    #[test]
+    fn the_tune_section_defaults_and_parses() {
+        let cfg: super::FileConfig = toml::from_str("").expect("defaults");
+        assert_eq!(cfg.tune.depth, 4096);
+        assert_eq!(cfg.tune.flash_attn, vec!["on", "off"]);
+        assert_eq!(cfg.tune.cache_types, vec!["q8_0", "f16"]);
+        assert_eq!(cfg.tune.batch_sizes, vec![512, 1024, 2048, 4096]);
+        assert_eq!(cfg.tune.ubatch_sizes, vec![256, 512, 1024, 2048]);
+        assert_eq!(cfg.tune.spec_drafts, vec!["off", "mtp:1", "mtp:2", "mtp:3"]);
+        assert_eq!(cfg.tune.guard_tolerance_pct, 15);
+        let cfg: super::FileConfig = toml::from_str(
+            "[tune]\ndepth = 2048\nbatch_sizes = [1024]\nspec_drafts = [\"off\", \"mtp:1\"]\n\
+             guard_tolerance_pct = 0\n",
+        )
+        .expect("overrides parse");
+        assert_eq!((cfg.tune.depth, cfg.tune.batch_sizes.len()), (2048, 1));
+        assert_eq!(cfg.tune.spec_drafts.len(), 2);
+        assert_eq!(
+            cfg.tune.guard_tolerance_pct, 0,
+            "0 restores the strict guard"
+        );
+        assert!(
+            toml::from_str::<super::FileConfig>("[tune]\ndepths = [1]\n").is_err(),
+            "unknown keys are refused"
+        );
+        let root = std::path::Path::new("/r");
+        assert_eq!(
+            super::Config {
+                root: root.to_path_buf(),
+                file: super::FileConfig::default()
+            }
+            .tune_dir(),
+            root.join("tune")
         );
     }
 }

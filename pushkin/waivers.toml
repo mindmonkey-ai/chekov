@@ -1,0 +1,8 @@
+[[waivers]]
+id = "ce98d36c-3885-4277-ab7c-df0ddd1bfc61"
+rule = "pushkin.suppression.new"
+path = "src/core/hub.rs"
+reason = "rule false-fires on the pre-existing sanctioned"
+author = "Amos Coletti"
+granted_at = "2026-08-28T03:09:19.033398Z"
+expires_at = "2026-09-04T03:09:19.033398Z"

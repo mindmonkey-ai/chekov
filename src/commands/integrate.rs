@@ -339,6 +339,7 @@ mod tests {
                 hermes_ok: true,
                 ctx_size: None,
                 extra_flags: vec![],
+                role: None,
             },
         );
         let eff = reg.effective("minimax-m2.7").expect("registered");

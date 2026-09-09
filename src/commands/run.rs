@@ -1,5 +1,6 @@
 //! `chekov run [name] [--foreground]` — start llama-server after loud preflight:
-//! shard present, port free, wired limit sufficient, nothing already running.
+//! shard present, port free, the model within the GPU budget (or the
+//! configured floor met), nothing already running.
 //!
 //! Backgrounds by default (pidfile logs/chekov.pid, output to
 //! logs/llama-server.log). `--foreground` blocks the terminal instead; the
@@ -51,21 +52,76 @@ pub(crate) fn preflight(
             port: cfg.file.server.port,
         });
     }
-    wired_gate(cfg, cfg.file.limits.wired_limit_mb)
+    wired_gate(cfg, eff)
 }
 
-/// The wired-limit refusal, split on whether the machine could ever satisfy it.
-/// A requirement above physical RAM has no sysctl remedy, so pointing the user
-/// at one would be a lie (§C.2 — every refusal names a real remediation).
-fn wired_gate(cfg: &crate::core::config::Config, required_mb: u64) -> Result<(), ChekovError> {
-    use crate::core::checks::{WiredVerdict, physical_ram_mb, wired_verdict};
+/// The memory gate. With a configured floor, the budget is judged against
+/// it; without one — the default — the model itself is the requirement, so
+/// its footprint is judged against the budget instead.
+fn wired_gate(
+    cfg: &crate::core::config::Config,
+    eff: &crate::core::registry::Effective,
+) -> Result<(), ChekovError> {
     // Same resolver `chekov capability` prints, so the gate and the report can
     // never disagree about what this machine can hold.
     let Some(budget) = crate::core::machine::live_gpu_budget(&cfg.engine_dir()) else {
         eprintln!("warning: could not determine the GPU budget — proceeding unverified");
         return Ok(());
     };
-    let actual_mb = budget.value;
+    cfg.file.limits.wired_limit_mb.map_or_else(
+        || footprint_gate(cfg, eff, budget.value),
+        |required_mb| floor_gate(cfg, required_mb, budget.value),
+    )
+}
+
+/// The model's predicted footprint against the budget: over is a refusal
+/// naming the levers that exist, tight is said out loud, and an unreadable
+/// header proceeds with the check named as not done — never a silent pass.
+fn footprint_gate(
+    cfg: &crate::core::config::Config,
+    eff: &crate::core::registry::Effective,
+    budget_mib: u64,
+) -> Result<(), ChekovError> {
+    use crate::core::footprint::{Decision, decide, predicted_total};
+    match decide(predicted_total(cfg, eff), budget_mib) {
+        Decision::Proceed => Ok(()),
+        Decision::Tight { pct } => {
+            eprintln!(
+                "tight: '{}' is {pct}% of the {budget_mib} MiB GPU budget",
+                eff.name
+            );
+            Ok(())
+        }
+        Decision::Unverified => {
+            // The shard exists — preflight refused otherwise — so the only
+            // thing that can be missing is a readable header.
+            eprintln!(
+                "warning: could not predict the footprint of '{}' (GGUF header unreadable \
+                 at {}) — proceeding unverified",
+                eff.name,
+                crate::core::server::shard_path(cfg, eff).display()
+            );
+            Ok(())
+        }
+        Decision::Exceeds { need_mib } => Err(ChekovError::ModelExceedsBudget {
+            name: eff.name.clone(),
+            need_mib,
+            budget_mib,
+            ctx: eff.ctx_size,
+        }),
+    }
+}
+
+/// The configured floor's refusal, split on whether the machine could ever
+/// satisfy it. A requirement above physical RAM has no sysctl remedy, so
+/// pointing the user at one would be a lie (§C.2 — every refusal names a real
+/// remediation).
+fn floor_gate(
+    cfg: &crate::core::config::Config,
+    required_mb: u64,
+    actual_mb: u64,
+) -> Result<(), ChekovError> {
+    use crate::core::checks::{WiredVerdict, physical_ram_mb, wired_verdict};
     // Unreadable RAM must never upgrade a refusal to "unreachable" — stay loud
     // but stay accurate.
     let ram_mb = physical_ram_mb().unwrap_or(u64::MAX);

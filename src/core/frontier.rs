@@ -40,6 +40,42 @@ impl Fit {
     }
 }
 
+/// What the first character of a cell encodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Metric {
+    /// The memory verdict (the default).
+    #[default]
+    Fit,
+    /// A band digit of the MEASURED decode rate; unmeasured cells stay `??`.
+    TokS,
+}
+
+/// One stored measurement, attached to the cell it was taken in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Speed {
+    pub decode: crate::core::stats::Summary,
+    /// Prompt depth of the sweep row the median came from.
+    pub depth: u32,
+    pub run_id: String,
+    /// The engine build that produced it — named when it is no longer current.
+    pub engine_commit: String,
+}
+
+/// Band edges in tok/s. Fixed and absolute, never deciles of the peer set: a
+/// digit must not move because a DIFFERENT model was benched (the §7.5 rule).
+pub const SPEED_BAND_EDGES: [u32; 8] = [5, 10, 15, 20, 30, 40, 60, 80];
+
+/// `1` below the first edge, `9` at or above the last.
+#[must_use]
+pub fn band_for(tok_s: f64) -> char {
+    let edges_passed = SPEED_BAND_EDGES
+        .iter()
+        .filter(|&&edge| tok_s >= f64::from(edge))
+        .count();
+    let band = u32::try_from(edges_passed).unwrap_or(8) + 1;
+    char::from_digit(band, 10).unwrap_or('9')
+}
+
 /// Fit of `total` against `budget_mib`.
 ///
 /// `None` in means `Unknown` out — a missing component can never be silently
@@ -65,21 +101,46 @@ pub struct Cell {
     pub weights_bytes: Option<u64>,
     pub kv_bytes: Probed<Option<u64>>,
     pub overhead_bytes: Probed<Option<u64>>,
+    /// A stored measurement for this exact model, quant and ctx, if any.
+    pub speed: Option<Speed>,
 }
 
 impl Cell {
+    /// The two characters: verdict or band digit, then inputs provenance.
+    ///
+    /// Under `TokS` a cell with no measurement or unknown geometry is `??` in
+    /// full — a digit is never predicted, and a provenance mark beside a `?`
+    /// would imply a measurement that does not exist.
+    #[must_use]
+    pub fn glyphs(&self, budget_mib: u64, metric: Metric) -> [char; 2] {
+        let fit = fit_for(self.total_bytes(), budget_mib);
+        match (metric, &self.speed) {
+            (Metric::Fit, _) => [fit.glyph(), self.kv_inputs()],
+            (Metric::TokS, Some(speed)) if fit != Fit::Unknown => {
+                [band_for(speed.decode.median), self.kv_inputs()]
+            }
+            (Metric::TokS, _) => ['?', '?'],
+        }
+    }
+
     /// Sum of the parts, or `None` when any part is unknown.
     #[must_use]
     pub fn total_bytes(&self) -> Option<u64> {
         Some(self.weights_bytes? + self.kv_bytes.value? + self.overhead_bytes.value?)
     }
 
-    /// Second character: are the inputs measured, or predicted?
+    /// Second character: was KV measured (GGUF header read), or predicted?
+    ///
+    /// KV only — deliberately. It is the term that varies with context and
+    /// dominates the total; the overhead is a flat prediction in every cell,
+    /// so folding it in would make every mark identical and carry nothing.
+    /// The legend says exactly this, and the SVG tooltip prints each part's
+    /// own provenance.
     #[must_use]
-    pub const fn inputs(&self) -> char {
-        match (self.kv_bytes.provenance, self.overhead_bytes.provenance) {
-            (Provenance::Measured | Provenance::EngineReported, _) => '#',
-            _ => '\u{b7}',
+    pub const fn kv_inputs(&self) -> char {
+        match self.kv_bytes.provenance {
+            Provenance::Measured | Provenance::EngineReported => '#',
+            Provenance::Predicted => '\u{b7}',
         }
     }
 }
@@ -98,6 +159,57 @@ pub struct Frontier {
     pub budget: Probed<u64>,
     pub ctx_ladder: Vec<u32>,
     pub rows: Vec<Row>,
+    pub metric: Metric,
+    /// The engine build now installed; measured cells from another build are
+    /// named in the footer.
+    pub engine_commit: Option<String>,
+    /// Numbered footnotes — anything excluded on the way in says so here.
+    pub notes: Vec<String>,
+}
+
+/// The title line, naming the metric when it is not the default.
+fn title(f: &Frontier) -> String {
+    match f.metric {
+        Metric::Fit => "chekov capability frontier".to_owned(),
+        Metric::TokS => "chekov capability frontier   metric: decode tok/s (measured)".to_owned(),
+    }
+}
+
+/// Rule 8: a measurement from a build that is no longer current is shown AND
+/// named, never carried silently.
+fn stale_line(f: &Frontier) -> Option<String> {
+    if f.metric != Metric::TokS {
+        return None;
+    }
+    let current = f.engine_commit.as_deref()?;
+    let mut old: Vec<&str> = f
+        .rows
+        .iter()
+        .flat_map(|row| &row.cells)
+        .filter_map(|cell| cell.speed.as_ref())
+        .map(|speed| speed.engine_commit.as_str())
+        .filter(|commit| *commit != current)
+        .collect();
+    old.sort_unstable();
+    old.dedup();
+    if old.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "measured cells are from build {}; the engine is now at {current}. Re-run 'chekov \
+         capability bench' to revalidate.",
+        old.join(", ")
+    ))
+}
+
+/// Everything printed below the legend, in both renderers.
+fn footer_lines(f: &Frontier) -> Vec<String> {
+    let notes = f
+        .notes
+        .iter()
+        .enumerate()
+        .map(|(i, note)| format!("[{}] {note}", i + 1));
+    stale_line(f).into_iter().chain(notes).collect()
 }
 
 /// Header naming the budget and, loudly, when the ceiling itself is a guess.
@@ -125,7 +237,10 @@ fn axis_line(ladder: &[u32], name_width: usize) -> String {
     line
 }
 
-fn format_ctx(ctx: u32) -> String {
+/// `32K` for a multiple of 1024, else the bare number — one spelling for the
+/// axis, the tooltips, and the footnotes.
+#[must_use]
+pub fn format_ctx(ctx: u32) -> String {
     if ctx.is_multiple_of(1024) {
         format!("{}K", ctx / 1024)
     } else {
@@ -133,25 +248,81 @@ fn format_ctx(ctx: u32) -> String {
     }
 }
 
-fn cell_row(row: &Row, budget_mib: u64, name_width: usize) -> String {
+fn cell_row(row: &Row, f: &Frontier, name_width: usize) -> String {
     let mut line = format!("  {:name_width$}  {:>10}        ", row.name, row.quant);
     for cell in &row.cells {
-        let fit = fit_for(cell.total_bytes(), budget_mib).glyph();
-        let _ = write!(line, "{:>7}{}", fit, cell.inputs());
+        let [first, second] = cell.glyphs(f.budget.value, f.metric);
+        let _ = write!(line, "{first:>7}{second}");
     }
     line
 }
 
+/// The band edges, generated from the same table `band_for` reads, so the
+/// legend and the digits can never disagree.
+fn band_legend() -> String {
+    let first = SPEED_BAND_EDGES[0];
+    let last = SPEED_BAND_EDGES[SPEED_BAND_EDGES.len() - 1];
+    let middle = SPEED_BAND_EDGES
+        .windows(2)
+        .enumerate()
+        .map(|(i, pair)| format!("{} {}-{}", i + 2, pair[0], pair[1]));
+    let bands: Vec<String> = std::iter::once(format!("1 <{first}"))
+        .chain(middle)
+        .chain(std::iter::once(format!("9 >={last}")))
+        .collect();
+    format!(
+        "    tok/s    {}\n             measured decode median at the deepest depth of the stored \
+         run; no measurement = ??",
+        bands.join("   ")
+    )
+}
+
 /// Never suppressed: a two-character cell is unreadable without it.
-fn legend(budget: Probed<u64>) -> String {
-    let fits = if budget.provenance == Provenance::Predicted {
+fn legend(f: &Frontier) -> String {
+    let fits = if f.budget.provenance == Provenance::Predicted {
         "fits against a predicted ceiling"
     } else {
         "fits (<85% of budget)"
     };
-    format!(
-        "    fit      #  {fits}   +  tight (85-100%)   .  exceeds   ?  unknown\n             inputs   #  measured   \u{b7}  predicted   ?  unknown"
-    )
+    let mut out = match f.metric {
+        Metric::Fit => {
+            format!("    fit      #  {fits}   +  tight (85-100%)   .  exceeds   ?  unknown\n")
+        }
+        Metric::TokS => format!("{}\n", band_legend()),
+    };
+    let _ = write!(
+        out,
+        "             inputs   #  kv measured   \u{b7}  kv predicted   ?  unknown   — {}",
+        overhead_note(f)
+    );
+    out
+}
+
+/// What the second character does NOT cover, said in the legend: the
+/// overhead's provenance. Today it is one flat prediction in every cell, and
+/// the legend names the number; should that ever vary, the legend says so
+/// rather than letting `#` pass for "all measured".
+fn overhead_note(f: &Frontier) -> String {
+    let overheads: Vec<Probed<Option<u64>>> = f
+        .rows
+        .iter()
+        .flat_map(|row| row.cells.iter().map(|cell| cell.overhead_bytes))
+        .collect();
+    let all_predicted = overheads
+        .iter()
+        .all(|o| o.provenance == Provenance::Predicted);
+    let flat = overheads.first().and_then(|first| {
+        overheads
+            .iter()
+            .all(|o| o.value == first.value)
+            .then_some(first.value)
+            .flatten()
+    });
+    match (all_predicted, flat) {
+        (true, Some(bytes)) => format!("overhead is a flat predicted {} in every cell", gib(bytes)),
+        (true, None) => "overhead is predicted in every cell".to_owned(),
+        (false, _) => "overhead provenance varies by cell (hover the SVG cells)".to_owned(),
+    }
 }
 
 /// The terminal grid.
@@ -164,23 +335,515 @@ pub fn render_ascii(f: &Frontier) -> String {
         .max()
         .unwrap_or(4)
         .max(4);
-    let mut out = String::from("  chekov capability frontier\n");
+    let mut out = format!("  {}\n", title(f));
     out.push_str(&budget_header(f.budget));
     out.push_str("\n\n");
     out.push_str(&axis_line(&f.ctx_ladder, name_width));
     out.push('\n');
     for row in &f.rows {
-        out.push_str(&cell_row(row, f.budget.value, name_width));
+        out.push_str(&cell_row(row, f, name_width));
         out.push('\n');
     }
     out.push('\n');
-    out.push_str(&legend(f.budget));
+    out.push_str(&legend(f));
+    for line in footer_lines(f) {
+        let _ = write!(out, "\n    {line}");
+    }
+    out
+}
+
+/// Geometry of the rendered grid, in user units.
+const CELL_W: usize = 96;
+const CELL_H: usize = 34;
+const TOP: usize = 96;
+const MARGIN: usize = 20;
+const GAP: usize = 16;
+const LINE_H: usize = 18;
+
+const CEILING_WARNING: &str = "CEILING PREDICTED — every verdict below is measured against a guess";
+
+const FOOTER: [&str; 2] = [
+    "hatched cells carry predicted inputs; solid cells are measured.",
+    "hover a cell for its arithmetic.",
+];
+
+/// The throughput panel under the grid: title band plus plot, in user units.
+const PANEL_H: usize = 150;
+const PANEL_PLOT_TOP: usize = 28;
+const PANEL_PLOT_H: usize = 100;
+
+/// SVG-only legend line for the dots. Predicted throughput is stated as
+/// absent rather than left to be inferred: no predicted tok/s reaches the
+/// frontier model, and the spec's ±15% band is an unvalidated prior.
+const DOT_LEGEND: &str = "\u{25cf}  measured decode median, whisker p10\u{2013}p90 (deepest depth of \
+                          the run)   predicted throughput is not drawn \u{2014} no validated model";
+
+/// Every measured cell: its row, its column, and the measurement.
+fn measured_cells(f: &Frontier) -> impl Iterator<Item = (&Row, usize, &Speed)> {
+    f.rows.iter().flat_map(|row| {
+        row.cells
+            .iter()
+            .enumerate()
+            .filter_map(move |(col, cell)| cell.speed.as_ref().map(|s| (row, col, s)))
+    })
+}
+
+/// Top of the y axis: the largest p90 rounded up to a clean multiple of ten,
+/// so the fastest whisker never touches the panel's edge. `None` without a
+/// measurement — no panel is drawn from nothing.
+fn panel_ceiling(f: &Frontier) -> Option<f64> {
+    measured_cells(f)
+        .map(|(_, _, s)| s.decode.p90)
+        .fold(None, |top: Option<f64>, p90| {
+            Some(top.map_or(p90, |t| t.max(p90)))
+        })
+        .map(|max| ((max / 10.0).floor() + 1.0) * 10.0)
+}
+
+fn as_f64(units: usize) -> f64 {
+    u32::try_from(units).map_or(0.0, f64::from)
+}
+
+/// Advance of `chars` glyphs in a monospace face at `font_px`. Chrome renders
+/// `ui-monospace` at 0.60 em (measured with `getBBox`); 0.65 plus one glyph of
+/// slack leaves room for a wider fallback face. Right-side whitespace is
+/// cheap; an estimate that undercuts the text loses words. (A `qlmanage`
+/// thumbnail ignores the canvas width entirely and is not a check.)
+const fn text_w(chars: usize, font_px: usize) -> usize {
+    chars * font_px * 13 / 20 + font_px
+}
+
+/// Positions derived from the frontier's own content. A long model name moves
+/// the quant column and the grid right instead of running under them, and the
+/// canvas is at least as wide as its widest line of text, so nothing is
+/// clipped at the right edge.
+struct Layout {
+    quant_x: usize,
+    left: usize,
+    width: usize,
+    /// The throughput panel's top edge and y-axis ceiling, when any cell
+    /// carries a measurement.
+    panel: Option<(usize, f64)>,
+    legend_top: usize,
+    height: usize,
+}
+
+fn longest(rows: &[Row], text: impl Fn(&Row) -> &str) -> usize {
+    rows.iter()
+        .map(|row| text(row).chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
+fn layout(f: &Frontier) -> Layout {
+    let quant_x = MARGIN + text_w(longest(&f.rows, |row| &row.name), 13) + GAP;
+    let left = quant_x + text_w(longest(&f.rows, |row| &row.quant), 12) + GAP;
+    let grid_w = left + f.ctx_ladder.len() * CELL_W + MARGIN;
+    let grid_bottom = TOP + f.rows.len() * CELL_H + LINE_H;
+    let panel = panel_ceiling(f).map(|ceiling| (grid_bottom, ceiling));
+    let legend_top = grid_bottom + LINE_H + panel.map_or(0, |_| PANEL_H);
+    let text_lines = legend(f).lines().count()
+        + usize::from(panel.is_some())
+        + footer_lines(f).len()
+        + FOOTER.len();
+    Layout {
+        quant_x,
+        left,
+        width: grid_w.max(widest_text(f)),
+        panel,
+        legend_top,
+        height: legend_top + text_lines * LINE_H + MARGIN,
+    }
+}
+
+/// The widest line of prose on the sheet, margins included.
+fn widest_text(f: &Frontier) -> usize {
+    let legend = legend(f);
+    let footer = footer_lines(f);
+    let prose = legend
+        .lines()
+        .map(|line| text_w(line.trim().chars().count(), 12))
+        .chain(footer.iter().map(|line| text_w(line.chars().count(), 12)))
+        .chain(FOOTER.iter().map(|line| text_w(line.chars().count(), 11)))
+        .chain([
+            text_w(DOT_LEGEND.chars().count(), 12),
+            text_w(title(f).chars().count(), 18),
+            text_w(header_line(f).chars().count(), 13),
+            text_w(CEILING_WARNING.chars().count(), 13),
+        ]);
+    prose.max().unwrap_or(0) + 2 * MARGIN
+}
+
+/// The frontier with its layout resolved: what every emitter draws from.
+struct Sheet<'a> {
+    f: &'a Frontier,
+    lay: Layout,
+}
+
+/// `bytes` as GiB with one decimal, without a lossy float cast.
+fn gib(bytes: u64) -> String {
+    let tenths = bytes * 10 / (1024 * 1024 * 1024);
+    format!("{}.{} GiB", tenths / 10, tenths % 10)
+}
+
+/// XML-escape text that came from the registry or the machine.
+///
+/// A model name is user data; an unescaped `&` produces a file no viewer will
+/// open.
+fn esc(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Fill colours ordered by luminance, so the three states remain distinct in
+/// greyscale. Colour is never the only carrier: each cell also prints its
+/// glyph, and predicted inputs are hatched.
+const fn fill_for(fit: Fit) -> &'static str {
+    match fit {
+        Fit::Fits => "#f2f9f2",
+        Fit::Tight => "#fde9b8",
+        Fit::Exceeds => "#e8a6a6",
+        Fit::Unknown => "#ffffff",
+    }
+}
+
+/// One cell in its place: which row, which context, which budget (§4).
+struct CellAt<'a> {
+    row: &'a Row,
+    ctx: u32,
+    cell: &'a Cell,
+    budget_mib: u64,
+}
+
+/// The cell's own arithmetic, as the reader would check it by hand.
+fn cell_title(at: &CellAt) -> String {
+    let CellAt {
+        row,
+        ctx,
+        cell,
+        budget_mib,
+    } = *at;
+    let part = |v: Option<u64>| v.map_or_else(|| "unknown".to_owned(), gib);
+    let verdict = match fit_for(cell.total_bytes(), budget_mib) {
+        Fit::Fits => "fits",
+        Fit::Tight => "tight (85-100% of budget)",
+        Fit::Exceeds => "exceeds the budget",
+        // Said in full: a blank here reads as a rendering gap rather than a
+        // refusal to guess.
+        Fit::Unknown => "unknown — an unknown input is never a fit",
+    };
+    format!(
+        "{} {} @ {}: weights {} + kv {} ({}) + overhead {} ({}) = {} vs budget {} -> {}{}",
+        row.name,
+        row.quant,
+        format_ctx(ctx),
+        part(cell.weights_bytes),
+        part(cell.kv_bytes.value),
+        cell.kv_bytes.provenance.label(),
+        part(cell.overhead_bytes.value),
+        cell.overhead_bytes.provenance.label(),
+        part(cell.total_bytes()),
+        gib(budget_mib * 1024 * 1024),
+        verdict,
+        speed_note(cell),
+    )
+}
+
+/// The measurement behind a band digit, with the spread and the run it came
+/// from — the audit trail the digit compresses away.
+fn speed_note(cell: &Cell) -> String {
+    cell.speed.as_ref().map_or_else(String::new, |s| {
+        format!(
+            "; decode {:.1} tok/s [{:.1}..{:.1}] at depth {}, run {}",
+            s.decode.median, s.decode.p10, s.decode.p90, s.depth, s.run_id
+        )
+    })
+}
+
+/// One cell: base fill, hatch when the inputs are predicted, glyph, tooltip.
+fn svg_cell(row: &Row, index: usize, sheet: &Sheet) -> String {
+    let f = sheet.f;
+    let cell = &row.cells[index];
+    let ctx = f.ctx_ladder[index];
+    let fit = fit_for(cell.total_bytes(), f.budget.value);
+    let (x, y) = (sheet.lay.left + index * CELL_W, 0);
+    let [first, second] = cell.glyphs(f.budget.value, f.metric);
+    let hatched = cell.kv_inputs() != '#';
+    let hatch = if hatched {
+        format!(
+            "<rect x=\"{x}\" y=\"{y}\" width=\"{}\" height=\"{}\" fill=\"url(#predicted)\"/>",
+            CELL_W - 4,
+            CELL_H - 4
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<g><title>{}</title>\
+         <rect x=\"{x}\" y=\"{y}\" width=\"{}\" height=\"{}\" fill=\"{}\" stroke=\"#666\"/>\
+         {hatch}\
+         <text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"14\">{} {}</text></g>",
+        esc(&cell_title(&CellAt {
+            row,
+            ctx,
+            cell,
+            budget_mib: f.budget.value,
+        })),
+        CELL_W - 4,
+        CELL_H - 4,
+        fill_for(fit),
+        x + (CELL_W - 4) / 2,
+        y + 22,
+        esc(&first.to_string()),
+        esc(&second.to_string()),
+    )
+}
+
+/// A self-contained SVG of the same frontier the terminal grid shows.
+///
+/// Hand-emitted: no dependency, no CDN, no script. The caller prints the path
+/// and never opens it — launching a GUI from a CLI is an unrequested side
+/// effect, and a printed path composes with the user's own tooling.
+#[must_use]
+pub fn render_svg(f: &Frontier) -> String {
+    let sheet = Sheet { f, lay: layout(f) };
+    let (width, height) = (sheet.lay.width, sheet.lay.height);
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
+         viewBox=\"0 0 {width} {height}\" font-family=\"ui-monospace, Menlo, monospace\">\n\
+         <rect width=\"{width}\" height=\"{height}\" fill=\"#ffffff\"/>\n\
+         <defs><pattern id=\"predicted\" width=\"6\" height=\"6\" patternUnits=\"userSpaceOnUse\" \
+         patternTransform=\"rotate(45)\">\
+         <line x1=\"0\" y1=\"0\" x2=\"0\" y2=\"6\" stroke=\"#000000\" stroke-opacity=\"0.35\" \
+         stroke-width=\"2\"/></pattern></defs>\n\
+         <text x=\"20\" y=\"32\" font-size=\"18\" xml:space=\"preserve\">{}</text>\n",
+        esc(&title(f)),
+    );
+    out.push_str(&svg_header(f));
+    out.push_str(&svg_axis(&sheet));
+    for (r, row) in f.rows.iter().enumerate() {
+        out.push_str(&svg_row(row, r, &sheet));
+    }
+    out.push_str(&svg_panel(&sheet));
+    out.push_str(&svg_legend(&sheet));
+    out.push_str("</svg>\n");
+    out
+}
+
+/// The throughput panel: measured decode medians as filled dots with p10–p90
+/// whiskers, on the grid's own ctx columns. Nothing is drawn for a cell
+/// without a run, and no panel at all without a measurement — sparse dots
+/// are the honest picture; empty axes would invite reading a chart nobody
+/// measured. The number and the row's name travel with each dot, so nothing
+/// depends on colour.
+fn svg_panel(sheet: &Sheet) -> String {
+    let Some((top, ceiling)) = sheet.lay.panel else {
+        return String::new();
+    };
+    let plot_top = top + PANEL_PLOT_TOP;
+    let plot_bottom = plot_top + PANEL_PLOT_H;
+    let axis_x = sheet.lay.left - 10;
+    let mut out = format!(
+        "<text x=\"{MARGIN}\" y=\"{}\" font-size=\"13\">decode tok/s (measured)</text>\n\
+         <line x1=\"{axis_x}\" y1=\"{plot_top}\" x2=\"{axis_x}\" y2=\"{plot_bottom}\" \
+         stroke=\"#666\"/>\n\
+         <text x=\"{}\" y=\"{}\" text-anchor=\"end\" font-size=\"11\" fill=\"#555\">{ceiling:.0}</text>\n\
+         <text x=\"{}\" y=\"{}\" text-anchor=\"end\" font-size=\"11\" fill=\"#555\">0</text>\n",
+        top + 18,
+        axis_x - 4,
+        plot_top + 4,
+        axis_x - 4,
+        plot_bottom + 4,
+    );
+    let plot_y = |tok_s: f64| (tok_s / ceiling).mul_add(-as_f64(PANEL_PLOT_H), as_f64(plot_bottom));
+    let mut dots: Vec<(usize, &Row, &Speed)> = measured_cells(sheet.f)
+        .map(|(row, col, speed)| (sheet.lay.left + col * CELL_W + (CELL_W - 4) / 2, row, speed))
+        .collect();
+    dots.sort_by_key(|(cx, _, _)| *cx);
+    let mut lanes = LabelLanes::default();
+    for (i, &(cx, row, speed)) in dots.iter().enumerate() {
+        let width = as_f64(text_w(row.name.chars().count() + 6, 11));
+        // A label that would run across the next dot sits on its own dot's
+        // left instead — the dot cannot move, the text can.
+        let left = dots
+            .get(i + 1)
+            .is_some_and(|&(next_cx, _, _)| as_f64(cx + 8) + width > as_f64(next_cx) - 6.0);
+        let label = lanes.place((cx, width, left), plot_y(speed.decode.median) + 4.0);
+        out.push_str(&svg_dot(label, &plot_y, (row, speed)));
+    }
+    out
+}
+
+/// Where a dot's label goes: beside its dot, on the right unless flipped.
+#[derive(Debug, Clone, Copy)]
+struct LabelAt {
+    cx: usize,
+    y: f64,
+    left: bool,
+}
+
+/// Keeps a label off the previous same-side label's tail: when the two
+/// would overlap horizontally and sit within one line of each other, the
+/// later one drops a line. Colour never carries identity here, so the text
+/// must stay legible.
+#[derive(Default)]
+struct LabelLanes {
+    last_right: f64,
+    last_y: f64,
+}
+
+impl LabelLanes {
+    const LINE: f64 = 14.0;
+
+    /// `span` is the dot's x, the label's width, and whether it sits left.
+    fn place(&mut self, span: (usize, f64, bool), wanted_y: f64) -> LabelAt {
+        let (cx, width, left) = span;
+        let x = if left {
+            as_f64(cx) - 8.0 - width
+        } else {
+            as_f64(cx + 8)
+        };
+        let y = if x < self.last_right && (wanted_y - self.last_y).abs() < Self::LINE {
+            self.last_y + Self::LINE
+        } else {
+            wanted_y
+        };
+        self.last_right = x + width;
+        self.last_y = y;
+        LabelAt { cx, y, left }
+    }
+}
+
+/// One measurement: whisker from p10 up to p90, the dot at the median, and
+/// the median with the row's name beside it.
+fn svg_dot(label: LabelAt, plot_y: &dyn Fn(f64) -> f64, at: (&Row, &Speed)) -> String {
+    let (row, speed) = at;
+    let cx = label.cx;
+    let (y_p10, y_p90, cy) = (
+        plot_y(speed.decode.p10),
+        plot_y(speed.decode.p90),
+        plot_y(speed.decode.median),
+    );
+    let (x, anchor) = if label.left {
+        (cx - 8, " text-anchor=\"end\"")
+    } else {
+        (cx + 8, "")
+    };
+    format!(
+        "<line class=\"whisker\" x1=\"{cx}\" y1=\"{y_p10:.1}\" x2=\"{cx}\" y2=\"{y_p90:.1}\" \
+         stroke=\"#000\" stroke-width=\"1.5\"/>\n\
+         <circle cx=\"{cx}\" cy=\"{cy:.1}\" r=\"4\" fill=\"#000\"/>\n\
+         <text class=\"dot-label\" x=\"{x}\" y=\"{:.1}\"{anchor} font-size=\"11\">{:.1} {}</text>\n",
+        label.y,
+        speed.decode.median,
+        esc(&row.name),
+    )
+}
+
+fn header_line(f: &Frontier) -> String {
+    format!(
+        "GPU budget {} MiB ({}) — {}",
+        f.budget.value,
+        gib(f.budget.value * 1024 * 1024),
+        f.budget.provenance.label(),
+    )
+}
+
+/// The budget line, and the same loud warning the terminal prints when the
+/// ceiling every verdict is measured against is itself a guess.
+fn svg_header(f: &Frontier) -> String {
+    let mut out = format!(
+        "<text x=\"{MARGIN}\" y=\"56\" font-size=\"13\">{}</text>\n",
+        esc(&header_line(f)),
+    );
+    if f.budget.provenance == Provenance::Predicted {
+        let _ = writeln!(
+            out,
+            "<text x=\"{MARGIN}\" y=\"76\" font-size=\"13\" fill=\"#a33\">{}</text>",
+            esc(CEILING_WARNING),
+        );
+    }
+    out
+}
+
+fn svg_axis(sheet: &Sheet) -> String {
+    let mut out = String::new();
+    for (i, ctx) in sheet.f.ctx_ladder.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"12\">{}</text>",
+            sheet.lay.left + i * CELL_W + (CELL_W - 4) / 2,
+            TOP - 8,
+            esc(&format_ctx(*ctx)),
+        );
+    }
+    out
+}
+
+fn svg_row(row: &Row, index: usize, sheet: &Sheet) -> String {
+    let y = TOP + index * CELL_H;
+    let mut out = format!(
+        "<g transform=\"translate(0,{y})\">\
+         <text x=\"{MARGIN}\" y=\"22\" font-size=\"13\">{}</text>\
+         <text x=\"{}\" y=\"22\" font-size=\"12\" fill=\"#555\">{}</text>",
+        esc(&row.name),
+        sheet.lay.quant_x,
+        esc(&row.quant),
+    );
+    for i in 0..row.cells.len().min(sheet.f.ctx_ladder.len()) {
+        out.push_str(&svg_cell(row, i, sheet));
+    }
+    out.push_str("</g>\n");
+    out
+}
+
+/// The legend comes from the SAME function the terminal renderer calls, so
+/// the two views can never disagree about what a glyph means. Its spacing is
+/// preserved — SVG collapses runs of spaces by default, which would fuse the
+/// legend's columns into one run-on line.
+fn svg_legend(sheet: &Sheet) -> String {
+    let mut out = String::new();
+    let mut y = sheet.lay.legend_top;
+    for line in legend(sheet.f).lines() {
+        let _ = writeln!(
+            out,
+            "<text x=\"{MARGIN}\" y=\"{y}\" font-size=\"12\" xml:space=\"preserve\">{}</text>",
+            esc(line.trim()),
+        );
+        y += LINE_H;
+    }
+    if sheet.lay.panel.is_some() {
+        let _ = writeln!(
+            out,
+            "<text x=\"{MARGIN}\" y=\"{y}\" font-size=\"12\" xml:space=\"preserve\">{}</text>",
+            esc(DOT_LEGEND),
+        );
+        y += LINE_H;
+    }
+    for line in footer_lines(sheet.f) {
+        let _ = writeln!(
+            out,
+            "<text x=\"{MARGIN}\" y=\"{y}\" font-size=\"12\" fill=\"#a33\">{}</text>",
+            esc(&line),
+        );
+        y += LINE_H;
+    }
+    for line in FOOTER {
+        let _ = writeln!(
+            out,
+            "<text x=\"{MARGIN}\" y=\"{y}\" font-size=\"11\" fill=\"#555\">{}</text>",
+            esc(line),
+        );
+        y += LINE_H;
+    }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Fit, fit_for};
+    use super::{Cell, Fit, Metric, fit_for};
     use crate::core::machine::{Probed, Provenance};
 
     const GIB: u64 = 1024 * 1024 * 1024;
@@ -190,6 +853,7 @@ mod tests {
             weights_bytes: weights,
             kv_bytes: Probed::new(kv, Provenance::Predicted),
             overhead_bytes: Probed::new(Some(GIB / 4), Provenance::Predicted),
+            speed: None,
         }
     }
 
@@ -202,7 +866,153 @@ mod tests {
                 quant: "UD-Q6_K_XL".into(),
                 cells: vec![cell(Some(24 * GIB), Some(GIB)), cell(Some(24 * GIB), None)],
             }],
+            metric: Metric::Fit,
+            engine_commit: None,
+            notes: Vec::new(),
         }
+    }
+
+    fn measured(tok_s: f64) -> super::Speed {
+        super::Speed {
+            decode: crate::core::stats::Summary {
+                median: tok_s,
+                p10: tok_s - 1.0,
+                p90: tok_s + 1.0,
+                n: 4,
+                warmup_dropped: 1,
+            },
+            depth: 16_384,
+            run_id: "20260828T040614Z-qwen3.8-27b".into(),
+            engine_commit: "dda1b0d67".into(),
+        }
+    }
+
+    /// Two known-fit cells: the first measured, the second not.
+    fn tok_s_frontier() -> super::Frontier {
+        let mut f = frontier(Provenance::EngineReported);
+        f.metric = Metric::TokS;
+        f.engine_commit = Some("dda1b0d67".into());
+        f.rows[0].cells[0].speed = Some(measured(68.1));
+        f.rows[0].cells[1] = cell(Some(24 * GIB), Some(GIB));
+        f
+    }
+
+    fn grid_row(out: &str) -> String {
+        out.lines()
+            .find(|l| l.contains("qwen3.8-27b"))
+            .expect("the model's row")
+            .to_owned()
+    }
+
+    #[test]
+    fn speed_bands_have_fixed_edges_so_a_peer_bench_cannot_move_a_digit() {
+        assert_eq!(super::band_for(4.9), '1');
+        assert_eq!(super::band_for(5.0), '2');
+        assert_eq!(super::band_for(29.9), '5');
+        assert_eq!(super::band_for(79.9), '8');
+        assert_eq!(super::band_for(80.0), '9');
+        assert_eq!(super::band_for(500.0), '9');
+    }
+
+    #[test]
+    fn under_tok_s_a_measured_cell_is_a_band_digit_and_an_unmeasured_one_stays_unknown() {
+        let out = super::render_ascii(&tok_s_frontier());
+        let row = grid_row(&out);
+        assert!(row.contains("8\u{b7}"), "digit + inputs provenance: {row}");
+        assert!(
+            row.trim_end().ends_with("??"),
+            "no measurement, no digit: {row}"
+        );
+        assert!(
+            out.contains("1 <5") && out.contains("9 >=80"),
+            "edges: {out}"
+        );
+        assert!(
+            out.contains("deepest depth"),
+            "which depth the median is from: {out}"
+        );
+    }
+
+    #[test]
+    fn a_measured_cell_with_unknown_geometry_never_becomes_a_digit() {
+        let mut f = tok_s_frontier();
+        f.rows[0].cells[1] = cell(Some(24 * GIB), None);
+        f.rows[0].cells[1].speed = Some(measured(68.1));
+        let row = grid_row(&super::render_ascii(&f));
+        assert!(row.trim_end().ends_with("??"), "{row}");
+    }
+
+    #[test]
+    fn under_fit_a_stored_speed_changes_nothing() {
+        let mut f = tok_s_frontier();
+        f.metric = Metric::Fit;
+        let out = super::render_ascii(&f);
+        let row = grid_row(&out);
+        // The model name carries an `8` of its own; look only at the cells.
+        let cells = row
+            .rsplit("UD-Q6_K_XL")
+            .next()
+            .expect("cells after the quant");
+        assert!(cells.contains("#\u{b7}"), "{row}");
+        assert!(
+            !cells.chars().any(|c| c.is_ascii_digit()),
+            "no band digit under fit: {row}"
+        );
+        assert!(!out.contains("tok/s"), "{out}");
+    }
+
+    #[test]
+    fn a_stale_build_is_named_in_the_footer_never_carried_silently() {
+        let mut f = tok_s_frontier();
+        f.engine_commit = Some("f00dbabe1".into());
+        let out = super::render_ascii(&f);
+        assert!(
+            out.contains(
+                "measured cells are from build dda1b0d67; the engine is now at f00dbabe1. \
+                 Re-run 'chekov capability bench' to revalidate."
+            ),
+            "{out}"
+        );
+        let current = super::render_ascii(&tok_s_frontier());
+        assert!(
+            !current.contains("measured cells are from build"),
+            "{current}"
+        );
+    }
+
+    #[test]
+    fn notes_are_numbered_footnotes_below_the_grid() {
+        let mut f = tok_s_frontier();
+        f.notes
+            .push("eval/broken could not be read: line 3: bad json — excluded".into());
+        let out = super::render_ascii(&f);
+        assert!(out.contains("[1] eval/broken could not be read"), "{out}");
+    }
+
+    #[test]
+    fn the_svg_carries_the_band_digit_and_the_measurement_in_the_tooltip() {
+        let svg = super::render_svg(&tok_s_frontier());
+        assert!(svg.contains(">8 \u{b7}<"), "digit cell: {svg}");
+        assert!(svg.contains(">? ?<"), "unmeasured cell: {svg}");
+        assert!(
+            svg.contains("decode 68.1 tok/s [67.1..69.1] at depth 16384, run 20260828T040614Z"),
+            "tooltip: {svg}"
+        );
+        assert!(
+            svg.contains("1 &lt;5"),
+            "edges reach the SVG legend too: {svg}"
+        );
+    }
+
+    #[test]
+    fn the_svg_prints_the_stale_footer_from_the_same_source() {
+        let mut f = tok_s_frontier();
+        f.engine_commit = Some("f00dbabe1".into());
+        let svg = super::render_svg(&f);
+        assert!(
+            svg.contains("measured cells are from build dda1b0d67"),
+            "{svg}"
+        );
     }
 
     #[test]
@@ -240,6 +1050,248 @@ mod tests {
         assert!(
             out.contains("inputs   #"),
             "a two-char cell is unreadable without it: {out}"
+        );
+    }
+
+    #[test]
+    fn the_svg_is_self_contained_and_never_reaches_out() {
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(svg.starts_with("<svg"), "{svg}");
+        assert!(svg.trim_end().ends_with("</svg>"));
+        assert!(svg.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+        // A report that phones home, runs script, or breaks without a network
+        // is not a report you can put in a bug thread.
+        assert!(!svg.contains("<script"), "no script: {svg}");
+        assert!(!svg.contains("<image"), "no external image: {svg}");
+        assert!(
+            !svg.contains("href="),
+            "no external reference of any kind: {svg}"
+        );
+    }
+
+    #[test]
+    fn predicted_inputs_are_hatched_so_the_distinction_survives_greyscale() {
+        // Colour alone fails greyscale printing and colour-blind viewers, and
+        // measured-vs-predicted is the whole point of the second character.
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(
+            svg.contains("<pattern id=\"predicted\""),
+            "the hatch must be defined: {svg}"
+        );
+        assert!(
+            svg.contains("url(#predicted)"),
+            "and applied to the predicted cells: {svg}"
+        );
+    }
+
+    #[test]
+    fn every_cell_carries_its_arithmetic_as_a_tooltip() {
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(
+            svg.contains("<title>"),
+            "a cell the reader cannot audit is a claim, not a measurement: {svg}"
+        );
+        assert!(
+            svg.contains("weights") && svg.contains("+ kv") && svg.contains("vs budget"),
+            "the tooltip shows the sum, not just the verdict: {svg}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_cell_says_unknown_and_claims_no_fit() {
+        // The second ctx column has no KV number.
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(svg.contains("unknown"), "{svg}");
+    }
+
+    #[test]
+    fn the_svg_legend_is_the_ascii_legend() {
+        // One legend function, so the two views cannot disagree about what a
+        // glyph means.
+        let predicted = super::render_svg(&frontier(Provenance::Predicted));
+        assert!(
+            predicted.contains("fits against a predicted ceiling"),
+            "{predicted}"
+        );
+        assert!(predicted.contains("CEILING PREDICTED"), "{predicted}");
+        let measured = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(measured.contains("fits (&lt;85% of budget)"), "{measured}");
+        assert!(!measured.contains("CEILING PREDICTED"), "{measured}");
+    }
+
+    #[test]
+    fn a_long_model_name_moves_the_grid_right_instead_of_running_under_the_quant() {
+        // Seen live: an 18-character name at a fixed quant column printed
+        // "ornith-1.5-35b-a3b" straight through "Q8_0".
+        let short = super::layout(&frontier(Provenance::EngineReported));
+        let mut f = frontier(Provenance::EngineReported);
+        f.rows[0].name = "a".repeat(40);
+        let long = super::layout(&f);
+        assert!(
+            long.quant_x > short.quant_x,
+            "{} vs {}",
+            long.quant_x,
+            short.quant_x
+        );
+        assert!(long.quant_x >= super::MARGIN + super::text_w(40, 13));
+        assert!(long.left > long.quant_x);
+        let svg = super::render_svg(&f);
+        assert!(svg.contains(&format!("x=\"{}\"", long.quant_x)), "{svg}");
+    }
+
+    #[test]
+    fn the_canvas_is_at_least_as_wide_as_its_widest_line_of_text() {
+        // Seen live: the footer ran off the right edge of a three-column
+        // grid, because the width came from the grid alone.
+        let mut f = frontier(Provenance::Predicted);
+        f.ctx_ladder.truncate(1);
+        f.rows[0].cells.truncate(1);
+        let lay = super::layout(&f);
+        let widest_legend = super::legend(&f)
+            .lines()
+            .map(|line| line.trim().chars().count())
+            .max()
+            .unwrap_or(0);
+        assert!(lay.width >= 2 * super::MARGIN + super::text_w(widest_legend, 12));
+        assert!(
+            lay.width
+                >= 2 * super::MARGIN + super::text_w(super::CEILING_WARNING.chars().count(), 13)
+        );
+        let svg = super::render_svg(&f);
+        assert!(svg.contains(&format!("width=\"{}\"", lay.width)), "{svg}");
+        assert!(
+            svg.contains("xml:space=\"preserve\""),
+            "legend spacing survives: {svg}"
+        );
+    }
+
+    #[test]
+    fn the_inputs_legend_says_what_the_glyph_encodes_and_names_the_guessed_overhead() {
+        // The second character reports KV's provenance only; the overhead is a
+        // flat prediction in every cell. A legend that says "measured" for a
+        // sum with a guessed summand is the lie; the fix is to say exactly
+        // what the glyph encodes and what is guessed everywhere.
+        let f = frontier(Provenance::EngineReported);
+        let out = super::render_ascii(&f);
+        assert!(out.contains("#  kv measured"), "{out}");
+        assert!(out.contains("\u{b7}  kv predicted"), "{out}");
+        assert!(
+            out.contains("overhead is a flat predicted 0.2 GiB in every cell"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("#  measured   "),
+            "the old wording is gone: {out}"
+        );
+        // One legend function feeds both renderers.
+        let svg = super::render_svg(&f);
+        assert!(
+            svg.contains("overhead is a flat predicted 0.2 GiB in every cell"),
+            "{svg}"
+        );
+        assert_eq!(f.rows[0].cells[0].kv_inputs(), '\u{b7}');
+    }
+
+    /// Every `key="<number>"` value in the SVG, in document order.
+    fn numbers_after(svg: &str, key: &str) -> Vec<f64> {
+        svg.match_indices(key)
+            .filter_map(|(at, _)| {
+                let rest = &svg[at + key.len()..];
+                rest.split('"').next()?.parse().ok()
+            })
+            .collect()
+    }
+
+    /// `(y1, y2)` of every whisker line, in document order.
+    fn whiskers(svg: &str) -> Vec<(f64, f64)> {
+        svg.split("class=\"whisker\"")
+            .skip(1)
+            .map(|seg| {
+                let head = seg.split("/>").next().unwrap_or("");
+                (
+                    numbers_after(head, "y1=\"")[0],
+                    numbers_after(head, "y2=\"")[0],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn without_a_measurement_the_svg_draws_no_throughput_panel() {
+        // Empty axes would invite the eye to read a chart nobody measured.
+        let svg = super::render_svg(&frontier(Provenance::EngineReported));
+        assert!(!svg.contains("<circle"), "{svg}");
+        assert!(!svg.contains("decode tok/s"), "{svg}");
+        assert!(!svg.contains("whisker"), "{svg}");
+    }
+
+    #[test]
+    fn each_measured_cell_is_a_filled_dot_with_a_p10_p90_whisker_and_its_number() {
+        let mut f = tok_s_frontier();
+        let mut slow = cell(Some(24 * GIB), Some(GIB));
+        slow.speed = Some(measured(20.0));
+        f.rows.push(super::Row {
+            name: "slow-model".into(),
+            quant: "Q4_K_M".into(),
+            cells: vec![slow, cell(Some(24 * GIB), Some(GIB))],
+        });
+        let svg = super::render_svg(&f);
+        // One dot and one whisker per measured cell, none for the rest.
+        assert_eq!(svg.matches("<circle").count(), 2, "{svg}");
+        let whiskers = whiskers(&svg);
+        assert_eq!(whiskers.len(), 2, "{svg}");
+        // p10 sits below p90 on the page (larger y).
+        for (y_p10, y_p90) in &whiskers {
+            assert!(y_p10 > y_p90, "whisker runs p10 (low) to p90 (high): {svg}");
+        }
+        // A faster median sits higher (smaller y): 68.1 then 20.0 in row order.
+        let cys = numbers_after(&svg, "cy=\"");
+        assert_eq!(cys.len(), 2);
+        assert!(cys[0] < cys[1], "68.1 tok/s above 20.0 tok/s: {cys:?}");
+        // The number and the row's name travel with the dot — never colour alone.
+        assert!(svg.contains("68.1 qwen3.8-27b"), "{svg}");
+        assert!(svg.contains("20.0 slow-model"), "{svg}");
+        // The panel and its legend say what is drawn and what is not.
+        assert!(svg.contains("decode tok/s"), "{svg}");
+        assert!(svg.contains("measured decode median, whisker p10"), "{svg}");
+        assert!(svg.contains("predicted throughput is not drawn"), "{svg}");
+        // Still self-contained.
+        assert!(!svg.contains("href=") && !svg.contains("<script"), "{svg}");
+    }
+
+    #[test]
+    fn a_label_that_would_land_on_the_previous_ones_tail_drops_a_line() {
+        // Seen live: 25.8 at 96K and 20.4 at 128K sat within a few px of each
+        // other and the first label ran under the second dot.
+        let mut f = tok_s_frontier();
+        f.rows[0].cells[0].speed = Some(measured(25.8));
+        let mut near = cell(Some(24 * GIB), Some(GIB));
+        near.speed = Some(measured(25.0));
+        f.rows[0].cells[1] = near;
+        let svg = super::render_svg(&f);
+        let labels: Vec<&str> = svg
+            .split("class=\"dot-label\"")
+            .skip(1)
+            .map(|seg| seg.split('>').next().unwrap_or(""))
+            .collect();
+        assert_eq!(labels.len(), 2, "{svg}");
+        // The first label would run across the second dot, so it sits on the
+        // left of its own dot instead; the last one keeps the right side.
+        assert!(labels[0].contains("text-anchor=\"end\""), "{svg}");
+        assert!(!labels[1].contains("text-anchor=\"end\""), "{svg}");
+    }
+
+    #[test]
+    fn text_from_the_registry_is_xml_escaped() {
+        // A model name is user data; an unescaped & or < produces a file no
+        // viewer will open.
+        let mut f = frontier(Provenance::EngineReported);
+        f.rows[0].name = "a&b<c>\"d\"".into();
+        let svg = super::render_svg(&f);
+        assert!(svg.contains("a&amp;b&lt;c&gt;"), "{svg}");
+        assert!(
+            !svg.contains("a&b<c>"),
+            "the raw text must not survive: {svg}"
         );
     }
 

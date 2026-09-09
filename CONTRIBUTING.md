@@ -12,6 +12,12 @@ make deny                      # cargo deny — licenses, advisories, duplicates
 Tests are fully offline: HTTP goes through the `HttpClient` trait and is
 faked, and nothing spawns a real llama.cpp. Keep it that way.
 
+`make test` never executes a benchmarked repository's build. The one test
+that does — tiers 6-7 against a real `cargo` — is behind an env gate and
+prints why it skipped:
+
+    CHEKOV_TEST_EXEC=1 cargo test --locked --test codebase_exec -- --test-threads=1
+
 ## Ground rules
 
 - **Branch from `main`, open a PR.** CI runs fmt, clippy (pedantic + nursery,
