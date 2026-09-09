@@ -831,8 +831,8 @@ sees that today. A per-entry registry key is NOT proposed — `extra_flags`
 already is one, and a second spelling of the same flag is the
 knob-for-a-value-that-never-varied mistake. The `think_leak` probe (§13 Q5)
 is a different question — where the thoughts land, not how many.
-Design drafted 2026-09-09 (`docs/superpowers/specs/2026-09-09-reasoning-stamp-design.md`,
-awaiting approval): four reasoning flags (`--reasoning`, `-format`, `-effort`,
+Design APPROVED 2026-09-09 (`docs/superpowers/specs/2026-09-09-reasoning-stamp-design.md`,
+binding): four reasoning flags (`--reasoning`, `-format`, `-effort`,
 `-budget`) join the stamp and both compare masks; every row's measure gains
 thinking and answer CHARACTER counts read off the upstream body — the only
 place a `--reasoning-format none` run's `<think>` span still exists —

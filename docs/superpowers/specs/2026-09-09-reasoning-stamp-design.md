@@ -1,9 +1,10 @@
 # Reasoning effort on the stamp, thinking share on the row — design
 
-Date: 2026-09-09. Status: **DRAFT — awaiting approval.** Implements the
-IDEAS.md entry "Reasoning effort is a launch flag nobody stamps, and a cost
-nobody measures" (2026-09-06, approved 2026-09-09). Touches ~10 files; the
-">5 files — ask first" rule rides on the same approval.
+Date: 2026-09-09. Status: approved in chat 2026-09-09; this document is the
+binding spec. Implements the IDEAS.md entry "Reasoning effort is a launch
+flag nobody stamps, and a cost nobody measures" (2026-09-06, approved
+2026-09-09). Touches ~10 files; the ">5 files — ask first" rule was
+satisfied by the same approval.
 
 ## 1. Purpose, and the evidence
 
