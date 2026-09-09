@@ -2004,6 +2004,86 @@ mod tests {
         render_run(&RunLog::load(writer.dir()).expect("load"))
     }
 
+    fn looped(id: &str, grade: GradeRow, turns: u32, end: LoopEnd) -> Task {
+        Task {
+            tool_loop: Some(LoopRow {
+                turns,
+                tool_calls: turns,
+                end,
+            }),
+            ..graded("tool_loop", id, grade)
+        }
+    }
+
+    #[test]
+    fn the_tool_loop_line_counts_reached_and_prints_the_turns_beside_it() {
+        let eval = scratch("tool-loop-line");
+        let mut writer = RunWriter::create(&eval, "r-tl", &head()).expect("create");
+        let unmet = "stopped with the goal unmet after 2 turns: src/a.rs containing \"x\"";
+        for task in [
+            looped("tl-001", GradeRow::pass(), 2, LoopEnd::GoalMet),
+            looped("tl-002", GradeRow::pass(), 3, LoopEnd::GoalMet),
+            looped("tl-003", GradeRow::pass(), 6, LoopEnd::GoalMet),
+            looped(
+                "tl-004",
+                GradeRow::fail(unmet.to_owned()),
+                2,
+                LoopEnd::GoalUnmet { wanted: "x".into() },
+            ),
+            Task {
+                transport: Transport::Streamed,
+                ..looped(
+                    "tl-001",
+                    GradeRow::fail("final reply hit max_tokens".to_owned()),
+                    1,
+                    LoopEnd::Truncated,
+                )
+            },
+        ] {
+            writer.append(task).expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered
+                .contains("tool_loop    3/4 reached   turns 2/3/6 (min/median/max over reached)\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "tool_loop    streamed 0/1 reached (saturated: rank across candidates, not on this line)\n"
+            ),
+            "no turns note when nothing reached; a 0/N or N/N is flagged: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("tool_loop FAIL tl-004  {unmet}")),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "asymmetry    tool_loop tl-001: buffered PASS, streamed FAIL — final reply hit max_tokens"
+            ),
+            "the loop is a paired suite: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_all_unavailable_tool_loop_axis_is_na_with_its_reason() {
+        let eval = scratch("tool-loop-na");
+        let mut writer = RunWriter::create(&eval, "r-tl-na", &head()).expect("create");
+        writer
+            .append(graded(
+                "tool_loop",
+                "tl-001",
+                GradeRow::unavailable("server died".to_owned()),
+            ))
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains("tool_loop    N/A — nothing was measured (server died)"),
+            "{rendered}"
+        );
+    }
+
     #[test]
     fn a_row_written_before_transport_loads_as_buffered() {
         let line = r#"{"schema":1,"run_id":"r","seq":0,"suite":"tool_emit","task_id":"te-001",
