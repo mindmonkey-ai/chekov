@@ -172,6 +172,10 @@ pub struct BenchSection {
     /// `reasoning_effort` on every judge request — gpt-oss needs it, Gemma's
     /// template ignores it.
     pub judge_reasoning_effort: ReasoningEffort,
+    /// Turn budget (K) for every `tool_loop` case: a loop still calling tools
+    /// past it ends `TurnsExhausted`. Part of the agentic prompt-set hash, so
+    /// runs judged under different budgets never compare (tool-loop design §8).
+    pub tool_loop_max_turns: u32,
 }
 
 impl Default for BenchSection {
@@ -191,6 +195,7 @@ impl Default for BenchSection {
             judge_max_tokens: 512,
             judge_min_consistency_pct: 70,
             judge_reasoning_effort: ReasoningEffort::Low,
+            tool_loop_max_turns: 8,
         }
     }
 }
@@ -503,6 +508,14 @@ mod tests {
                 .is_err(),
             "an effort llama.cpp does not spell is refused at load"
         );
+    }
+
+    #[test]
+    fn tool_loop_max_turns_defaults_to_8_and_overrides() {
+        assert_eq!(BenchSection::default().tool_loop_max_turns, 8);
+        let cfg: super::FileConfig =
+            toml::from_str("[bench]\ntool_loop_max_turns = 3\n").expect("overrides parse");
+        assert_eq!(cfg.bench.tool_loop_max_turns, 3);
     }
 
     #[test]
