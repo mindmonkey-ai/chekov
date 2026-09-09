@@ -2251,6 +2251,8 @@ fn run_throughput(
                 cache_n: result.cache_n,
                 draft_n: result.draft_n,
                 draft_n_accepted: result.draft_n_accepted,
+                thinking_chars: result.thinking_chars,
+                answer_chars: result.answer_chars,
             },
             grade: None,
             transport,

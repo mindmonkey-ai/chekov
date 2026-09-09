@@ -100,6 +100,13 @@ pub struct Measure {
     pub draft_n: u64,
     #[serde(default)]
     pub draft_n_accepted: u64,
+    /// Characters of the reply spent thinking and answering, summed over the
+    /// crossings the row holds (design §4). Zero-both on rows written before
+    /// the fields and on untimed crossings — "unmeasured", never "no thinking".
+    #[serde(default)]
+    pub thinking_chars: u64,
+    #[serde(default)]
+    pub answer_chars: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1893,6 +1900,8 @@ mod tests {
             cache_n: 0,
             draft_n: 0,
             draft_n_accepted: 0,
+            thinking_chars: 0,
+            answer_chars: 0,
         }
     }
 

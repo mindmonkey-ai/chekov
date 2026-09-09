@@ -48,6 +48,8 @@ pub(crate) const fn empty_measure() -> store::Measure {
         cache_n: 0,
         draft_n: 0,
         draft_n_accepted: 0,
+        thinking_chars: 0,
+        answer_chars: 0,
     }
 }
 
@@ -60,6 +62,8 @@ pub(crate) fn probe_measure(timings: &runner::Timings) -> store::Measure {
         cache_n: timings.cache_n,
         draft_n: timings.draft_n,
         draft_n_accepted: timings.draft_n_accepted,
+        thinking_chars: timings.thinking_chars,
+        answer_chars: timings.answer_chars,
     }
 }
 

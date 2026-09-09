@@ -37,6 +37,10 @@ pub struct DepthResult {
     /// clock). Both zero when the server drafted nothing.
     pub draft_n: u64,
     pub draft_n_accepted: u64,
+    /// Characters of the replies spent thinking and answering, summed over
+    /// the repetitions, warmup included, like the drafts.
+    pub thinking_chars: u64,
+    pub answer_chars: u64,
     pub decode_samples: Vec<f64>,
     pub prefill_samples: Vec<f64>,
     pub decode: Option<Summary>,
@@ -65,6 +69,7 @@ pub fn measure_depth(
     let mut prompt_n = 0_u64;
     let mut cache_n = 0_u64;
     let (mut draft_n, mut draft_n_accepted) = (0_u64, 0_u64);
+    let (mut thinking_chars, mut answer_chars) = (0_u64, 0_u64);
     for _ in 0..plan.repetitions {
         let artifact = exec(&probes::throughput_probe(depth, plan.max_tokens))?;
         decode_samples.push(artifact.timings.predicted_per_second);
@@ -73,6 +78,8 @@ pub fn measure_depth(
         cache_n = cache_n.max(artifact.timings.cache_n);
         draft_n += artifact.timings.draft_n;
         draft_n_accepted += artifact.timings.draft_n_accepted;
+        thinking_chars += artifact.timings.thinking_chars;
+        answer_chars += artifact.timings.answer_chars;
     }
     Ok(DepthResult {
         depth,
@@ -80,6 +87,8 @@ pub fn measure_depth(
         cache_n,
         draft_n,
         draft_n_accepted,
+        thinking_chars,
+        answer_chars,
         decode: stats::summarize(&decode_samples),
         prefill: stats::summarize(&prefill_samples),
         decode_samples,

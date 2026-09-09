@@ -323,6 +323,8 @@ impl<'a> LoopState<'a> {
         self.measure.cache_n = self.measure.cache_n.max(t.cache_n);
         self.measure.draft_n += t.draft_n;
         self.measure.draft_n_accepted += t.draft_n_accepted;
+        self.measure.thinking_chars += t.thinking_chars;
+        self.measure.answer_chars += t.answer_chars;
     }
 
     fn outcome(self, end: LoopEnd, turns: u32) -> LoopOutcome {
