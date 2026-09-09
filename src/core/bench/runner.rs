@@ -2035,6 +2035,71 @@ mod tests {
         assert_eq!((t.draft_n, t.draft_n_accepted), (0, 0));
     }
 
+    #[test]
+    fn buffered_timings_count_the_thinking_span_the_translator_will_strip() {
+        let body = serde_json::json!({
+            "choices": [{ "message": { "content": "<think>\nweighing\n</think>The answer." }, "finish_reason": "stop" }],
+            "timings": { "prompt_n": 9, "prompt_per_second": 90.0, "predicted_n": 8, "predicted_per_second": 8.0 }
+        });
+        let timings = super::timings_from(&body).expect("timings");
+        assert_eq!(
+            timings.thinking_chars, 10,
+            "the span's characters, tags excluded"
+        );
+        assert_eq!(timings.answer_chars, 11);
+        let extracted = serde_json::json!({
+            "choices": [{ "message": { "reasoning_content": "weighing", "content": "The answer." }, "finish_reason": "stop" }],
+            "timings": { "prompt_n": 9, "prompt_per_second": 90.0, "predicted_n": 8, "predicted_per_second": 8.0 }
+        });
+        let timings = super::timings_from(&extracted).expect("timings");
+        assert_eq!((timings.thinking_chars, timings.answer_chars), (8, 11));
+    }
+
+    /// The three text frames of a reply whose `<think>` tag is split across
+    /// chunks: two thinking characters, two answer characters once folded.
+    fn split_tag_frames() -> [serde_json::Value; 3] {
+        [
+            text_frame("<thi"),
+            text_frame("nk>ab</think>"),
+            text_frame("cd"),
+        ]
+    }
+
+    #[test]
+    fn the_streamed_door_counts_across_frames_on_both_clocks() {
+        let [a, b, c] = split_tag_frames();
+        let http = CannedUpstream::new(sse(&[a, b, c, final_frame()]));
+        let facade = ClaudeFacade::new("local-model");
+        let up = fake_upstream();
+        let artifact = super::cross_streaming(&wire(&http, &facade, &up), &anthropic_request("hi"))
+            .expect("crossed");
+        assert_eq!(
+            (
+                artifact.timings.thinking_chars,
+                artifact.timings.answer_chars
+            ),
+            (2, 2)
+        );
+        let [a, b, c] = split_tag_frames();
+        let usage_frame = serde_json::json!({
+            "id": "c1",
+            "choices": [{ "delta": {}, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 3 }
+        });
+        let http = CannedUpstream::new_streamed(sse(&[a, b, c, usage_frame]), some_marks());
+        let artifact =
+            super::cross_stream_timed(&wire(&http, &facade, &up), &anthropic_request("hi"))
+                .expect("crossed");
+        assert_eq!(
+            (
+                artifact.timings.thinking_chars,
+                artifact.timings.answer_chars
+            ),
+            (2, 2),
+            "the foreign clock counts the same frames"
+        );
+    }
+
     fn props(n_ctx: u64) -> String {
         serde_json::json!({
             "default_generation_settings": {"n_ctx": n_ctx},
