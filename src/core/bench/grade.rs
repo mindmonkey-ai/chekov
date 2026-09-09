@@ -489,6 +489,49 @@ mod tests {
     }
 
     #[test]
+    fn the_loop_grade_is_the_end_state_with_the_turns_in_the_reason_only() {
+        use crate::core::bench::codebase::run::empty_measure;
+        use crate::core::bench::store::LoopEnd;
+        use crate::core::bench::toolloop::LoopOutcome;
+        let outcome = |end: LoopEnd| LoopOutcome {
+            end,
+            turns: 4,
+            tool_calls: 6,
+            measure: empty_measure(),
+        };
+        assert_eq!(
+            super::grade_tool_loop(&outcome(LoopEnd::GoalMet)),
+            super::Grade::Pass
+        );
+        let reason = |end: LoopEnd| match super::grade_tool_loop(&outcome(end)) {
+            super::Grade::Pass => panic!("a failure"),
+            super::Grade::Fail { reason } => reason,
+        };
+        assert_eq!(
+            reason(LoopEnd::GoalUnmet {
+                wanted: "src/a.rs containing \"x\"".into()
+            }),
+            "stopped with the goal unmet after 4 turns: src/a.rs containing \"x\""
+        );
+        assert_eq!(
+            reason(LoopEnd::TurnsExhausted),
+            "no terminal state in 4 turns (6 tool calls)"
+        );
+        assert_eq!(reason(LoopEnd::Truncated), "final reply hit max_tokens");
+        assert_eq!(
+            reason(LoopEnd::FabricatedTool { name: "rm".into() }),
+            "called 'rm' — not in this case's palette"
+        );
+        assert_eq!(
+            reason(LoopEnd::MalformedCall {
+                name: "edit_file".into(),
+                key: "new".into()
+            }),
+            "'edit_file' called without new"
+        );
+    }
+
+    #[test]
     fn tool_use_blocks_keep_the_ids_a_tool_result_must_echo() {
         let body = serde_json::json!({
             "content": [
