@@ -1975,6 +1975,44 @@ mod tests {
     }
 
     #[test]
+    fn the_tool_loop_totals_and_disagreements_ride_the_agentic_comparison() {
+        let a = agentic_run(
+            "m1",
+            vec![
+                Case::pass("tool_loop", "tl-001"),
+                Case::fail(
+                    "tool_loop",
+                    "tl-002",
+                    "no terminal state in 8 turns (8 tool calls)",
+                ),
+            ],
+        );
+        let b = agentic_run(
+            "m2",
+            vec![
+                Case::pass("tool_loop", "tl-001"),
+                Case::pass("tool_loop", "tl-002"),
+            ],
+        );
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        assert_eq!(
+            cells(&compared.agentic.totals, "tool_loop"),
+            ("1/2".into(), "2/2".into())
+        );
+        let delta = compared
+            .agentic
+            .disagreements
+            .iter()
+            .find(|d| d.suite == "tool_loop" && d.task_id == "tl-002")
+            .expect("the case one run reached and the other did not");
+        assert!(!delta.a_pass && delta.b_pass);
+        assert_eq!(
+            delta.a_reason.as_deref(),
+            Some("no terminal state in 8 turns (8 tool calls)")
+        );
+    }
+
+    #[test]
     fn the_agentic_totals_stand_side_by_side_in_the_reports_own_counting() {
         let (a, b) = mixed_agentic_pair();
         let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
