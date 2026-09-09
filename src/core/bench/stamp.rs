@@ -119,6 +119,29 @@ impl Stamp {
         self.chat_template_kwargs
             .clone_from(&flags.chat_template_kwargs);
     }
+
+    /// The flag-sourced fields as the `LaunchFlags` view `set_flags` takes —
+    /// how one stamp's flags are masked onto another.
+    #[must_use]
+    pub fn flags(&self) -> LaunchFlags {
+        LaunchFlags {
+            kv_unified: self.kv_unified.clone(),
+            n_batch: self.n_batch.clone(),
+            n_ubatch: self.n_ubatch.clone(),
+            type_k: self.type_k.clone(),
+            type_v: self.type_v.clone(),
+            flash_attn: self.flash_attn.clone(),
+            spec_type: self.spec_type.clone(),
+            spec_draft_n_max: self.spec_draft_n_max.clone(),
+            reasoning: self.reasoning.clone(),
+            reasoning_format: self.reasoning_format.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_budget: self.reasoning_budget.clone(),
+            reasoning_budget_message: self.reasoning_budget_message.clone(),
+            reasoning_preserve: self.reasoning_preserve.clone(),
+            chat_template_kwargs: self.chat_template_kwargs.clone(),
+        }
+    }
 }
 
 /// The judge a run's `equiv` column was measured with (spec C §5) — the
