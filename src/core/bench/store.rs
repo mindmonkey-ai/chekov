@@ -26,10 +26,10 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub use crate::core::bench::runner::Transport;
 
 /// The suites whose rows are graded per case.
-pub(crate) const AGENTIC: [&str; 3] = ["tool_emit", "grammar_gap", "instruction"];
+pub(crate) const AGENTIC: [&str; 4] = ["tool_emit", "grammar_gap", "instruction", "tool_loop"];
 
 /// The suites crossed through both doors, so a case can disagree with itself.
-const PAIRED: [&str; 2] = ["tool_emit", "instruction"];
+const PAIRED: [&str; 3] = ["tool_emit", "instruction", "tool_loop"];
 
 /// Everything `stamp.json` records about a run, once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +74,10 @@ pub struct TaskRow {
     /// the same `task_id`. Rows written before slice C load as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judge: Option<JudgeRow>,
+    /// Present on `tool_loop` rows only: turns, calls and the end state.
+    /// Rows written before the field load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_loop: Option<LoopRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,6 +228,29 @@ pub struct JudgeRow {
     pub judge_secs: f64,
 }
 
+/// How a `tool_loop` crossing ended (tool-loop design §6). The grade is a
+/// function of this and nothing else; the path is never scored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LoopEnd {
+    GoalMet,
+    GoalUnmet { wanted: String },
+    TurnsExhausted,
+    Truncated,
+    FabricatedTool { name: String },
+    MalformedCall { name: String, key: String },
+}
+
+/// What a `tool_loop` row records beside its grade: how long the loop ran
+/// and how it stopped. Printed beside the count, never folded into it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopRow {
+    pub turns: u32,
+    pub tool_calls: u32,
+    pub end: LoopEnd,
+}
+
 /// A codebase task's record (spec §8, slice A). Raw text in, scores out.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -288,6 +315,8 @@ pub struct Task {
     pub codebase: Option<CodebaseRow>,
     /// Present on `judge` rows only — see `TaskRow::judge`.
     pub judge: Option<JudgeRow>,
+    /// Present on `tool_loop` rows only — see `TaskRow::tool_loop`.
+    pub tool_loop: Option<LoopRow>,
 }
 
 /// An open run directory being written.
@@ -356,6 +385,7 @@ impl RunWriter {
             grade: task.grade,
             codebase: task.codebase,
             judge: task.judge,
+            tool_loop: task.tool_loop,
         };
         let results = self.dir.join("results.jsonl");
         let mut line = serde_json::to_string(&row).map_err(|e| invalid(&results, e))?;
@@ -1695,8 +1725,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        CodebaseRow, DecidedBy, GradeRow, JudgeRow, LoopEnd, LoopRow, Measure, RunHead, RunLog,
-        RunWriter, Task, TaskKey, TaskRow, Transport, render_codebase, render_run,
+        AGENTIC, CodebaseRow, DecidedBy, GradeRow, JudgeRow, LoopEnd, LoopRow, Measure, PAIRED,
+        RunHead, RunLog, RunWriter, Task, TaskKey, TaskRow, Transport, render_codebase, render_run,
     };
     use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
@@ -1806,6 +1836,7 @@ mod tests {
                     transport: Transport::Buffered,
                     codebase: None,
                     judge: None,
+                    tool_loop: None,
                 })
                 .expect("append");
         }
@@ -1937,6 +1968,7 @@ mod tests {
             transport: Transport::Buffered,
             codebase: None,
             judge: None,
+            tool_loop: None,
         }
     }
 
@@ -1992,6 +2024,7 @@ mod tests {
             transport: Transport::Buffered,
             codebase: None,
             judge: Some(verdict),
+            tool_loop: None,
         }
     }
 
@@ -2248,6 +2281,7 @@ mod tests {
                 exec: None,
             }),
             judge: None,
+            tool_loop: None,
         }
     }
 
@@ -2698,6 +2732,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
@@ -2718,6 +2753,7 @@ mod tests {
                     transport: Transport::Buffered,
                     codebase: None,
                     judge: None,
+                    tool_loop: None,
                 })
                 .expect("append");
         }
@@ -2742,6 +2778,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         drop(writer);
@@ -2757,6 +2794,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append after resume");
         let reloaded = RunLog::load(resumed.dir()).expect("reload");
@@ -2794,6 +2832,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         let results = writer.dir().join("results.jsonl");
@@ -2817,6 +2856,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         writer
@@ -2830,6 +2870,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
@@ -2940,6 +2981,7 @@ mod tests {
                 transport: Transport::Buffered,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             })
             .expect("append");
         render_run(&RunLog::load(writer.dir()).expect("load"))

@@ -1282,6 +1282,7 @@ mod tests {
                 grade: None,
                 codebase: None,
                 judge: None,
+                tool_loop: None,
             }],
         }
     }
@@ -1627,6 +1628,7 @@ mod tests {
             grade: None,
             codebase: None,
             judge: None,
+            tool_loop: None,
         });
         let b = run("m2", stamp("dda1b0d67", "r2/s2"), &[30.0, 40.0, 41.0]);
         let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
@@ -1705,6 +1707,7 @@ mod tests {
             grade: Some(case.grade),
             codebase: None,
             judge: None,
+            tool_loop: None,
         }
     }
 
@@ -1776,6 +1779,7 @@ mod tests {
                 exec: None,
             }),
             judge: None,
+            tool_loop: None,
         }
     }
 
@@ -2221,6 +2225,7 @@ mod tests {
             grade: None,
             codebase: None,
             judge: Some(row),
+            tool_loop: None,
         }
     }
 

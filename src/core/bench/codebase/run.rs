@@ -322,6 +322,7 @@ fn record_codebase_task(
             exec,
         }),
         judge: None,
+        tool_loop: None,
     })
 }
 

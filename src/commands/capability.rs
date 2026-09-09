@@ -1594,6 +1594,7 @@ fn judge_run(
             transport: store::Transport::Buffered,
             codebase: None,
             judge: Some(judge_row),
+            tool_loop: None,
         })?;
         count += 1;
     }
@@ -2016,6 +2017,7 @@ fn append_unavailable(
         transport: store::Transport::Buffered,
         codebase: None,
         judge: None,
+        tool_loop: None,
     })
 }
 
@@ -2086,6 +2088,7 @@ fn append_probe(
         transport: key.transport,
         codebase: None,
         judge: None,
+        tool_loop: None,
     })
 }
 
@@ -2175,6 +2178,7 @@ fn run_throughput(
             transport,
             codebase: None,
             judge: None,
+            tool_loop: None,
         })?;
     }
     Ok(())
@@ -3683,6 +3687,7 @@ mod tests {
             transport: crate::core::bench::store::Transport::Buffered,
             codebase: Some(crossing_row(tier)),
             judge: None,
+            tool_loop: None,
         }
     }
 
@@ -3739,6 +3744,7 @@ mod tests {
                         skipped: None,
                         judge_secs: 2.0,
                     }),
+                    tool_loop: None,
                 })
                 .expect("append");
         }
