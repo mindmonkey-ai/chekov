@@ -2331,7 +2331,16 @@ fn head_corpus(
     use crate::core::bench::probes;
     let base = inputs.suite.map_or_else(
         || "codebase-only".to_owned(),
-        |suite| probes::suite_prompt_hash(suite, inputs.plan, bench_cfg.seed),
+        |suite| {
+            probes::suite_prompt_hash(
+                suite,
+                inputs.plan,
+                probes::HashPins {
+                    seed: bench_cfg.seed,
+                    max_turns: bench_cfg.tool_loop_max_turns,
+                },
+            )
+        },
     );
     let prompt_set_hash = wrapped_prompt_hash(inputs, base);
     let corpus = match inputs.codebase.as_ref() {

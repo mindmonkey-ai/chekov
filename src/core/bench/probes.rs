@@ -36,36 +36,43 @@ pub fn prompt_set_hash(plan: &crate::core::bench::sweep::SweepPlan, seed: u32) -
     crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
 }
 
+/// What pins the agentic task set beyond its content: the sampling seed and
+/// the loop's turn budget (tool-loop design §8). Two runs judged under
+/// different budgets measured different tasks.
+#[derive(Debug, Clone, Copy)]
+pub struct HashPins {
+    pub seed: u32,
+    pub max_turns: u32,
+}
+
 /// The suite-aware prompt-set hash. A throughput-only run keeps the original
 /// value, so runs recorded before `--suite` existed stay comparable.
 #[must_use]
 pub fn suite_prompt_hash(
     suite: crate::core::bench::lifecycle::Suite,
     plan: &crate::core::bench::sweep::SweepPlan,
-    seed: u32,
+    pins: HashPins,
 ) -> String {
     use crate::core::bench::lifecycle::Suite;
-    let throughput = prompt_set_hash(plan, seed);
+    let throughput = prompt_set_hash(plan, pins.seed);
     let agentic = crate::core::bench::probeset::content_hash();
+    let (seed, turns) = (pins.seed, pins.max_turns);
     match suite {
         Suite::Throughput => throughput,
-        Suite::Agentic => {
-            let canonical = format!("agentic|{agentic}|seed={seed}");
-            crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
-        }
-        Suite::All => {
-            let canonical = format!("all|{throughput}|{agentic}|seed={seed}");
-            crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
-        }
+        Suite::Agentic => hash12(&format!("agentic|{agentic}|turns={turns}|seed={seed}")),
+        Suite::All => hash12(&format!(
+            "all|{throughput}|{agentic}|turns={turns}|seed={seed}"
+        )),
     }
 }
 
-/// A `tool_emit` case: the palette rides as real Anthropic `tools`, so the
-/// call crosses the translator's tool mapping exactly as an agent's would.
-#[must_use]
-pub fn tool_probe(case: &crate::core::bench::probeset::ToolCase) -> HttpRequest {
-    let tools: Vec<serde_json::Value> = case
-        .tools
+fn hash12(canonical: &str) -> String {
+    crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
+}
+
+/// The palette as Anthropic `tools`, shared by every probe that offers one.
+fn palette(tools: &[crate::core::bench::probeset::ToolDef]) -> Vec<serde_json::Value> {
+    tools
         .iter()
         .map(|tool| {
             serde_json::json!({
@@ -74,12 +81,35 @@ pub fn tool_probe(case: &crate::core::bench::probeset::ToolCase) -> HttpRequest 
                 "input_schema": parse_schema(&tool.input_schema),
             })
         })
-        .collect();
+        .collect()
+}
+
+/// A `tool_emit` case: the palette rides as real Anthropic `tools`, so the
+/// call crosses the translator's tool mapping exactly as an agent's would.
+#[must_use]
+pub fn tool_probe(case: &crate::core::bench::probeset::ToolCase) -> HttpRequest {
     anthropic_post(&serde_json::json!({
         "model": "claude-sonnet-4",
         "max_tokens": 256,
-        "tools": tools,
+        "tools": palette(&case.tools),
         "messages": [{"role": "user", "content": case.prompt}],
+    }))
+}
+
+/// One turn of a `tool_loop` case: the set's system text, the palette, and
+/// the transcript so far — the shape Claude Code sends on every turn.
+#[must_use]
+pub fn loop_probe(
+    case: &crate::core::bench::probeset::LoopCase,
+    system: &str,
+    messages: &[serde_json::Value],
+) -> HttpRequest {
+    anthropic_post(&serde_json::json!({
+        "model": "claude-sonnet-4",
+        "max_tokens": 512,
+        "system": system,
+        "tools": palette(&case.tools),
+        "messages": messages,
     }))
 }
 
