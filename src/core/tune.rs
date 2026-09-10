@@ -181,22 +181,77 @@ pub fn strip(argv: &[String], flag: Flag) -> Vec<String> {
     out
 }
 
+/// One of the engine's history-based drafters (`--spec-type ngram-*`).
+///
+/// No head, no draft file — it proposes runs of tokens the model already
+/// saw (n-gram spec-stage design §3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NgramType {
+    Simple,
+    MapK,
+    MapK4v,
+    Mod,
+    Cache,
+}
+
+impl NgramType {
+    pub const ALL: [Self; 5] = [
+        Self::Simple,
+        Self::MapK,
+        Self::MapK4v,
+        Self::Mod,
+        Self::Cache,
+    ];
+
+    /// The engine's own spelling, as `--spec-type` takes it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Simple => "ngram-simple",
+            Self::MapK => "ngram-map-k",
+            Self::MapK4v => "ngram-map-k4v",
+            Self::Mod => "ngram-mod",
+            Self::Cache => "ngram-cache",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.label() == name)
+    }
+
+    /// Whether the drafter keeps its table across requests (design §13).
+    ///
+    /// `ngram-mod` shares one table over every sequence and resets it only
+    /// on occupancy; `ngram-cache`'s per-request reset is a no-op. On a probe
+    /// that repeats one prompt, both replay the first reply.
+    #[must_use]
+    pub const fn keeps_memory(self) -> bool {
+        matches!(self, Self::Mod | Self::Cache)
+    }
+}
+
 /// One `[tune] spec_drafts` entry, parsed at the plan boundary (spec-stage
-/// design §3).
+/// design §3; n-gram design §3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SpecDraft {
     Off,
     Mtp(u32),
+    Ngram(NgramType),
 }
 
 impl SpecDraft {
-    /// `off`, or `mtp:<n>` with `n ≥ 1`; anything else is the named error.
+    /// `off`, `mtp:<n>` with `n ≥ 1`, or `ngram:<type>` naming one of the
+    /// engine's five history-based drafters; anything else is the named error.
     pub fn parse(value: &str) -> Result<Self, ChekovError> {
         let bad = || ChekovError::TuneBadSpecCandidate {
             value: value.to_owned(),
         };
         if value == "off" {
             return Ok(Self::Off);
+        }
+        if let Some(name) = value.strip_prefix("ngram:") {
+            return NgramType::parse(name).map(Self::Ngram).ok_or_else(bad);
         }
         let length = value.strip_prefix("mtp:").ok_or_else(bad)?;
         match length.parse::<u32>() {
@@ -211,6 +266,7 @@ impl SpecDraft {
         match self {
             Self::Off => "off".to_owned(),
             Self::Mtp(n) => format!("mtp:{n}"),
+            Self::Ngram(t) => format!("ngram:{}", t.label()),
         }
     }
 }
@@ -224,12 +280,18 @@ pub fn spec_values(cfg: &TuneSection) -> Result<Vec<SpecDraft>, ChekovError> {
 }
 
 /// `incumbent` carrying `value` for the spec stage: both flags rewritten
-/// together for `mtp:<n>`, both stripped for `off` (spec-stage design §3).
+/// together for `mtp:<n>`, both stripped for `off` (spec-stage design §3),
+/// the type written and the length stripped for `ngram:<type>` — the
+/// length is the head's, inert for a history-based drafter (n-gram §3).
 fn apply_spec(incumbent: &[String], value: &str) -> Vec<String> {
     match SpecDraft::parse(value) {
         Ok(SpecDraft::Mtp(n)) => {
             let typed = rewrite(incumbent, Flag::SpecType, "draft-mtp");
             rewrite(&typed, Flag::SpecDraftNMax, &n.to_string())
+        }
+        Ok(SpecDraft::Ngram(t)) => {
+            let typed = rewrite(incumbent, Flag::SpecType, t.label());
+            strip(&typed, Flag::SpecDraftNMax)
         }
         // `off`, or a value `spec_values` already refused at plan time.
         Ok(SpecDraft::Off) | Err(_) => strip_spec(incumbent),
@@ -276,6 +338,11 @@ pub fn applied_extra_flags(current: &[String], winner: &[String]) -> Vec<String>
     }
     if value_of(winner, Flag::SpecType).is_none() {
         out = strip_spec(&out);
+    } else if value_of(winner, Flag::SpecDraftNMax).is_none() {
+        // The winner is a full argv derived from `current`: a length it
+        // lacks is one the stage removed (an n-gram winner), never one it
+        // forgot (n-gram design §13).
+        out = strip(&out, Flag::SpecDraftNMax);
     }
     out
 }
@@ -378,6 +445,10 @@ pub struct Measured {
     pub decode: Summary,
     pub prefill: Summary,
     pub prompt_n: u64,
+    /// Draft tokens proposed and accepted over every repetition, the warmup
+    /// included — zero-both when nothing drafted (n-gram design §13).
+    pub draft_n: u64,
+    pub draft_n_accepted: u64,
 }
 
 impl Measured {
@@ -413,6 +484,8 @@ pub fn classify(result: &DepthResult, depth: u32) -> Outcome {
         decode: decode.clone(),
         prefill: prefill.clone(),
         prompt_n: result.prompt_n,
+        draft_n: result.draft_n,
+        draft_n_accepted: result.draft_n_accepted,
     })
 }
 
@@ -566,6 +639,30 @@ fn dirty_note(dirty: Option<u32>) -> String {
     })
 }
 
+/// `   acceptance 63% (189 of 300 drafted)` for a trial that drafted.
+///
+/// `   no drafts` for a spec-stage candidate that did not — the expected
+/// reading of a history-based drafter on a prompt with nothing to match
+/// (n-gram design §13); nothing for any other trial.
+#[must_use]
+pub fn accept_note(label: &CandidateLabel, measured: &Measured) -> String {
+    if measured.draft_n > 0 {
+        let pct = u128::from(measured.draft_n_accepted) * 200 / u128::from(measured.draft_n);
+        return format!(
+            "   acceptance {}% ({} of {} drafted)",
+            pct.div_ceil(2).min(100),
+            measured.draft_n_accepted,
+            measured.draft_n
+        );
+    }
+    let speculative = label.stage == Stage::Spec && label.value != "off";
+    if speculative {
+        "   no drafts".to_owned()
+    } else {
+        String::new()
+    }
+}
+
 /// Which candidate a report line names — bundled with `LineContext` so
 /// `stage_line` stays at this crate's clippy argument floor (`clippy.toml`,
 /// §3.4) despite the spec's five logically independent inputs.
@@ -591,7 +688,8 @@ pub fn stage_line(label: &CandidateLabel, outcome: &Outcome, context: &LineConte
             let cells = measured_cells(measured);
             let phrase = context.verdict.map_or("", |v| v.phrase.as_str());
             let note = dirty_note(context.dirty);
-            format!("  {stage:<10} {value:<8} {cells}   {phrase}{note}")
+            let accept = accept_note(label, measured);
+            format!("  {stage:<10} {value:<8} {cells}   {phrase}{note}{accept}")
         }
         Outcome::Skipped(reason) => format!("  {stage:<10} {value:<8} skipped: {reason}"),
         Outcome::Degenerate(reason) => format!("  {stage:<10} {value:<8} degenerate: {reason}"),
@@ -662,6 +760,12 @@ pub struct Trial {
     pub decode: Option<Summary>,
     pub prefill: Option<Summary>,
     pub prompt_n: Option<u64>,
+    /// Draft tokens proposed and accepted over the probe's repetitions
+    /// (n-gram design §13). Records from before the fields load as zero-both.
+    #[serde(default)]
+    pub draft_n: u64,
+    #[serde(default)]
+    pub draft_n_accepted: u64,
     /// Speed limit before and after the probe (spec §6); either below 100
     /// marks the trial's clock as dirty without voiding it.
     pub speed_limit_pct: [Option<u32>; 2],
@@ -719,8 +823,8 @@ pub fn write_record(path: &Path, record: &Record) -> Result<(), ChekovError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Candidate, Flag, Metric, SpecDraft, Stage, candidates, rewrite, spec_values, stages, strip,
-        value_of,
+        Candidate, Flag, Metric, NgramType, SpecDraft, Stage, candidates, rewrite, spec_values,
+        stages, strip, value_of,
     };
     use crate::core::config::TuneSection;
     use crate::error::ChekovError;
@@ -916,6 +1020,8 @@ mod tests {
             decode: summary(decode, 0.3),
             prefill: summary(prefill, 3.0),
             prompt_n: 4101,
+            draft_n: 0,
+            draft_n_accepted: 0,
         }
     }
 
@@ -1201,6 +1307,8 @@ mod tests {
                 decode: Some(summary(31.2, 0.3)),
                 prefill: Some(summary(402.0, 3.0)),
                 prompt_n: Some(4101),
+                draft_n: 0,
+                draft_n_accepted: 0,
                 speed_limit_pct: [None, Some(87)],
                 reason: None,
                 verdict: None,
@@ -1404,5 +1512,171 @@ mod tests {
             argv(&["--temp", "0.6", "--flash-attn", "on"]),
             "nothing to strip, nothing stripped"
         );
+    }
+
+    #[test]
+    fn the_spec_grammar_accepts_the_five_ngram_types_and_refuses_the_rest() {
+        for (spelling, expected) in [
+            ("ngram:ngram-simple", NgramType::Simple),
+            ("ngram:ngram-map-k", NgramType::MapK),
+            ("ngram:ngram-map-k4v", NgramType::MapK4v),
+            ("ngram:ngram-mod", NgramType::Mod),
+            ("ngram:ngram-cache", NgramType::Cache),
+        ] {
+            let parsed = SpecDraft::parse(spelling).expect(spelling);
+            assert_eq!(parsed, SpecDraft::Ngram(expected));
+            assert_eq!(parsed.label(), spelling, "the label is the spelling");
+            assert_eq!(expected.label(), &spelling["ngram:".len()..]);
+        }
+        for bad in [
+            "ngram:",
+            "ngram:mtp",
+            "ngram:ngram-simple,ngram-mod",
+            "ngram:ngram-map-k4",
+        ] {
+            let err = SpecDraft::parse(bad).expect_err(bad);
+            assert!(
+                matches!(&err, ChekovError::TuneBadSpecCandidate { value } if value == bad),
+                "{bad}: {err}"
+            );
+        }
+        assert!(NgramType::Mod.keeps_memory() && NgramType::Cache.keeps_memory());
+        assert!(!NgramType::Simple.keeps_memory());
+        assert_eq!(NgramType::ALL.len(), 5);
+    }
+
+    #[test]
+    fn an_ngram_candidate_writes_the_type_and_strips_the_draft_length_only() {
+        let cfg = TuneSection {
+            spec_drafts: vec!["off".into(), "ngram:ngram-mod".into()],
+            ..TuneSection::default()
+        };
+        let drafted = argv(&[
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "3",
+            "--spec-ngram-mod-n-match",
+            "24",
+        ]);
+        let spec = candidates(Stage::Spec, &drafted, &cfg);
+        let values: Vec<&str> = spec.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, vec!["off", "ngram:ngram-mod"]);
+        assert_eq!(
+            spec[1].argv,
+            argv(&["--spec-type", "ngram-mod", "--spec-ngram-mod-n-match", "24"]),
+            "the type is rewritten in place, the length stripped, the engine's own knob kept"
+        );
+    }
+
+    #[test]
+    fn apply_strips_a_stale_draft_length_behind_an_ngram_winner() {
+        let current = argv(&[
+            "--temp",
+            "0.6",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "3",
+        ]);
+        let ngram_won = argv(&["--temp", "0.6", "--spec-type", "ngram-mod"]);
+        assert_eq!(
+            super::applied_extra_flags(&current, &ngram_won),
+            argv(&["--temp", "0.6", "--spec-type", "ngram-mod"]),
+            "a winner without the length lost it in the stage; the current flags lose it too"
+        );
+        let mtp_won = argv(&[
+            "--temp",
+            "0.6",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "1",
+        ]);
+        assert_eq!(super::applied_extra_flags(&current, &mtp_won), mtp_won);
+    }
+
+    /// The good `DepthResult` of the degenerate test, with the draft counts
+    /// the caller sets.
+    fn drafted_result(
+        draft_n: u64,
+        draft_n_accepted: u64,
+    ) -> crate::core::bench::sweep::DepthResult {
+        crate::core::bench::sweep::DepthResult {
+            depth: 4096,
+            prompt_n: 4101,
+            cache_n: 0,
+            draft_n,
+            draft_n_accepted,
+            thinking_chars: 0,
+            answer_chars: 0,
+            decode_samples: vec![30.0, 31.0, 31.2],
+            prefill_samples: vec![400.0, 402.0, 401.0],
+            decode: crate::core::stats::summarize(&[30.0, 31.0, 31.2]),
+            prefill: crate::core::stats::summarize(&[400.0, 402.0, 401.0]),
+        }
+    }
+
+    fn quiet() -> super::LineContext<'static> {
+        super::LineContext {
+            verdict: None,
+            dirty: None,
+        }
+    }
+
+    #[test]
+    fn a_stage_line_prints_the_acceptance_when_the_trial_drafted() {
+        let drafted = super::Measured {
+            draft_n: 300,
+            draft_n_accepted: 189,
+            ..measured(74.7, 126.0)
+        };
+        let line = super::stage_line(
+            &super::CandidateLabel {
+                stage: super::Stage::Fa,
+                value: "off",
+            },
+            &super::Outcome::Measured(drafted),
+            &quiet(),
+        );
+        assert!(
+            line.ends_with("   acceptance 63% (189 of 300 drafted)"),
+            "any drafting trial says so, whatever its stage: {line}"
+        );
+    }
+
+    #[test]
+    fn no_drafts_is_said_only_on_a_spec_candidate_that_drafted_nothing() {
+        let dry = || super::Outcome::Measured(measured(60.0, 140.0));
+        let line = |stage, value| {
+            super::stage_line(&super::CandidateLabel { stage, value }, &dry(), &quiet())
+        };
+        assert!(
+            line(super::Stage::Spec, "ngram:ngram-simple").ends_with("   no drafts"),
+            "{}",
+            line(super::Stage::Spec, "ngram:ngram-simple")
+        );
+        assert!(line(super::Stage::Spec, "mtp:1").ends_with("   no drafts"));
+        assert!(
+            !line(super::Stage::Spec, "off").contains("drafts"),
+            "off never drafts by design"
+        );
+        assert!(!line(super::Stage::Kv, "f16").contains("drafts"));
+    }
+
+    #[test]
+    fn classify_carries_the_draft_counts_and_a_record_from_before_them_loads_with_zeros() {
+        let super::Outcome::Measured(m) = super::classify(&drafted_result(300, 189), 4096) else {
+            panic!("measured");
+        };
+        assert_eq!((m.draft_n, m.draft_n_accepted), (300, 189));
+        let record = sample_record(argv(&[]), crate::core::bench::stamp::launch_flags(&[]));
+        let json = serde_json::to_string(&record).expect("ser");
+        assert!(json.contains("\"draft_n\":0,"), "{json}");
+        let old = json
+            .replace("\"draft_n\":0,", "")
+            .replace("\"draft_n_accepted\":0,", "");
+        let back: super::Record = serde_json::from_str(&old).expect("a pre-count record loads");
+        assert_eq!(back.trials[0].draft_n, 0);
     }
 }

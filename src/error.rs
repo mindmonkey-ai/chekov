@@ -441,7 +441,8 @@ pub enum ChekovError {
     TuneUnknownStage { stage: String },
 
     #[error(
-        "tune: [tune] spec_drafts entry '{value}' — expected \"off\" or \"mtp:<n>\" with n ≥ 1"
+        "tune: [tune] spec_drafts entry '{value}' — expected \"off\", \"mtp:<n>\" with n ≥ 1, or \
+         \"ngram:<type>\" (ngram-simple, ngram-map-k, ngram-map-k4v, ngram-mod, ngram-cache)"
     )]
     TuneBadSpecCandidate { value: String },
 
@@ -716,7 +717,8 @@ mod tests {
         .to_string();
         assert_eq!(
             bad,
-            "tune: [tune] spec_drafts entry 'mtp' — expected \"off\" or \"mtp:<n>\" with n ≥ 1"
+            "tune: [tune] spec_drafts entry 'mtp' — expected \"off\", \"mtp:<n>\" with n ≥ 1, or \
+             \"ngram:<type>\" (ngram-simple, ngram-map-k, ngram-map-k4v, ngram-mod, ngram-cache)"
         );
     }
 }

@@ -208,8 +208,9 @@ impl Default for BenchSection {
 pub struct TuneSection {
     /// Probe prompt depth, in tokens, used to measure every candidate.
     pub depth: u32,
-    /// Stage spec: `off`, or `mtp:<n>` — llama.cpp's native MTP draft head
-    /// at draft length `n`. Validated at plan time, not here.
+    /// Stage spec: `off`, `mtp:<n>` — llama.cpp's native MTP draft head at
+    /// draft length `n` — or `ngram:<type>`, one of the engine's five
+    /// history-based drafters. Validated at plan time, not here.
     pub spec_drafts: Vec<String>,
     /// Stage fa: `--flash-attn` candidates, tried in order.
     pub flash_attn: Vec<String>,

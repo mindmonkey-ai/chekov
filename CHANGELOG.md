@@ -7,6 +7,31 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `chekov tune`'s `spec` stage trials the engine's history-based drafters:
+  `[tune] spec_drafts` accepts `ngram:<type>` (`ngram-simple`,
+  `ngram-map-k`, `ngram-map-k4v`, `ngram-mod`, `ngram-cache`) beside `off`
+  and `mtp:<n>`, writing `--spec-type <type>` and stripping
+  `--spec-draft-n-max` (inert for these types; the engine's own `--spec-ngram-*`
+  knobs are left as the incumbent carries them). The default list is
+  unchanged — opt in per machine. The stage now skips per candidate: no MTP
+  head skips the `mtp:` candidates only (five of this registry's models are
+  headless), the engine's own `--spec-type` list is matched by whole token,
+  and two types are skipped by name before any launch — `ngram-mod` and
+  `ngram-cache` keep their draft table across requests, so tune's repeated
+  probe would replay the first reply as a fake win. The other three cannot
+  draft on the probe at all (a counting reply never repeats a twelve-token
+  window), so their line reads `no drafts` and the report closes with the
+  caution that a codebase bench under the candidate's flags, read with
+  `compare --cross-flags`, is the confirming measurement. An n-gram
+  incumbent is now the incumbent rather than a foreign skip; the foreign
+  skip keeps only draft-file types, chains (a comma, or the flag repeated —
+  the engine appends) and an `ngram-cache` fed from a lookup-cache file.
+  Every drafting trial prints its acceptance (`acceptance 63% (189 of 300
+  drafted)`, recorded on the trial; records from before the fields load
+  with zeros), the baseline too when it drafted, and `--apply` strips a
+  stale draft length behind an n-gram winner. The plan's launch ceiling
+  counts only candidates that launch. Live acceptance (`tune gpt-oss-20b
+  --stages spec` with an n-gram entry) is owed to the stopped-driver window.
 - The bench stamp reads the seven reasoning-side launch flags off the argv
   (`--reasoning`, `--reasoning-format`, `--reasoning-effort`,
   `--reasoning-budget`, `--reasoning-budget-message`,
