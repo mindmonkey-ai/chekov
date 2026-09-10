@@ -328,6 +328,28 @@ mod tests {
 
     struct NoHttp;
 
+    #[test]
+    fn codex_launch_preserves_agent_arguments() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "chekov",
+            "launch",
+            "codex",
+            "--model",
+            "test-model",
+            "--",
+            "exec",
+            "hello",
+        ])
+        .expect("Codex is a supported launch target");
+        let crate::cli::Cmd::Launch(cmd) = cli.cmd else {
+            panic!("expected launch");
+        };
+        assert_eq!(cmd.agent.binary(), "codex");
+        assert_eq!(cmd.model.as_deref(), Some("test-model"));
+        assert_eq!(cmd.args, ["exec", "hello"]);
+    }
+
     impl HttpClient for NoHttp {
         fn get(&self, _url: &str) -> Result<String, ChekovError> {
             unreachable!("launch preflight never fetches")
