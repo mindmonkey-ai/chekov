@@ -181,22 +181,77 @@ pub fn strip(argv: &[String], flag: Flag) -> Vec<String> {
     out
 }
 
+/// One of the engine's history-based drafters (`--spec-type ngram-*`).
+///
+/// No head, no draft file — it proposes runs of tokens the model already
+/// saw (n-gram spec-stage design §3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NgramType {
+    Simple,
+    MapK,
+    MapK4v,
+    Mod,
+    Cache,
+}
+
+impl NgramType {
+    pub const ALL: [Self; 5] = [
+        Self::Simple,
+        Self::MapK,
+        Self::MapK4v,
+        Self::Mod,
+        Self::Cache,
+    ];
+
+    /// The engine's own spelling, as `--spec-type` takes it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Simple => "ngram-simple",
+            Self::MapK => "ngram-map-k",
+            Self::MapK4v => "ngram-map-k4v",
+            Self::Mod => "ngram-mod",
+            Self::Cache => "ngram-cache",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.label() == name)
+    }
+
+    /// Whether the drafter keeps its table across requests (design §13).
+    ///
+    /// `ngram-mod` shares one table over every sequence and resets it only
+    /// on occupancy; `ngram-cache`'s per-request reset is a no-op. On a probe
+    /// that repeats one prompt, both replay the first reply.
+    #[must_use]
+    pub const fn keeps_memory(self) -> bool {
+        matches!(self, Self::Mod | Self::Cache)
+    }
+}
+
 /// One `[tune] spec_drafts` entry, parsed at the plan boundary (spec-stage
-/// design §3).
+/// design §3; n-gram design §3).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SpecDraft {
     Off,
     Mtp(u32),
+    Ngram(NgramType),
 }
 
 impl SpecDraft {
-    /// `off`, or `mtp:<n>` with `n ≥ 1`; anything else is the named error.
+    /// `off`, `mtp:<n>` with `n ≥ 1`, or `ngram:<type>` naming one of the
+    /// engine's five history-based drafters; anything else is the named error.
     pub fn parse(value: &str) -> Result<Self, ChekovError> {
         let bad = || ChekovError::TuneBadSpecCandidate {
             value: value.to_owned(),
         };
         if value == "off" {
             return Ok(Self::Off);
+        }
+        if let Some(name) = value.strip_prefix("ngram:") {
+            return NgramType::parse(name).map(Self::Ngram).ok_or_else(bad);
         }
         let length = value.strip_prefix("mtp:").ok_or_else(bad)?;
         match length.parse::<u32>() {
@@ -211,6 +266,7 @@ impl SpecDraft {
         match self {
             Self::Off => "off".to_owned(),
             Self::Mtp(n) => format!("mtp:{n}"),
+            Self::Ngram(t) => format!("ngram:{}", t.label()),
         }
     }
 }
@@ -224,12 +280,18 @@ pub fn spec_values(cfg: &TuneSection) -> Result<Vec<SpecDraft>, ChekovError> {
 }
 
 /// `incumbent` carrying `value` for the spec stage: both flags rewritten
-/// together for `mtp:<n>`, both stripped for `off` (spec-stage design §3).
+/// together for `mtp:<n>`, both stripped for `off` (spec-stage design §3),
+/// the type written and the length stripped for `ngram:<type>` — the
+/// length is the head's, inert for a history-based drafter (n-gram §3).
 fn apply_spec(incumbent: &[String], value: &str) -> Vec<String> {
     match SpecDraft::parse(value) {
         Ok(SpecDraft::Mtp(n)) => {
             let typed = rewrite(incumbent, Flag::SpecType, "draft-mtp");
             rewrite(&typed, Flag::SpecDraftNMax, &n.to_string())
+        }
+        Ok(SpecDraft::Ngram(t)) => {
+            let typed = rewrite(incumbent, Flag::SpecType, t.label());
+            strip(&typed, Flag::SpecDraftNMax)
         }
         // `off`, or a value `spec_values` already refused at plan time.
         Ok(SpecDraft::Off) | Err(_) => strip_spec(incumbent),
@@ -276,6 +338,11 @@ pub fn applied_extra_flags(current: &[String], winner: &[String]) -> Vec<String>
     }
     if value_of(winner, Flag::SpecType).is_none() {
         out = strip_spec(&out);
+    } else if value_of(winner, Flag::SpecDraftNMax).is_none() {
+        // The winner is a full argv derived from `current`: a length it
+        // lacks is one the stage removed (an n-gram winner), never one it
+        // forgot (n-gram design §13).
+        out = strip(&out, Flag::SpecDraftNMax);
     }
     out
 }
