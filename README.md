@@ -642,12 +642,47 @@ three `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` variables pointing at the
 active alias, so any Anthropic-SDK tool can be pointed locally with
 `eval "$(chekov env)"`.
 
+### Codex CLI (`chekov launch codex`)
+
+```sh
+chekov launch codex                       # interactive, on the active local model
+chekov launch codex --model my-model      # select a registered model
+chekov launch codex -- exec "explain this project"
+chekov launch codex --print               # preview without starting the model or agent
+chekov launch codex --proxy-only          # translator on :8787; use an already-running model
+```
+
+Install Codex CLI separately so `codex` is on your PATH. A full launch starts
+the selected model when needed, binds a session proxy on loopback, and waits
+for Codex. The proxy exits with the launcher, and Codex's exit code is preserved.
+Arguments after `--` are passed to Codex; select the local model with Chekov's
+`--model` before that separator.
+
+Codex uses the Responses API. Chekov translates requests and streamed replies
+to llama.cpp's Chat Completions API, including function tools, custom tools,
+namespaces, tool results, and extracted reasoning. Requests use the selected
+local alias. Interrupted or malformed upstream streams report a failed turn.
+The adapter is stateless: it requires the full input history and does not
+implement stored responses, hosted tools, or server-side compaction.
+
+Chekov supplies a custom local provider and the model's resolved context window
+through [Codex CLI configuration overrides](https://learn.chatgpt.com/docs/config-file/config-advanced#one-off-overrides-from-the-cli).
+Your existing `CODEX_HOME`, configuration, MCP servers, skills, and permissions
+remain in use. Chekov does not edit `~/.codex/config.toml`; the upstream API key
+stays in the proxy. Hosted web search is disabled for this local session.
+Codex can warn that an unfamiliar local alias uses fallback model metadata;
+Chekov still sets its actual context window explicitly.
+
+`--print` previews an invocation whose ephemeral proxy is not running.
+Run without `--print` to start the session. For a persistent, manually wired
+client, keep `--proxy-only` running and use the Codex command it prints.
+
 ### Claude Code (`chekov launch claude`)
 
 ```sh
 chekov launch claude                   # interactive, on the local model
 chekov launch claude -- -p "question"  # args after -- go to claude
-chekov launch claude --print           # emit the command, run it yourself
+chekov launch claude --print           # preview the command and generated settings
 chekov launch claude --proxy-only      # just the translator on :8787 (no child)
 ```
 
