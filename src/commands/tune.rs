@@ -1001,7 +1001,7 @@ mod tests {
         super::Plan {
             eff: effective(flags),
             stages: Stage::ORDER.to_vec(),
-            spec_skip: None,
+            spec_gate: super::SpecGate::default(),
             tune,
             sweep: SweepPlan {
                 depths: vec![4096],
@@ -1460,6 +1460,16 @@ mod tests {
     fn the_engine_gate_names_an_engine_without_the_flag_and_trusts_an_unreadable_help() {
         assert!(super::engine_gate(Some("--spec-type none,draft-mtp"), "0f194b907").is_none());
         assert_eq!(
+            super::spec_types("--spec-type none,draft-mtp,ngram-map-k\n   more words"),
+            Some(vec![
+                "none".to_owned(),
+                "draft-mtp".to_owned(),
+                "ngram-map-k".to_owned()
+            ]),
+            "the flag's line, its second token, split on commas"
+        );
+        assert_eq!(super::spec_types("--flash-attn"), None);
+        assert_eq!(
             super::engine_gate(Some("--flash-attn"), "d7bd3bfca").as_deref(),
             Some("engine d7bd3bfca has no --spec-type — chekov update --engine")
         );
@@ -1498,26 +1508,119 @@ mod tests {
     fn a_gated_spec_stage_counts_no_launches_and_says_why_on_the_plan() {
         let tune = TuneSection::default();
         let mut plan = plan_for(&tune, &[]);
-        plan.spec_skip = Some("no MTP head in the GGUF (nextn_predict_layers 0)".into());
+        plan.spec_gate.head = Some("no MTP head in the GGUF (nextn_predict_layers 0)".into());
         let text = super::plan_text(&plan, None, None);
         assert!(
             text.contains(
-                "  spec       4 candidates   (skipped: no MTP head in the GGUF (nextn_predict_layers 0))\n"
+                "  spec       4 candidates   (1 is the incumbent; mtp skipped: no MTP head in the GGUF (nextn_predict_layers 0))\n"
             ),
-            "{text}"
+            "the head gates the mtp candidates, not the stage: {text}"
         );
         assert_eq!(
             super::max_launches(&plan),
             10,
             "baseline + 0 + 2 + 1 + 3 + 3: the three mtp candidates cost nothing"
         );
+        let mut engineless = plan_for(&tune, &[]);
+        engineless.spec_gate.engine =
+            Some("engine d7bd3bfca has no --spec-type — chekov update --engine".into());
+        let text = super::plan_text(&engineless, None, None);
+        assert!(
+            text.contains(
+                "  spec       4 candidates   (skipped: engine d7bd3bfca has no --spec-type — chekov update --engine)\n"
+            ),
+            "no flag at all gates the whole stage: {text}"
+        );
+        assert_eq!(super::max_launches(&engineless), 10);
         let ungated = plan_for(&tune, &[]);
         let text = super::plan_text(&ungated, None, None);
         assert!(
             text.contains(
-                "  spec       4 candidates   (1 is the incumbent; needs an MTP head in the GGUF)\n"
+                "  spec       4 candidates   (1 is the incumbent; needs an MTP head in the GGUF for mtp candidates)\n"
             ),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_headless_model_trials_the_ngram_candidates_and_counts_them() {
+        let tune = TuneSection {
+            spec_drafts: ["off", "mtp:1", "ngram:ngram-simple", "ngram:ngram-mod"]
+                .map(String::from)
+                .to_vec(),
+            ..TuneSection::default()
+        };
+        let mut plan = plan_for(&tune, &[]);
+        plan.spec_gate = super::SpecGate {
+            head: Some("no MTP head in the GGUF (nextn_predict_layers 0)".into()),
+            engine: None,
+            types: super::spec_types("--spec-type none,draft-mtp,ngram-simple,ngram-mod"),
+            commit: "0f194b907".into(),
+        };
+        let skip = |value: &str| {
+            let candidate = Candidate {
+                stage: Stage::Spec,
+                value: value.into(),
+                argv: vec![],
+            };
+            super::spec_skip(&plan, &candidate, &[])
+        };
+        assert_eq!(
+            skip("mtp:1").as_deref(),
+            Some("no MTP head in the GGUF (nextn_predict_layers 0)")
+        );
+        assert!(skip("ngram:ngram-simple").is_none(), "no head needed");
+        assert_eq!(
+            skip("ngram:ngram-mod").as_deref(),
+            Some(
+                "the engine keeps ngram-mod's draft memory across requests; the tune probe \
+                 repeats one prompt, so every repetition after the first would replay the \
+                 reply — not measurable on this probe"
+            )
+        );
+        assert!(skip("off").is_none());
+        assert_eq!(
+            super::max_launches(&plan),
+            1 + 1 + 2 + 1 + 3 + 3,
+            "off is the incumbent; only ngram-simple launches in the spec stage"
+        );
+        let text = super::plan_text(&plan, None, None);
+        assert!(
+            text.contains(
+                "  spec       4 candidates   (1 is the incumbent; mtp skipped: no MTP head in the GGUF (nextn_predict_layers 0))\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_engine_whose_type_list_lacks_a_name_skips_exactly_that_candidate() {
+        let tune = TuneSection {
+            spec_drafts: ["off", "ngram:ngram-simple", "ngram:ngram-map-k4v"]
+                .map(String::from)
+                .to_vec(),
+            ..TuneSection::default()
+        };
+        let mut plan = plan_for(&tune, &[]);
+        plan.spec_gate = super::SpecGate {
+            head: None,
+            engine: None,
+            types: super::spec_types("--spec-type none,draft-mtp,ngram-simple,ngram-map-k"),
+            commit: "0f194b907".into(),
+        };
+        let skip = |value: &str| {
+            let candidate = Candidate {
+                stage: Stage::Spec,
+                value: value.into(),
+                argv: vec![],
+            };
+            super::spec_skip(&plan, &candidate, &[])
+        };
+        assert!(skip("ngram:ngram-simple").is_none());
+        assert_eq!(
+            skip("ngram:ngram-map-k4v").as_deref(),
+            Some("engine 0f194b907 has no ngram-map-k4v in --spec-type — chekov update --engine"),
+            "a whole-token match: ngram-map-k is not ngram-map-k4v"
         );
     }
 
@@ -1526,7 +1629,7 @@ mod tests {
         let ctx = scratch_ctx("chekov-test-tune-spec-skip");
         let tune = TuneSection::default();
         let mut plan = plan_for(&tune, &[]);
-        plan.spec_skip = Some("no MTP head in the GGUF (nextn_predict_layers 0)".into());
+        plan.spec_gate.head = Some("no MTP head in the GGUF (nextn_predict_layers 0)".into());
         let session = super::Session {
             ctx: &ctx,
             plan: &plan,
