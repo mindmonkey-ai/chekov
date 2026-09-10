@@ -159,7 +159,7 @@ files? The earlier tool-loop priority has shipped. This is the next ordered
 probe in the capability entry above; tuning's deep-context measurement and
 fresh-prefill live acceptance have also shipped.
 
-**Recommended ruling — proposed, not approved:** Add an explicit
+**Ruling APPROVED 2026-09-10 (human approval in chat):** Add an explicit
 `--long-ctx-trace <LENGTHS>` option to `capability bench`, for example
 `--long-ctx-trace 4096,16384,65536,131072`. Existing benchmark commands keep
 their current work and prompt hashes when the option is absent. No dependency,
@@ -217,8 +217,8 @@ acceptance step whose printed cost and available server window must be checked.
 
 **More information / tags:** capability spec §7.2 `long_ctx_trace`, §13 Q8;
 `AGENTS.md` scope discipline (changes touching >5 files).
-TODO: obtain the written ruling, implement, and record validation evidence.
-Proposed 2026-09-10 — status: PROPOSED; no implementation ruling recorded.
+TODO: implement and record validation evidence.
+Proposed 2026-09-10 — status: APPROVED 2026-09-10, including the >5-file scope.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
