@@ -1506,9 +1506,15 @@ mod tests {
         assert_eq!(super::incumbent_value(Stage::Spec, &drafted), "mtp:1");
         let default_len = argv(&["--spec-type", "draft-mtp"]);
         assert_eq!(super::incumbent_value(Stage::Spec, &default_len), "mtp:3");
-        let ngram = argv(&["--spec-type", "ngram-mod"]);
+        let ngram = argv(&["--spec-type", "ngram-map-k"]);
         assert_eq!(
             super::incumbent_value(Stage::Spec, &ngram),
+            "ngram:ngram-map-k",
+            "an n-gram incumbent is the incumbent (n-gram design §3)"
+        );
+        let file_drafter = argv(&["--spec-type", "draft-simple"]);
+        assert_eq!(
+            super::incumbent_value(Stage::Spec, &file_drafter),
             "off",
             "not ours to read; skip 3 names it"
         );
@@ -1572,22 +1578,52 @@ mod tests {
             value: "mtp:1".into(),
             argv: vec![],
         };
-        let ngram = argv(&["--spec-type", "ngram-mod"]);
+        let skip = |flags: &[&str]| super::foreign_spec_skip(&mtp1, &argv(flags));
         assert_eq!(
-            super::foreign_spec_skip(&mtp1, &ngram).as_deref(),
-            Some("the spec stage tunes draft-mtp only; the incumbent runs --spec-type ngram-mod")
+            skip(&["--spec-type", "draft-simple"]).as_deref(),
+            Some(
+                "the spec stage tunes draft-mtp and the n-gram types; the incumbent runs \
+                 --spec-type draft-simple"
+            ),
+            "a draft-file type"
         );
-        let listed = argv(&["--spec-type", "draft-mtp,ngram-mod"]);
-        assert!(super::foreign_spec_skip(&mtp1, &listed).is_some());
-        let ours = argv(&["--spec-type", "draft-mtp"]);
-        assert!(super::foreign_spec_skip(&mtp1, &ours).is_none());
-        assert!(super::foreign_spec_skip(&mtp1, &[]).is_none());
+        assert!(
+            skip(&["--spec-type", "draft-mtp,ngram-mod"]).is_some(),
+            "a comma chain"
+        );
+        assert!(
+            skip(&["--spec-type", "draft-mtp", "--spec-type", "ngram-mod"]).is_some(),
+            "the engine appends a repeated flag: a chain by another spelling"
+        );
+        assert!(
+            skip(&["--spec-type", "ngram-cache", "-lcs", "cache.bin"]).is_some(),
+            "a lookup cache fed from a file"
+        );
+        assert!(
+            skip(&[
+                "--spec-type",
+                "ngram-cache",
+                "--lookup-cache-dynamic",
+                "d.bin"
+            ])
+            .is_some()
+        );
+        assert!(
+            skip(&["--spec-type", "ngram-cache"]).is_none(),
+            "the bare cache type is ours"
+        );
+        assert!(
+            skip(&["--spec-type", "ngram-mod"]).is_none(),
+            "an n-gram incumbent is ours"
+        );
+        assert!(skip(&["--spec-type", "draft-mtp"]).is_none());
+        assert!(skip(&[]).is_none());
         let fa = Candidate {
             stage: Stage::Fa,
             value: "off".into(),
             argv: vec![],
         };
-        assert!(super::foreign_spec_skip(&fa, &ngram).is_none());
+        assert!(super::foreign_spec_skip(&fa, &argv(&["--spec-type", "draft-simple"])).is_none());
     }
 
     #[test]
