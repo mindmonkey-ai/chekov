@@ -1554,4 +1554,88 @@ mod tests {
         ]);
         assert_eq!(super::applied_extra_flags(&current, &mtp_won), mtp_won);
     }
+
+    /// The good `DepthResult` of the degenerate test, with the draft counts
+    /// the caller sets.
+    fn drafted_result(
+        draft_n: u64,
+        draft_n_accepted: u64,
+    ) -> crate::core::bench::sweep::DepthResult {
+        crate::core::bench::sweep::DepthResult {
+            depth: 4096,
+            prompt_n: 4101,
+            cache_n: 0,
+            draft_n,
+            draft_n_accepted,
+            thinking_chars: 0,
+            answer_chars: 0,
+            decode_samples: vec![30.0, 31.0, 31.2],
+            prefill_samples: vec![400.0, 402.0, 401.0],
+            decode: crate::core::stats::summarize(&[30.0, 31.0, 31.2]),
+            prefill: crate::core::stats::summarize(&[400.0, 402.0, 401.0]),
+        }
+    }
+
+    fn quiet() -> super::LineContext<'static> {
+        super::LineContext {
+            verdict: None,
+            dirty: None,
+        }
+    }
+
+    #[test]
+    fn a_stage_line_prints_the_acceptance_when_the_trial_drafted() {
+        let drafted = super::Measured {
+            draft_n: 300,
+            draft_n_accepted: 189,
+            ..measured(74.7, 126.0)
+        };
+        let line = super::stage_line(
+            &super::CandidateLabel {
+                stage: super::Stage::Fa,
+                value: "off",
+            },
+            &super::Outcome::Measured(drafted),
+            &quiet(),
+        );
+        assert!(
+            line.ends_with("   acceptance 63% (189 of 300 drafted)"),
+            "any drafting trial says so, whatever its stage: {line}"
+        );
+    }
+
+    #[test]
+    fn no_drafts_is_said_only_on_a_spec_candidate_that_drafted_nothing() {
+        let dry = || super::Outcome::Measured(measured(60.0, 140.0));
+        let line = |stage, value| {
+            super::stage_line(&super::CandidateLabel { stage, value }, &dry(), &quiet())
+        };
+        assert!(
+            line(super::Stage::Spec, "ngram:ngram-simple").ends_with("   no drafts"),
+            "{}",
+            line(super::Stage::Spec, "ngram:ngram-simple")
+        );
+        assert!(line(super::Stage::Spec, "mtp:1").ends_with("   no drafts"));
+        assert!(
+            !line(super::Stage::Spec, "off").contains("drafts"),
+            "off never drafts by design"
+        );
+        assert!(!line(super::Stage::Kv, "f16").contains("drafts"));
+    }
+
+    #[test]
+    fn classify_carries_the_draft_counts_and_a_record_from_before_them_loads_with_zeros() {
+        let super::Outcome::Measured(m) = super::classify(&drafted_result(300, 189), 4096) else {
+            panic!("measured");
+        };
+        assert_eq!((m.draft_n, m.draft_n_accepted), (300, 189));
+        let record = sample_record(argv(&[]), crate::core::bench::stamp::launch_flags(&[]));
+        let json = serde_json::to_string(&record).expect("ser");
+        assert!(json.contains("\"draft_n\":0,"), "{json}");
+        let old = json
+            .replace("\"draft_n\":0,", "")
+            .replace("\"draft_n_accepted\":0,", "");
+        let back: super::Record = serde_json::from_str(&old).expect("a pre-count record loads");
+        assert_eq!(back.trials[0].draft_n, 0);
+    }
 }

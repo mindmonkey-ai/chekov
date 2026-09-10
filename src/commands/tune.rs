@@ -1230,6 +1230,17 @@ mod tests {
     }
 
     #[test]
+    fn the_baseline_line_prints_its_acceptance_when_it_drafted() {
+        let mut trial = measured_trial("baseline", None, argv(&["--spec-type", "ngram-mod"]));
+        trial.draft_n = 40;
+        trial.draft_n_accepted = 10;
+        let line = super::baseline_line(&trial);
+        assert!(line.contains("acceptance 25% (10 of 40 drafted)"), "{line}");
+        let plain = measured_trial("baseline", None, argv(&[]));
+        assert!(!super::baseline_line(&plain).contains("drafts"));
+    }
+
+    #[test]
     fn apply_on_defaults_won_is_the_named_refusal() {
         let err = super::nothing_to_apply("m", None).unwrap_err();
         assert!(
