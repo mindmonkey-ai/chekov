@@ -346,7 +346,7 @@ pub enum ChekovError {
     #[error(
         "proxy rejected a malformed agent request: {reason} — the agent sent \
          something this facade does not understand; re-run with `chekov launch \
-         claude --proxy-only` and check the agent's base URL points at the proxy port"
+         <agent> --proxy-only` and check the agent's base URL points at the proxy port"
     )]
     ProxyBadRequest { reason: String },
 

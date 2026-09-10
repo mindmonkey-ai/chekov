@@ -4,8 +4,9 @@
 //! so the translator dies with the session: nothing is left listening after
 //! the agent exits.
 //!
-//! Settings reach the agent through a chekov-owned config directory, not the
-//! environment. Claude Code writes its settings-file `env` block over the
+//! Claude settings reach the agent through a chekov-owned config directory.
+//! Codex keeps its own home and receives local-provider CLI overrides.
+//! Claude Code writes its settings-file env block over the
 //! inherited shell environment at startup, so an env-only launcher is a no-op
 //! for anyone who pins `ANTHROPIC_MODEL` in their own settings.
 //!
@@ -24,6 +25,7 @@ use serde_json::Value;
 use super::{Command, Ctx};
 use crate::core::launch::{LocalSession, inject_mcp_servers, mcp_servers_of, render_settings_json};
 use crate::core::plugins::sync_local_plugins;
+use crate::core::proxy::codex;
 use crate::core::proxy::serve::{Upstream, serve};
 use crate::core::proxy::{AgentFacade, AgentKind};
 use crate::core::registry::Effective;
@@ -41,20 +43,20 @@ const DEFAULT_PROXY_PORT: u16 = 8787;
 
 #[derive(Debug, clap::Args)]
 pub struct LaunchCmd {
-    /// Agent to launch (currently: claude).
+    /// Agent to launch: claude or codex.
     #[arg(value_enum)]
     pub agent: AgentKind,
     /// Model to serve; defaults to the active model.
     #[arg(long)]
     pub model: Option<String>,
     /// Run only the protocol translator in the foreground — no agent child,
-    /// no generated settings. Prints the export lines for a hand-wired client.
+    /// no generated settings. Prints client configuration instructions.
     #[arg(long)]
     pub proxy_only: bool,
     /// Listen port for `--proxy-only` (ignored in a full launch).
     #[arg(long, default_value_t = DEFAULT_PROXY_PORT)]
     pub port: u16,
-    /// Print the generated config dir and command instead of starting.
+    /// Preview the agent command (and Claude config dir) without starting a session.
     #[arg(long)]
     pub print: bool,
     /// Arguments forwarded verbatim to the agent binary.
@@ -94,7 +96,7 @@ pub fn render_banner(b: &Banner) -> String {
 }
 
 /// Run the accept loop, reporting a stop rather than propagating: the caller
-/// is a scoped thread whose failure must not mask the agent's exit code.
+/// is a session thread whose failure must not mask the agent's exit code.
 fn translate_until_exit(listener: &TcpListener, facade: &dyn AgentFacade, upstream: &Upstream) {
     if let Err(e) = serve(listener, facade, upstream) {
         eprintln!("chekov launch: proxy stopped: {e}");
@@ -117,12 +119,28 @@ impl Command for LaunchCmd {
             return self.run_proxy_only(ctx);
         }
         let session = self.resolve(ctx)?;
-        self.write_settings(ctx, &session)?;
-        eprint!(
-            "{}",
-            render_summary(self.agent.binary(), &session.eff.name, &session.dir)
-        );
+        match self.agent {
+            AgentKind::Claude => {
+                self.write_settings(ctx, &session)?;
+                eprint!(
+                    "{}",
+                    render_summary("claude", &session.eff.name, &session.dir)
+                );
+            }
+            AgentKind::Codex => {
+                eprintln!("chekov launch: codex against '{}'", session.eff.name);
+                if self.print {
+                    let mut args =
+                        codex::launch_args(&session.eff.name, session.eff.ctx_size, session.port);
+                    args.extend(self.args.iter().cloned());
+                    eprintln!("{}", codex::shell_command(&args));
+                }
+            }
+        }
         if self.print {
+            eprintln!(
+                "chekov launch: preview only; run without --print to start the session proxy"
+            );
             return Ok(ExitCode::SUCCESS);
         }
         self.bridge(ctx, &session)
@@ -145,15 +163,26 @@ impl LaunchCmd {
         };
         let listener = TcpListener::bind((BIND_HOST, self.port))
             .map_err(|_| ChekovError::PortOccupied { port: self.port })?;
-        eprint!(
-            "{}",
-            render_banner(&Banner {
-                agent: facade.name(),
-                port: self.port,
-                model: &model,
-                upstream: &upstream.base_url,
-            })
-        );
+        match self.agent {
+            AgentKind::Claude => eprint!(
+                "{}",
+                render_banner(&Banner {
+                    agent: facade.name(),
+                    port: self.port,
+                    model: &model,
+                    upstream: &upstream.base_url,
+                })
+            ),
+            AgentKind::Codex => {
+                let eff = reg.effective(&model)?;
+                let args = codex::launch_args(&model, eff.ctx_size, self.port);
+                eprintln!(
+                    "chekov launch --proxy-only: codex on http://{BIND_HOST}:{} -> {} as '{model}'",
+                    self.port, upstream.base_url
+                );
+                eprintln!("{}", codex::shell_command(&args));
+            }
+        }
         if self.print {
             return Ok(ExitCode::SUCCESS);
         }
@@ -169,7 +198,9 @@ impl LaunchCmd {
             None => reg.active_name()?.to_owned(),
         };
         let eff = reg.effective(&name)?;
-        ensure_server_up(ctx, &eff)?;
+        if !self.print {
+            ensure_server_up(ctx, &eff)?;
+        }
         let listener = TcpListener::bind((BIND_HOST, 0))
             .map_err(|e| ChekovError::io("binding a proxy port", e))?;
         let port = listener
@@ -232,36 +263,56 @@ impl LaunchCmd {
         write_private(&path, &text)
     }
 
-    /// Serve the proxy in a scoped thread while the agent runs as a child.
+    /// The binary's exit reclaims this listener after the child finishes.
     fn bridge(&self, ctx: &Ctx, session: &Session) -> Result<ExitCode, ChekovError> {
         let facade = self.agent.facade(&session.eff.name);
         let upstream = Upstream {
             base_url: ctx.config.base_url(),
             api_key: ctx.config.file.server.api_key.clone(),
         };
-        std::thread::scope(|scope| {
-            // Fire-and-forget by construction: the accept loop never returns,
-            // and the session ends when the agent child does. Process exit
-            // reclaims the thread and closes the listener.
-            scope.spawn(|| translate_until_exit(&session.listener, facade.as_ref(), &upstream));
-            self.spawn_agent(&session.dir)
-        })
+        let listener = session
+            .listener
+            .try_clone()
+            .map_err(|e| ChekovError::io("cloning the session proxy listener", e))?;
+        // A scoped thread would join the endless accept loop and hang on exit.
+        std::thread::Builder::new()
+            .name("chekov-session-proxy".to_owned())
+            .spawn(move || translate_until_exit(&listener, facade.as_ref(), &upstream))
+            .map_err(|e| ChekovError::io("starting the session proxy", e))?;
+        self.spawn_agent(session)
     }
 
-    fn spawn_agent(&self, dir: &Path) -> Result<ExitCode, ChekovError> {
+    fn agent_command(&self, session: &Session) -> std::process::Command {
+        let mut command = std::process::Command::new(self.agent.binary());
+        match self.agent {
+            AgentKind::Claude => {
+                command.env(self.agent.config_dir_var(), &session.dir);
+            }
+            AgentKind::Codex => {
+                command.args(codex::launch_args(
+                    &session.eff.name,
+                    session.eff.ctx_size,
+                    session.port,
+                ));
+            }
+        }
+        command.args(&self.args);
+        command
+    }
+
+    fn spawn_agent(&self, session: &Session) -> Result<ExitCode, ChekovError> {
         let binary = self.agent.binary();
-        let status = std::process::Command::new(binary)
-            .args(&self.args)
-            .env(self.agent.config_dir_var(), dir)
-            .status()
-            .map_err(|_| ChekovError::AgentBinaryMissing {
-                binary: binary.to_owned(),
-            })?;
-        Ok(if status.success() {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        })
+        let status =
+            self.agent_command(session)
+                .status()
+                .map_err(|_| ChekovError::AgentBinaryMissing {
+                    binary: binary.to_owned(),
+                })?;
+        let code = status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1);
+        Ok(ExitCode::from(code))
     }
 }
 
@@ -327,6 +378,28 @@ mod tests {
     use crate::error::ChekovError;
 
     struct NoHttp;
+
+    #[test]
+    fn codex_launch_preserves_agent_arguments() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "chekov",
+            "launch",
+            "codex",
+            "--model",
+            "test-model",
+            "--",
+            "exec",
+            "hello",
+        ])
+        .expect("Codex is a supported launch target");
+        let crate::cli::Cmd::Launch(cmd) = cli.cmd else {
+            panic!("expected launch");
+        };
+        assert_eq!(cmd.agent.binary(), "codex");
+        assert_eq!(cmd.model.as_deref(), Some("test-model"));
+        assert_eq!(cmd.args, ["exec", "hello"]);
+    }
 
     impl HttpClient for NoHttp {
         fn get(&self, _url: &str) -> Result<String, ChekovError> {

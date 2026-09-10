@@ -1,11 +1,11 @@
 //! Agent-protocol proxy facade (§C.6: traits carry behavior only).
 //!
 //! `llama-server` speaks `OpenAI` `/v1/chat/completions`. Coding agents do not:
-//! Claude Code speaks Anthropic `/v1/messages`. Rather than teach the serve
-//! loop every dialect, each agent gets an `AgentFacade` and the loop stays
-//! protocol-blind — adding a second agent touches no shared code.
+//! Claude Code speaks Anthropic `/v1/messages`; Codex speaks `/v1/responses`.
+//! Each agent gets an `AgentFacade`, keeping the serve loop protocol-blind.
 
 pub mod claude;
+pub mod codex;
 pub mod http;
 pub mod serve;
 
@@ -86,6 +86,8 @@ pub trait StreamTranslator {
 pub enum AgentKind {
     /// Anthropic `/v1/messages` — Claude Code, and any Anthropic SDK client.
     Claude,
+    /// `OpenAI` Responses API — Codex CLI.
+    Codex,
 }
 
 impl AgentKind {
@@ -94,6 +96,7 @@ impl AgentKind {
     pub fn facade(self, model: &str) -> Box<dyn AgentFacade> {
         match self {
             Self::Claude => Box::new(claude::ClaudeFacade::new(model)),
+            Self::Codex => Box::new(codex::CodexFacade::new(model)),
         }
     }
 
@@ -102,6 +105,7 @@ impl AgentKind {
     pub const fn slug(self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::Codex => "codex",
         }
     }
 
@@ -110,6 +114,7 @@ impl AgentKind {
     pub const fn binary(self) -> &'static str {
         match self {
             Self::Claude => "claude",
+            Self::Codex => "codex",
         }
     }
 
@@ -121,6 +126,7 @@ impl AgentKind {
     pub const fn config_dir_var(self) -> &'static str {
         match self {
             Self::Claude => "CLAUDE_CONFIG_DIR",
+            Self::Codex => "CODEX_HOME",
         }
     }
 
@@ -140,6 +146,8 @@ impl AgentKind {
                     .and_then(|v| v.get("mcpServers").cloned());
                 crate::core::launch::merge_mcp_servers(settings, extra)
             }
+            // Codex reads its existing configuration; launch uses CLI overrides.
+            Self::Codex => None,
         }
     }
 }
