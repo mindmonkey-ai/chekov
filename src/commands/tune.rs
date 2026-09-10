@@ -47,9 +47,9 @@ pub struct TuneCmd {
 struct Plan<'a> {
     eff: Effective,
     stages: Vec<Stage>,
-    /// Why the spec stage cannot measure on this machine, decided once at
-    /// plan time (spec-stage design §4, skips 1 and 2); `None` when it can.
-    spec_skip: Option<String>,
+    /// What the spec stage cannot measure on this machine, decided once at
+    /// plan time and applied per candidate (n-gram design §13).
+    spec_gate: SpecGate,
     tune: &'a TuneSection,
     sweep: SweepPlan,
     significance_pct: f64,
@@ -202,8 +202,13 @@ fn max_launches(plan: &Plan) -> usize {
     1 + plan
         .stages
         .iter()
-        .filter(|&&stage| !(stage == Stage::Spec && plan.spec_skip.is_some()))
-        .map(|&stage| planned(stage, &counted_against(plan, stage), plan.tune).len())
+        .map(|&stage| {
+            let argv = counted_against(plan, stage);
+            planned(stage, &argv, plan.tune)
+                .iter()
+                .filter(|candidate| spec_skip(plan, candidate, &argv).is_none())
+                .count()
+        })
         .sum::<usize>()
 }
 
@@ -212,7 +217,7 @@ fn max_launches(plan: &Plan) -> usize {
 fn stage_plan_line(plan: &Plan, stage: Stage) -> String {
     let argv = counted_against(plan, stage);
     let listed = tune::values_for(stage, &argv, plan.tune).len();
-    if let (Stage::Spec, Some(reason)) = (stage, plan.spec_skip.as_deref()) {
+    if let (Stage::Spec, Some(reason)) = (stage, plan.spec_gate.engine.as_deref()) {
         let label = stage.label();
         return format!("  {label:<10} {listed} candidates   (skipped: {reason})\n");
     }
@@ -222,13 +227,29 @@ fn stage_plan_line(plan: &Plan, stage: Stage) -> String {
         "none is the incumbent"
     };
     let note = match stage {
-        Stage::Spec => "; needs an MTP head in the GGUF",
-        Stage::Kv => "; the f16 KV is footprint-gated per trial",
-        Stage::Ubatch => "; values ≤ the incumbent batch",
-        Stage::Fa | Stage::Batch => "",
+        Stage::Spec => spec_plan_note(plan),
+        Stage::Kv => "; the f16 KV is footprint-gated per trial".to_owned(),
+        Stage::Ubatch => "; values ≤ the incumbent batch".to_owned(),
+        Stage::Fa | Stage::Batch => String::new(),
     };
     let label = stage.label();
     format!("  {label:<10} {listed} candidates   ({held}{note})\n")
+}
+
+/// The spec stage's standing note: what its `mtp:` candidates need, or why
+/// they are skipped — nothing when the list holds none (n-gram design §13).
+fn spec_plan_note(plan: &Plan) -> String {
+    let has_mtp = tune::spec_values(plan.tune)
+        .unwrap_or_default()
+        .iter()
+        .any(|draft| matches!(draft, tune::SpecDraft::Mtp(_)));
+    if !has_mtp {
+        return String::new();
+    }
+    plan.spec_gate.head.as_deref().map_or_else(
+        || "; needs an MTP head in the GGUF for mtp candidates".to_owned(),
+        |reason| format!("; mtp skipped: {reason}"),
+    )
 }
 
 /// One probe's wall clock at `lifecycle`'s reference rates (spec §7).
@@ -366,17 +387,50 @@ fn engine_gate(help: Option<&str>, commit: &str) -> Option<String> {
         .then(|| format!("engine {commit} has no --spec-type — chekov update --engine"))
 }
 
-/// Skips 1 and 2, decided once per run before the confirm gate.
-fn spec_gate(ctx: &Ctx, eff: &Effective) -> Option<String> {
+/// What the spec stage cannot measure here, decided once per run before the
+/// confirm gate and applied per candidate (n-gram design §13).
+#[derive(Debug, Default, Clone)]
+struct SpecGate {
+    /// Skip 1: no MTP head — gates the `mtp:` candidates only.
+    head: Option<String>,
+    /// Skip 2a: an engine with no `--spec-type` at all — gates every
+    /// candidate but `off`.
+    engine: Option<String>,
+    /// The types the engine's `--spec-type` line lists; `None` when the help
+    /// could not be captured (the launch-time assertion's problem).
+    types: Option<Vec<String>>,
+    /// The engine commit the reasons name.
+    commit: String,
+}
+
+/// The engine's `--spec-type` type list off its `--help`: the line whose
+/// first token is the flag, its second token split on commas.
+///
+/// Whole tokens, because `ngram-map-k` is a prefix of `ngram-map-k4v` and
+/// every type name recurs inside the per-type knob flags.
+fn spec_types(help: &str) -> Option<Vec<String>> {
+    help.lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("--spec-type"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .map(|list| list.split(',').map(str::to_owned).collect())
+}
+
+/// Skips 1 and 2, decided once per run before the confirm gate. The help is
+/// read even when the head is absent: an n-gram candidate on a headless
+/// model still needs the engine's word.
+fn spec_gate(ctx: &Ctx, eff: &Effective) -> SpecGate {
     let cfg = &ctx.config;
     let shard = crate::core::server::shard_path(cfg, eff);
-    if let Some(reason) = head_gate(crate::core::gguf::read_geometry(&shard), &shard) {
-        return Some(reason);
-    }
     let help = lifecycle::server_help(&cfg.engine_dir());
     let commit = crate::core::engine::current_commit(&cfg.engine_dir())
         .unwrap_or_else(|| "unknown".to_owned());
-    engine_gate(help.as_deref(), &commit)
+    SpecGate {
+        head: head_gate(crate::core::gguf::read_geometry(&shard), &shard),
+        engine: engine_gate(help.as_deref(), &commit),
+        types: help.as_deref().and_then(spec_types),
+        commit,
+    }
 }
 
 /// Skip 3: `--spec-type` set to anything but `draft-mtp` alone — chekov does
@@ -391,19 +445,50 @@ fn foreign_spec_skip(candidate: &tune::Candidate, incumbent: &[String]) -> Optio
     })
 }
 
-/// Every pre-launch skip the spec stage names, in order (spec-stage design
-/// §4). A gated stage still launches an `off` candidate: switching the head
-/// off needs no head.
+/// Every pre-launch skip the spec stage names, per candidate (n-gram design
+/// §13): `off` never; `mtp:` on the head; the two memory-keeping n-gram
+/// types by name; every speculative type against the engine's own list.
 fn spec_skip(plan: &Plan, candidate: &tune::Candidate, incumbent: &[String]) -> Option<String> {
     if candidate.stage != Stage::Spec {
         return None;
     }
-    let gated = plan
-        .spec_skip
-        .as_ref()
-        .filter(|_| candidate.value != "off")
-        .cloned();
-    gated.or_else(|| foreign_spec_skip(candidate, incumbent))
+    let gate = &plan.spec_gate;
+    let draft = tune::SpecDraft::parse(&candidate.value).ok()?;
+    let gated = match draft {
+        tune::SpecDraft::Off => None,
+        tune::SpecDraft::Mtp(_) => gate.head.clone().or_else(|| gate.engine.clone()),
+        tune::SpecDraft::Ngram(t) if t.keeps_memory() => Some(memory_skip(t)),
+        tune::SpecDraft::Ngram(_) => gate.engine.clone(),
+    };
+    gated
+        .or_else(|| type_skip(gate, draft))
+        .or_else(|| foreign_spec_skip(candidate, incumbent))
+}
+
+/// Skip 4: a drafter whose table outlives the request (n-gram design §13).
+fn memory_skip(t: tune::NgramType) -> String {
+    format!(
+        "the engine keeps {}'s draft memory across requests; the tune probe repeats one \
+         prompt, so every repetition after the first would replay the reply — not \
+         measurable on this probe",
+        t.label()
+    )
+}
+
+/// Skip 2b: the engine's list lacks the candidate's type.
+fn type_skip(gate: &SpecGate, draft: tune::SpecDraft) -> Option<String> {
+    let name = match draft {
+        tune::SpecDraft::Off => return None,
+        tune::SpecDraft::Mtp(_) => "draft-mtp",
+        tune::SpecDraft::Ngram(t) => t.label(),
+    };
+    let types = gate.types.as_ref()?;
+    (!types.iter().any(|t| t == name)).then(|| {
+        format!(
+            "engine {} has no {name} in --spec-type — chekov update --engine",
+            gate.commit
+        )
+    })
 }
 
 /// Who measured, and under what probe (spec §9's first line).
@@ -891,14 +976,15 @@ impl TuneCmd {
         // The grammar is checked before anything prints, and the GGUF is
         // read only when the stage will run.
         tune::spec_values(&ctx.config.file.tune)?;
-        let spec_skip = stages
-            .contains(&Stage::Spec)
-            .then(|| spec_gate(ctx, &eff))
-            .flatten();
+        let gate = if stages.contains(&Stage::Spec) {
+            spec_gate(ctx, &eff)
+        } else {
+            SpecGate::default()
+        };
         Ok(Plan {
             eff,
             stages,
-            spec_skip,
+            spec_gate: gate,
             tune: &ctx.config.file.tune,
             sweep: SweepPlan {
                 depths: vec![ctx.config.file.tune.depth],
@@ -1542,21 +1628,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_headless_model_trials_the_ngram_candidates_and_counts_them() {
-        let tune = TuneSection {
+    /// Four spec entries on a headless model whose engine lists both n-gram
+    /// types: off, mtp:1, ngram-simple, ngram-mod.
+    fn headless_ngram_list() -> TuneSection {
+        TuneSection {
             spec_drafts: ["off", "mtp:1", "ngram:ngram-simple", "ngram:ngram-mod"]
                 .map(String::from)
                 .to_vec(),
             ..TuneSection::default()
-        };
-        let mut plan = plan_for(&tune, &[]);
+        }
+    }
+
+    fn headless_ngram_plan(tune: &TuneSection) -> super::Plan<'_> {
+        let mut plan = plan_for(tune, &[]);
         plan.spec_gate = super::SpecGate {
             head: Some("no MTP head in the GGUF (nextn_predict_layers 0)".into()),
             engine: None,
             types: super::spec_types("--spec-type none,draft-mtp,ngram-simple,ngram-mod"),
             commit: "0f194b907".into(),
         };
+        plan
+    }
+
+    #[test]
+    fn a_headless_model_trials_the_ngram_candidates_and_skips_the_rest_by_name() {
+        let tune = headless_ngram_list();
+        let plan = headless_ngram_plan(&tune);
         let skip = |value: &str| {
             let candidate = Candidate {
                 stage: Stage::Spec,
@@ -1579,6 +1676,12 @@ mod tests {
             )
         );
         assert!(skip("off").is_none());
+    }
+
+    #[test]
+    fn a_headless_model_counts_only_the_ngram_launch_and_names_the_mtp_skip_on_the_plan() {
+        let tune = headless_ngram_list();
+        let plan = headless_ngram_plan(&tune);
         assert_eq!(
             super::max_launches(&plan),
             1 + 1 + 2 + 1 + 3 + 3,
