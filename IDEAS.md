@@ -151,6 +151,75 @@ purpose. `think_leak` still waits on §13 Q5. The agentic set stands at
 stored agentic run by construction, so it is its own decision.
 Proposed 2026-08-25 — status: **slices 1-3 SHIPPED; slice 4 SHIPPED without the compiled-in seed catalog (human's call 2026-08-27: a vendored list rots; --refresh is the discovery layer); slice 5 harness SHIPPED 2026-08-27, upgraded 2026-08-28 with the §7.4-§7.5 stamp + JSONL store (17-field stamp, first-differing-field compare refusal, --resume, pinned sampling); slice-5 gap part 2 (per-candidate lifecycle §7.3: --models, flag hygiene, Metal env, teardown+release check, confirm/dry-run, cache_n) SHIPPED 2026-08-28; part 3 (probe suites §7.2) v0 SHIPPED 2026-08-28 (--suite agentic: tool_emit/grammar_gap/instruction seed set, growing toward 30/40; deferred: diff_fidelity+tool_loop+long_ctx_trace+hallucination need the §8/§9 corpora, think_leak waits on §13 Q5); slice-5 "`--metric tok-s` upgrades from predicted to measured" SHIPPED 2026-08-28 (fixed bands, deepest-depth median, exact-match + stale footer); fixture-v1 content release-gated; slice 6 OPEN (`--svg` SHIPPED 2026-08-28; --codebase slice A SHIPPED 2026-08-29 (Rust, same-file, tiers 1-5); `#[cfg(test)]` rule amended 2026-08-29 (items elided, file kept); slice B1 SHIPPED 2026-08-29 (cross_file_first, input_extra, two arms and the measured context lift; quota 12/6/6, corpus_id changed); slice B2 (exec tiers behind --allow-exec) SHIPPED 2026-08-30; slice C (--judge) SHIPPED 2026-08-30 (gpt-oss-20b recommended; probe in the spec §3.0))**
 
+## Long-context trace checks: opt-in scope decision (2026-09-10)
+
+**Question:** Should the next benchmark check whether a model can follow two
+linked facts in a long prompt, and may its implementation touch more than five
+files? The earlier tool-loop priority has shipped. This is the next ordered
+probe in the capability entry above; tuning's deep-context measurement and
+fresh-prefill live acceptance have also shipped.
+
+**Recommended ruling — proposed, not approved:** Add an explicit
+`--long-ctx-trace <LENGTHS>` option to `capability bench`, for example
+`--long-ctx-trace 4096,16384,65536,131072`. Existing benchmark commands keep
+their current work and prompt hashes when the option is absent. No dependency,
+new configuration file, registry write, or default deep sweep is proposed.
+
+The implementation would:
+
+- Generate four deterministic two-hop cases at each requested length, with
+  the linked facts separated and their positions varied through a seeded
+  corpus. A four-length run has sixteen cases through each of the buffered
+  and streamed transports. Distractors must prevent a single lookup or a
+  repeated answer from passing without following the chain.
+- Grade the visible answer by exact match, recording failures, truncation,
+  unavailable measurements, and transport disagreements explicitly. Requested
+  lengths are estimates until checked against server-reported prompt tokens;
+  the report must distinguish requested from observed length and must never
+  claim that a silently truncated prompt tested the requested context.
+- Report accuracy by length and transport. Recommend only a fully measured,
+  contiguous tested range holding at least 90% on both transports: with four
+  cases, all four must pass. Missing, unavailable, duplicate, or failed cases
+  cannot establish a passing range. A pass at the largest tested length is a
+  lower bound on tested ability, never a discovered model maximum. Print the
+  recommendation; never change `models.toml`.
+- Include lengths, generator version, sampling seed, and answer budget in the
+  opted-in prompt identity. Resume must skip the exact recorded cases, and
+  comparisons must refuse different trace workloads while old runs retain
+  their existing loading and comparison behavior.
+- Show the extra crossings and length-dependent prefill cost in the plan and
+  `--dry-run` before inference. Use the existing server ownership and context
+  checks; an unsupported length must be named, not silently shortened.
+
+**Scope for approval:** More than five files, limited to benchmark generation,
+CLI orchestration, run recording/reporting/comparison, focused tests, existing
+user documentation, and generated completions. Likely edit sites are
+`src/commands/capability.rs`, `src/core/bench/probes.rs`,
+`src/core/bench/store.rs`, `src/core/bench/compare.rs`, and the benchmark module
+registration. A dedicated generator module is PROPOSED; its exact path and any
+additional required schema consumers will be verified before editing. This
+does not authorize changes to the proxy, dependencies, gates, or module layout.
+
+**Resolution paths:**
+
+1. **Rule now (recommended):** approve the opt-in behavior and the file scope
+   above, then implement with committed-red tests before production changes.
+2. **Research first:** compare long-context task construction and grading
+   methods, then return with an amended proposal before implementation.
+3. **Spike first:** spend at most one hour on a `spike/` branch validating
+   prompt construction and token-count evidence; never merge the spike.
+
+**Acceptance:** Focused tests cover both transport wires, separated two-hop
+facts, exact grading, length/cost growth, context refusal, incomplete-run
+recommendations, workload identity, resume, and old-record compatibility.
+Run `make lint && make test`. A real deep-context model run is a separate
+acceptance step whose printed cost and available server window must be checked.
+
+**More information / tags:** capability spec §7.2 `long_ctx_trace`, §13 Q8;
+`AGENTS.md` scope discipline (changes touching >5 files).
+TODO: obtain the written ruling, implement, and record validation evidence.
+Proposed 2026-09-10 — status: PROPOSED; no implementation ruling recorded.
+
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
 samplers") by this engine for `ornith-1.5-35b-a3b`, so the §7.2 grammar_gap
