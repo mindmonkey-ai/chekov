@@ -465,8 +465,16 @@ it cannot name (`ServerModelUnknown` refuses instead), it never launches a
 candidate it can tell in advance will not load (`skipped:` on the line, with
 the reason), and a candidate that dies at load is reported as died within
 seconds, not after the readiness budget. Every trial answers the same
-4096-token probe; `pmset -g therm` is read before and after, and a throttled
-clock is noted on the line rather than hidden in the number.
+configured probe depths (4096 tokens by default); `pmset -g therm` is read
+before and after the trial, and a throttled clock is noted on the line.
+
+For long-context work, set `depths = [4096, 65536]` under `[tune]`. This
+overrides the legacy `depth` setting; omitting it preserves the single-depth
+default. Depths must be positive, distinct, and increasing. Each depth gets
+the full `[bench] repetitions` count, with its own warmup dropped and at
+least two remaining samples. The deepest prompt plus `[bench] max_tokens`
+must fit the model's configured context. Check `--dry-run` first: its estimate
+includes every depth and repetition, and deep prefill can be expensive.
 
 Five stages in a fixed order, each descending from the previous stage's
 winner: `spec` (the model's own MTP draft head at each `[tune] spec_drafts`
@@ -474,7 +482,14 @@ length, or off), `fa`, `kv`, judged on **decode**; then `batch`, `ubatch`,
 judged on **prefill**. A candidate wins its stage only when `stats::compare`
 says `Faster` on the stage's metric at `[bench] significance_pct` and the
 other metric is not worse by more than `[tune] guard_tolerance_pct` of the
-incumbent's median. Every line says what it saw and what it decided. This is
+incumbent's median. With multiple depths, that win must occur at the shallowest
+depth, and neither decode nor prefill may be significantly slower beyond the
+same guard at any deeper depth. A missing or failed depth cannot produce a
+winner. The report names each depth and prints its measurements; the JSON
+record stores the depth list, per-depth summaries, sample counts, and draft
+acceptance. A later probe failure preserves earlier depth measurements beside
+the failure reason. Older records remain readable, with their original
+single-depth summaries. Every line says what it saw and what it decided. This is
 the `spec` stage of the 2026-09-05 run on this desk, rebuilt verbatim from
 its record:
 
@@ -767,7 +782,8 @@ judge_reasoning_effort = "low"   # none|low|medium|high, forwarded to the judge'
 tool_loop_max_turns = 8          # turn budget per tool_loop case; part of the agentic prompt-set hash
 
 [tune]                                    # `chekov tune`
-depth = 4096                              # probe prompt depth in tokens
+depth = 4096                              # legacy single depth; default remains 4096
+# depths = [4096, 65536]                  # opt in: overrides depth; full repetitions at each depth
 spec_drafts = ["off", "mtp:1", "mtp:2", "mtp:3"]   # stage spec: off, draft-mtp at that length, or ngram:<type> (opt in)
 flash_attn = ["on", "off"]                # stage fa
 cache_types = ["q8_0", "f16"]             # stage kv (applied to K and V together)
@@ -784,7 +800,7 @@ probe measured); `judge_min_consistency_pct` (default 70) is the swap-
 agreement floor below which the report's `equiv` column is voided rather than
 trusted; `judge_reasoning_effort` (default `low`) is forwarded to the judge's
 wire only — gpt-oss needs it to bound its thinking, Gemma's template ignores
-it. `[tune]`'s seven keys are `chekov tune`'s own probe depth, its five
+it. `[tune]` controls `chekov tune`'s probe depths, its five
 stages' candidate lists and the guard tolerance; `repetitions`, `max_tokens` and `significance_pct`
 come from `[bench]` — one definition of "how many samples" and "what is
 significant" for every measurement chekov makes.

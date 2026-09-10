@@ -10,15 +10,15 @@ use std::process::ExitCode;
 
 use super::{Command, Ctx, confirm};
 use crate::core::bench::sweep::SweepPlan;
-use crate::core::bench::{candidate, lifecycle, runner, sweep};
-use crate::core::config::TuneSection;
+use crate::core::bench::{candidate, lifecycle, runner};
+use crate::core::config::{Config, TuneSection};
 use crate::core::proxy::claude::ClaudeFacade;
 use crate::core::proxy::serve::Upstream;
 use crate::core::registry::Effective;
 use crate::core::stats::{Comparison, Summary, compare};
 use crate::core::tune::{
-    self, CandidateLabel, JudgeCriteria, LineContext, Measured, Metric, Outcome, Probe, Record,
-    Stage, Trial, Verdict,
+    self, CandidateLabel, DepthMeasurement, JudgeCriteria, LineContext, Measured, Metric, Outcome,
+    Probe, Record, Stage, Trial, Verdict,
 };
 use crate::core::{footprint, machine, server};
 use crate::error::ChekovError;
@@ -61,7 +61,7 @@ struct Plan<'a> {
 /// whatever has won so far (spec §4).
 struct Incumbent {
     argv: Vec<String>,
-    measured: Measured,
+    measured: Vec<DepthMeasurement>,
 }
 
 /// One completed trial: which candidate (none for the baseline), the flags it
@@ -260,8 +260,15 @@ fn spec_plan_note(plan: &Plan) -> String {
 
 /// One probe's wall clock at `lifecycle`'s reference rates (spec §7).
 fn probe_secs(plan: &Plan) -> u64 {
-    let per_rep = u64::from(plan.tune.depth) * 1000 / lifecycle::PREFILL_TOK_S
-        + u64::from(plan.sweep.max_tokens) * 1000 / lifecycle::DECODE_TOK_S;
+    let per_rep: u64 = plan
+        .sweep
+        .depths
+        .iter()
+        .map(|&depth| {
+            u64::from(depth) * 1000 / lifecycle::PREFILL_TOK_S
+                + u64::from(plan.sweep.max_tokens) * 1000 / lifecycle::DECODE_TOK_S
+        })
+        .sum();
     (u64::from(plan.sweep.repetitions) * per_rep).div_ceil(1000)
 }
 
@@ -290,9 +297,15 @@ fn estimate_line(plan: &Plan, weights_bytes: Option<u64>) -> String {
 fn plan_text(plan: &Plan, weights_bytes: Option<u64>, running: Option<&str>) -> String {
     let flags = plan.eff.flags.join(" ");
     let (name, ctx) = (&plan.eff.name, plan.eff.ctx_size);
-    let (depth, reps) = (plan.tune.depth, plan.sweep.repetitions);
+    let depth = depth_label(&plan.sweep.depths, plan.tune.depth);
+    let reps = plan.sweep.repetitions;
+    let each = if plan.sweep.depths.len() > 1 {
+        " each"
+    } else {
+        ""
+    };
     let mut parts = vec![
-        format!("tune {name} @ ctx {ctx}, probe depth {depth} × {reps} reps\n"),
+        format!("tune {name} @ ctx {ctx}, probe {depth} × {reps} reps{each}\n"),
         format!("  {:<10} {flags}   (current flags)\n", "baseline"),
     ];
     parts.extend(running.map(|running| {
@@ -308,6 +321,19 @@ fn plan_text(plan: &Plan, weights_bytes: Option<u64>, running: Option<&str>) -> 
     );
     parts.push(estimate_line(plan, weights_bytes));
     parts.concat()
+}
+
+fn depth_label(depths: &[u32], legacy: u32) -> String {
+    if depths.len() > 1 {
+        let list = depths
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("depths [{list}]")
+    } else {
+        format!("depth {}", depths.first().copied().unwrap_or(legacy))
+    }
 }
 
 /// The confirm gate's prompt is the plan's last line (spec §7).
@@ -531,10 +557,16 @@ fn header(record: &Record) -> String {
         probe,
         ..
     } = record;
-    let (depth, reps) = (probe.depth, probe.repetitions);
+    let depth = depth_label(&probe.depths, probe.depth);
+    let reps = probe.repetitions;
+    let each = if probe.depths.len() > 1 {
+        " reps each"
+    } else {
+        ""
+    };
     format!(
         "tune {model} ({quant}@{revision}) — machine {machine_id}, \
-         engine {engine_build_commit}, probe depth {depth} × {reps}\n"
+         engine {engine_build_commit}, probe {depth} × {reps}{each}\n"
     )
 }
 
@@ -564,7 +596,12 @@ fn baseline_line(trial: &Trial) -> String {
         )
     });
     let flags = trial.argv.join(" ");
-    format!("  {:<10} {cells}   {flags}\n", "baseline")
+    let extra = if trial.depths.len() > 1 {
+        tune::depth_lines(&label, &trial.depths)
+    } else {
+        String::new()
+    };
+    format!("  {:<10} {cells}   {flags}{extra}\n", "baseline")
 }
 
 /// The same rule the run's own verdicts were reached under (`stats::compare`
@@ -595,12 +632,44 @@ fn versus(metric: Metric, pair: (&Summary, &Summary), significance_pct: f64) -> 
 
 /// The winner's numbers beside the baseline's, on the line under the winner.
 fn winner_versus(record: &Record, winner: &[String]) -> Option<String> {
-    let baseline = measured_of(record.trials.first()?)?;
-    let won = measured_of(record.trials.iter().rev().find(|t| t.argv == winner)?)?;
+    let baseline = record.trials.first()?;
+    let won = record.trials.iter().rev().find(|t| t.argv == winner)?;
+    if record.probe.depths.len() > 1 {
+        return Some(
+            record
+                .probe
+                .depths
+                .iter()
+                .map(|&depth| depth_versus(depth, (won, baseline), record.significance_pct))
+                .collect(),
+        );
+    }
+    let baseline = measured_of(baseline)?;
+    let won = measured_of(won)?;
     let pct = record.significance_pct;
     let decode = versus(Metric::Decode, (&won.decode, &baseline.decode), pct);
     let prefill = versus(Metric::Prefill, (&won.prefill, &baseline.prefill), pct);
     Some(format!("  {:<10} {decode}   {prefill}\n", ""))
+}
+
+fn depth_versus(depth: u32, trials: (&Trial, &Trial), significance_pct: f64) -> String {
+    let won = trials.0.depths.iter().find(|entry| entry.depth == depth);
+    let base = trials.1.depths.iter().find(|entry| entry.depth == depth);
+    let Some((won, base)) = won.zip(base) else {
+        return format!("    depth {depth}: winner/baseline measurements unavailable\n");
+    };
+    let (won, base) = (&won.measured, &base.measured);
+    let decode = versus(
+        Metric::Decode,
+        (&won.decode, &base.decode),
+        significance_pct,
+    );
+    let prefill = versus(
+        Metric::Prefill,
+        (&won.prefill, &base.prefill),
+        significance_pct,
+    );
+    format!("    depth {depth}: {decode}   {prefill}\n")
 }
 
 /// The winner block, or the one line that says nothing beat the baseline.
@@ -654,10 +723,11 @@ fn ngram_caution(record: &Record) -> Option<String> {
 
 /// The record row for one trial (spec §8's shape).
 fn trial_row(trial: &TrialOutcome, verdict: Option<&Verdict>) -> Trial {
-    let measured = match &trial.outcome {
-        Outcome::Measured(measured) => Some(measured),
-        Outcome::Degenerate(_) | Outcome::Skipped(_) => None,
-    };
+    let measured = trial
+        .outcome
+        .measurements()
+        .first()
+        .map(|entry| &entry.measured);
     let (outcome, reason) = outcome_words(&trial.outcome);
     Trial {
         stage: trial
@@ -672,6 +742,7 @@ fn trial_row(trial: &TrialOutcome, verdict: Option<&Verdict>) -> Trial {
         decode: measured.map(|m| m.decode.clone()),
         prefill: measured.map(|m| m.prefill.clone()),
         prompt_n: measured.map(|m| m.prompt_n),
+        depths: trial.outcome.measurements().to_vec(),
         draft_n: measured.map_or(0, |m| m.draft_n),
         draft_n_accepted: measured.map_or(0, |m| m.draft_n_accepted),
         speed_limit_pct: trial.therm,
@@ -684,21 +755,15 @@ fn trial_row(trial: &TrialOutcome, verdict: Option<&Verdict>) -> Trial {
 fn outcome_words(outcome: &Outcome) -> (&'static str, Option<String>) {
     match outcome {
         Outcome::Measured(_) => ("measured", None),
-        Outcome::Degenerate(reason) => ("degenerate", Some(reason.clone())),
+        Outcome::Degenerate(reason) | Outcome::Incomplete { reason, .. } => {
+            ("degenerate", Some(reason.clone()))
+        }
         Outcome::Skipped(reason) => ("skipped", Some(reason.clone())),
     }
 }
 
-/// `Measured` carries no `Clone`; the winner's numbers are copied field-wise
-/// so the next stage's incumbent owns them.
-fn carried(measured: &Measured) -> Measured {
-    Measured {
-        decode: measured.decode.clone(),
-        prefill: measured.prefill.clone(),
-        prompt_n: measured.prompt_n,
-        draft_n: measured.draft_n,
-        draft_n_accepted: measured.draft_n_accepted,
-    }
+fn carried(measured: &[DepthMeasurement]) -> Vec<DepthMeasurement> {
+    measured.to_vec()
 }
 
 /// The server chekov's own pidfile names, if one is up. A live server whose
@@ -738,7 +803,13 @@ impl<'a> Session<'a> {
                 engine_build_commit,
                 chekov_version: env!("CARGO_PKG_VERSION").to_owned(),
                 probe: Probe {
-                    depth: plan.tune.depth,
+                    depth: plan
+                        .sweep
+                        .depths
+                        .first()
+                        .copied()
+                        .unwrap_or(plan.tune.depth),
+                    depths: plan.sweep.depths.clone(),
                     repetitions: plan.sweep.repetitions,
                     max_tokens: plan.sweep.max_tokens,
                 },
@@ -774,12 +845,12 @@ impl<'a> Session<'a> {
         let argv = trial.argv;
         match trial.outcome {
             Outcome::Measured(measured) => Ok(Incumbent { argv, measured }),
-            Outcome::Degenerate(reason) | Outcome::Skipped(reason) => {
-                Err(ChekovError::TuneBaselineDegenerate {
-                    name: self.plan.eff.name.clone(),
-                    reason,
-                })
-            }
+            Outcome::Degenerate(reason)
+            | Outcome::Skipped(reason)
+            | Outcome::Incomplete { reason, .. } => Err(ChekovError::TuneBaselineDegenerate {
+                name: self.plan.eff.name.clone(),
+                reason,
+            }),
         }
     }
 
@@ -838,7 +909,7 @@ impl<'a> Session<'a> {
             return None;
         };
         let stage = trial.picked.as_ref()?.stage;
-        Some(tune::judge(
+        Some(tune::judge_depths(
             measured,
             &incumbent.measured,
             JudgeCriteria {
@@ -928,16 +999,9 @@ impl<'a> Session<'a> {
                 seed: self.ctx.config.file.bench.seed,
             },
         };
-        let depth = self.plan.tune.depth;
         let before = tune::read_therm();
-        let result = sweep::measure_depth(&self.plan.sweep, depth, &mut |req| {
-            runner::cross(&wire, req)
-        });
+        let outcome = tune::measure_depths(&self.plan.sweep, &mut |req| runner::cross(&wire, req));
         let after = tune::read_therm();
-        let outcome = result.map_or_else(
-            |err| Outcome::Degenerate(err.to_string()),
-            |depth_result| tune::classify(&depth_result, depth),
-        );
         (outcome, [before, after])
     }
 
@@ -1007,6 +1071,22 @@ impl<'a> Session<'a> {
     }
 }
 
+fn sweep_plan(config: &Config, eff: &Effective) -> Result<SweepPlan, ChekovError> {
+    let bench = &config.file.bench;
+    let plan = SweepPlan {
+        depths: config.file.tune.probe_depths(),
+        repetitions: bench.repetitions,
+        max_tokens: bench.max_tokens,
+    };
+    tune::validate_probe(&plan, eff.ctx_size).map_err(|reason| {
+        ChekovError::TuneBaselineDegenerate {
+            name: eff.name.clone(),
+            reason,
+        }
+    })?;
+    Ok(plan)
+}
+
 impl TuneCmd {
     /// Resolve the model, the stages and the probe this run measures under.
     fn plan<'a>(&self, ctx: &'a Ctx) -> Result<Plan<'a>, ChekovError> {
@@ -1018,6 +1098,7 @@ impl TuneCmd {
         let bench = &ctx.config.file.bench;
         let requested = (!self.stages.is_empty()).then_some(self.stages.as_slice());
         let eff = registry.effective(&name)?;
+        let sweep = sweep_plan(&ctx.config, &eff)?;
         let stages = tune::stages(requested)?;
         // The grammar is checked before anything prints, and the GGUF is
         // read only when the stage will run.
@@ -1032,11 +1113,7 @@ impl TuneCmd {
             stages,
             spec_gate: gate,
             tune: &ctx.config.file.tune,
-            sweep: SweepPlan {
-                depths: vec![ctx.config.file.tune.depth],
-                repetitions: bench.repetitions,
-                max_tokens: bench.max_tokens,
-            },
+            sweep,
             significance_pct: f64::from(bench.significance_pct),
             guard_tolerance_pct: f64::from(ctx.config.file.tune.guard_tolerance_pct),
         })
@@ -1165,6 +1242,7 @@ mod tests {
             decode: Some(summary(31.2, 0.4)),
             prefill: Some(summary(402.0, 4.0)),
             prompt_n: Some(4101),
+            depths: Vec::new(),
             draft_n: 0,
             draft_n_accepted: 0,
             speed_limit_pct: [None, None],
@@ -1183,6 +1261,7 @@ mod tests {
             chekov_version: "0.1.0".into(),
             probe: Probe {
                 depth: 4096,
+                depths: Vec::new(),
                 repetitions: 5,
                 max_tokens: 128,
             },
@@ -1235,6 +1314,141 @@ mod tests {
             record,
             vec!["  ubatch     1024     faster on prefill".to_owned()],
         )
+    }
+
+    #[test]
+    fn multi_depth_tune_estimates_every_depth_and_every_repetition() {
+        let tune = TuneSection::default();
+        let mut plan = plan_for(&tune, &[]);
+        let shallow = super::probe_secs(&plan);
+        let launches = super::max_launches(&plan);
+        plan.sweep.depths = vec![4096, 65536];
+        let deep = super::probe_secs(&plan);
+        assert!(deep > shallow * 10, "{deep} vs {shallow}");
+        assert_eq!(super::max_launches(&plan), launches);
+        let text = super::plan_text(&plan, None, None);
+        assert!(text.contains("4096, 65536"), "{text}");
+        assert!(text.contains("5 reps each"), "{text}");
+        plan.sweep.repetitions *= 2;
+        assert!(super::probe_secs(&plan).abs_diff(deep * 2) <= 1);
+    }
+
+    #[test]
+    fn multi_depth_tune_plan_validates_the_largest_depth_before_launch() {
+        let mut config = Config {
+            root: PathBuf::from("/unused"),
+            file: toml::from_str("[tune]\ndepths = [4096, 65536]\n").expect("config"),
+        };
+        let mut eff = effective(&[]);
+        eff.ctx_size = 131_072;
+        let plan = super::sweep_plan(&config, &eff).expect("fits");
+        assert_eq!(plan.depths, vec![4096, 65536]);
+        assert_eq!(plan.repetitions, config.file.bench.repetitions);
+        eff.ctx_size = 65536;
+        let error = super::sweep_plan(&config, &eff)
+            .err()
+            .expect("no output room");
+        assert!(error.to_string().contains("65536"), "{error}");
+        eff.ctx_size = 131_072;
+        config.file.bench.repetitions = 2;
+        assert!(super::sweep_plan(&config, &eff).is_err());
+    }
+
+    fn recorded_depths() -> Vec<super::DepthMeasurement> {
+        [4096, 65536]
+            .into_iter()
+            .map(|depth| super::DepthMeasurement {
+                depth,
+                measured: Measured {
+                    decode: summary(50.0, 0.5),
+                    prefill: summary(300.0, 3.0),
+                    prompt_n: u64::from(depth),
+                    draft_n: 50,
+                    draft_n_accepted: 30,
+                },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn multi_depth_tune_records_and_reports_every_measured_depth() {
+        let trial = super::TrialOutcome {
+            picked: None,
+            argv: baseline_argv(),
+            therm: [None, Some(95)],
+            outcome: Outcome::Measured(recorded_depths()),
+        };
+        let row = super::trial_row(&trial, None);
+        assert_eq!(row.depths[1].measured.decode.n, 4);
+        assert_eq!(row.depths[1].measured.draft_n_accepted, 30);
+        let mut record = record_of(vec![row], Some(baseline_argv()));
+        record.probe.depths = vec![4096, 65536];
+        let encoded = serde_json::to_string(&record).expect("serialize");
+        let decoded: Record = serde_json::from_str(&encoded).expect("reload");
+        assert_eq!(record, decoded);
+        let report = super::report(&decoded, &[], Path::new("run.json"));
+        assert!(report.contains("depths [4096, 65536]"), "{report}");
+        assert!(
+            report.matches("depth 65536:").count() >= 2,
+            "baseline and winner: {report}"
+        );
+        assert!(report.contains("acceptance 60%"), "{report}");
+    }
+
+    #[test]
+    fn multi_depth_tune_loads_records_from_before_depth_lists_existed() {
+        let (record, _) = defaults_won_fixture();
+        let mut json = serde_json::to_value(record).expect("serialize");
+        json["probe"]
+            .as_object_mut()
+            .expect("probe")
+            .remove("depths");
+        for trial in json["trials"].as_array_mut().expect("trials") {
+            trial.as_object_mut().expect("trial").remove("depths");
+        }
+        let legacy: Record = serde_json::from_value(json).expect("legacy record");
+        assert_eq!(legacy.probe.depth, 4096);
+        assert!(legacy.probe.depths.is_empty());
+        let out = super::report(&legacy, &[], Path::new("old.json"));
+        assert!(out.contains("probe depth 4096"), "{out}");
+        assert!(out.contains("decode 31.2"), "{out}");
+    }
+
+    #[test]
+    fn multi_depth_tune_records_partial_evidence_without_a_winning_verdict() {
+        let trial = super::TrialOutcome {
+            picked: Some(Candidate {
+                stage: Stage::Fa,
+                value: "off".into(),
+                argv: vec![],
+            }),
+            argv: baseline_argv(),
+            therm: [None, None],
+            outcome: Outcome::Incomplete {
+                measurements: recorded_depths().into_iter().take(1).collect(),
+                reason: "depth 65536: upstream stopped".into(),
+            },
+        };
+        let row = super::trial_row(&trial, None);
+        assert_eq!(row.outcome, "degenerate");
+        assert_eq!(row.depths.len(), 1);
+        assert!(row.verdict.is_none());
+        assert!(row.reason.as_deref().expect("reason").contains("65536"));
+        let line = crate::core::tune::stage_line(
+            &super::CandidateLabel {
+                stage: Stage::Fa,
+                value: "off",
+            },
+            &trial.outcome,
+            &super::LineContext {
+                verdict: None,
+                dirty: None,
+            },
+        );
+        assert!(
+            line.contains("depth 4096:") && line.contains("depth 65536:"),
+            "{line}"
+        );
     }
 
     #[test]
@@ -1331,13 +1545,16 @@ mod tests {
             trial: super::TrialOutcome {
                 picked: None,
                 argv: baseline_argv(),
-                outcome: Outcome::Measured(Measured {
-                    decode: summary(31.2, 0.4),
-                    prefill: summary(402.0, 4.0),
-                    prompt_n: 4101,
-                    draft_n: 0,
-                    draft_n_accepted: 0,
-                }),
+                outcome: Outcome::Measured(vec![super::DepthMeasurement {
+                    depth: 4096,
+                    measured: Measured {
+                        decode: summary(31.2, 0.4),
+                        prefill: summary(402.0, 4.0),
+                        prompt_n: 4101,
+                        draft_n: 0,
+                        draft_n_accepted: 0,
+                    },
+                }]),
                 therm: [None, None],
             },
             released: Err(ChekovError::BenchBudgetNotReleased {
@@ -1856,13 +2073,16 @@ mod tests {
         };
         let incumbent = super::Incumbent {
             argv: vec![],
-            measured: Measured {
-                decode: summary(31.2, 0.4),
-                prefill: summary(402.0, 4.0),
-                prompt_n: 4101,
-                draft_n: 0,
-                draft_n_accepted: 0,
-            },
+            measured: vec![super::DepthMeasurement {
+                depth: 4096,
+                measured: Measured {
+                    decode: summary(31.2, 0.4),
+                    prefill: summary(402.0, 4.0),
+                    prompt_n: 4101,
+                    draft_n: 0,
+                    draft_n_accepted: 0,
+                },
+            }],
         };
         let mtp1 = Candidate {
             stage: Stage::Spec,

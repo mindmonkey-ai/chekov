@@ -807,7 +807,15 @@ deliberately when this is built, not a default to flip. The config-only
 half needs no code: `[bench] depths` gaining 65536/131072 puts a measured
 point where the agent regime is, and `--metric tok-s` on the frontier then
 shows it; the same wall-clock honesty applies.
-Proposed 2026-09-06 — status: APPROVED 2026-09-09
+IMPLEMENTED 2026-09-10: opt-in `[tune] depths` overrides the legacy single
+`depth`; the default remains 4096. Every depth gets the full
+`[bench] repetitions` count and its own warmup drop. A shallow win must also keep both
+deep metrics within the configured regression guard at every deeper depth.
+The plan estimates the whole sweep, and records/reports carry per-depth
+measurements. A failed depth prevents a win and preserves earlier evidence;
+old single-depth records still load. TODO: run real-machine deep-context
+validation before claiming a performance improvement.
+Proposed 2026-09-06 — status: IMPLEMENTED 2026-09-10 (approved 2026-09-09)
 
 ## Reasoning effort is a launch flag nobody stamps, and a cost nobody measures (2026-09-06)
 Three findings point one way. (1) chekov's own 2026-08-31 foreign run: a
