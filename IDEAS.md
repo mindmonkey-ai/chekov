@@ -851,9 +851,12 @@ their own argv; unclosed spans count to the end; a tag table of the six
 families llama.cpp leaves inline, Kimi named as the gap it cannot close.
 SHIPPED 2026-09-09 (both halves): fifteen flag-sourced stamp fields,
 load-time hydration, `thinking_chars` / `answer_chars` on every row, the
-`thinking` report line. Still owed: time-to-first-visible-text (the mark
-belongs in `hub.rs`'s streamed-read loop, which is agent-frozen); a `compare`
-column for the share.
+`thinking` report line. IMPLEMENTED 2026-09-10: `compare` shows both runs'
+median recorded thinking share per suite and transport, using the same cases
+with character counts in both runs. Measured/shared pair counts expose missing
+measurements; an entirely unmeasured comparison is `N/A`, not zero thinking.
+Still owed: time-to-first-visible-text (the mark belongs in `hub.rs`'s
+streamed-read loop, which is agent-frozen).
 Proposed 2026-09-06 — status: SHIPPED 2026-09-09
 
 ## New tool-use lane candidates for the agentic bench (survey 2026-09-06)
