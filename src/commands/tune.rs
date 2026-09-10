@@ -306,6 +306,7 @@ fn plan_text(plan: &Plan, weights_bytes: Option<u64>, running: Option<&str>) -> 
     };
     let mut parts = vec![
         format!("tune {name} @ ctx {ctx}, probe {depth} × {reps} reps{each}\n"),
+        "  prefill    full prompt each repetition; prompt cache disabled\n".to_owned(),
         format!("  {:<10} {flags}   (current flags)\n", "baseline"),
     ];
     parts.extend(running.map(|running| {
@@ -576,6 +577,10 @@ fn measured_of(trial: &Trial) -> Option<Measured> {
         decode: trial.decode.clone()?,
         prefill: trial.prefill.clone()?,
         prompt_n: trial.prompt_n?,
+        cache_n: trial
+            .depths
+            .first()
+            .and_then(|entry| entry.measured.cache_n),
         draft_n: trial.draft_n,
         draft_n_accepted: trial.draft_n_accepted,
     })
@@ -1000,7 +1005,9 @@ impl<'a> Session<'a> {
             },
         };
         let before = tune::read_therm();
-        let outcome = tune::measure_depths(&self.plan.sweep, &mut |req| runner::cross(&wire, req));
+        let outcome = tune::measure_depths(&self.plan.sweep, &mut |req| {
+            runner::cross_fresh_prefill(&wire, req)
+        });
         let after = tune::read_therm();
         (outcome, [before, after])
     }
@@ -1363,6 +1370,7 @@ mod tests {
                     decode: summary(50.0, 0.5),
                     prefill: summary(300.0, 3.0),
                     prompt_n: u64::from(depth),
+                    cache_n: Some(0),
                     draft_n: 50,
                     draft_n_accepted: 30,
                 },
@@ -1551,6 +1559,7 @@ mod tests {
                         decode: summary(31.2, 0.4),
                         prefill: summary(402.0, 4.0),
                         prompt_n: 4101,
+                        cache_n: Some(0),
                         draft_n: 0,
                         draft_n_accepted: 0,
                     },
@@ -2079,6 +2088,7 @@ mod tests {
                     decode: summary(31.2, 0.4),
                     prefill: summary(402.0, 4.0),
                     prompt_n: 4101,
+                    cache_n: Some(0),
                     draft_n: 0,
                     draft_n_accepted: 0,
                 },

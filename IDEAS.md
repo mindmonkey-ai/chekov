@@ -815,6 +815,19 @@ The plan estimates the whole sweep, and records/reports carry per-depth
 measurements. A failed depth prevents a win and preserves earlier evidence;
 old single-depth records still load. TODO: run real-machine deep-context
 validation before claiming a performance improvement.
+Cache correction IMPLEMENTED 2026-09-10: the live check recorded on
+`feat/tune-depths` (`43f56f3`, run `20260910T050933Z-ornith-1.5-35b-a3b`)
+found that repeated prompts reused their prefix cache: retained samples
+evaluated only four fresh tokens, so their prefill medians could not validate
+the full-prompt guard. Tuning now sends `cache_prompt: false` after translation
+on every repetition at every depth; the plan names the full-prefill cost.
+Each depth records the maximum server-reported `cache_n`, including warmup;
+old records load with that count unknown. Any reported cache reuse prevents
+a verdict, retains the cached measurement and earlier depths, and names the
+reason. Ordinary capability benchmarks keep their existing cache policy.
+Regression tests cover the request wire, retained cache evidence, and old
+records. TODO: repeat live fresh-prefill acceptance before claiming a
+performance improvement.
 Proposed 2026-09-06 — status: IMPLEMENTED 2026-09-10 (approved 2026-09-09)
 
 ## Reasoning effort is a launch flag nobody stamps, and a cost nobody measures (2026-09-06)

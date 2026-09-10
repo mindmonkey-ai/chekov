@@ -447,6 +447,10 @@ pub struct Measured {
     pub decode: Summary,
     pub prefill: Summary,
     pub prompt_n: u64,
+    /// Maximum cached tokens in any repetition, including warmup. Older
+    /// records did not retain this evidence, so their count stays unknown.
+    #[serde(default)]
+    pub cache_n: Option<u64>,
     /// Draft tokens proposed and accepted over every repetition, the warmup
     /// included — zero-both when nothing drafted (n-gram design §13).
     pub draft_n: u64,
@@ -491,28 +495,39 @@ impl Outcome {
 }
 
 /// A trial too thin to trust: too few samples to summarise after the warmup
-/// drop, or a prompt that never reached half the requested depth (spec §5).
+/// drop, a cached prompt, or a prompt below half the requested depth (spec §5).
 #[must_use]
 pub fn classify(result: &DepthResult, depth: u32) -> Outcome {
     let (Some(decode), Some(prefill)) = (&result.decode, &result.prefill) else {
         return Outcome::Degenerate("fewer than 2 samples after the warmup drop".into());
     };
+    let measurements = vec![DepthMeasurement {
+        depth,
+        measured: Measured {
+            decode: decode.clone(),
+            prefill: prefill.clone(),
+            prompt_n: result.prompt_n,
+            cache_n: Some(result.cache_n),
+            draft_n: result.draft_n,
+            draft_n_accepted: result.draft_n_accepted,
+        },
+    }];
+    if result.cache_n > 0 {
+        return Outcome::Incomplete {
+            measurements,
+            reason: format!(
+                "prompt reused up to {} cached tokens; fresh prefill is required",
+                result.cache_n
+            ),
+        };
+    }
     if result.prompt_n * 2 < u64::from(depth) {
         return Outcome::Degenerate(format!(
             "prompt_n {} is below half the requested depth {depth}",
             result.prompt_n
         ));
     }
-    Outcome::Measured(vec![DepthMeasurement {
-        depth,
-        measured: Measured {
-            decode: decode.clone(),
-            prefill: prefill.clone(),
-            prompt_n: result.prompt_n,
-            draft_n: result.draft_n,
-            draft_n_accepted: result.draft_n_accepted,
-        },
-    }])
+    Outcome::Measured(measurements)
 }
 
 pub fn validate_probe(plan: &SweepPlan, ctx_size: u32) -> Result<(), String> {
@@ -557,9 +572,17 @@ pub fn measure_depths(plan: &SweepPlan, exec: &mut ProbeExec) -> Outcome {
         );
         match outcome {
             Outcome::Measured(mut measured) => measurements.append(&mut measured),
-            Outcome::Degenerate(reason)
-            | Outcome::Skipped(reason)
-            | Outcome::Incomplete { reason, .. } => {
+            Outcome::Incomplete {
+                measurements: partial,
+                reason,
+            } => {
+                measurements.extend(partial);
+                return Outcome::Incomplete {
+                    measurements,
+                    reason: format!("depth {depth}: {reason}"),
+                };
+            }
+            Outcome::Degenerate(reason) | Outcome::Skipped(reason) => {
                 return Outcome::Incomplete {
                     measurements,
                     reason: format!("depth {depth}: {reason}"),
@@ -1229,6 +1252,7 @@ mod tests {
             decode: summary(decode, 0.3),
             prefill: summary(prefill, 3.0),
             prompt_n: 4101,
+            cache_n: Some(0),
             draft_n: 0,
             draft_n_accepted: 0,
         }

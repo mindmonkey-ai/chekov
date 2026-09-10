@@ -187,8 +187,20 @@ pub fn cross_fresh_prefill(
     wire: &ProbeWire,
     req: &HttpRequest,
 ) -> Result<ProbeArtifact, ChekovError> {
-    // TODO: disable prompt caching on the upstream request after translation.
-    cross(wire, req)
+    let (path, body) = forward_of(wire, req)?;
+    let mut body: Value =
+        serde_json::from_str(&adjust_body(&body, wire.pins, None)?).map_err(|e| {
+            ChekovError::ProxyBadRequest {
+                reason: format!("forwarded body is not JSON: {e}"),
+            }
+        })?;
+    body["cache_prompt"] = Value::Bool(false);
+    let upstream_body = wire.http.post_json(&JsonRequest {
+        url: format!("{}{}", wire.upstream.base_url, path),
+        body: body.to_string(),
+        bearer: Some(wire.upstream.api_key.clone()),
+    })?;
+    artifact_of(wire, &upstream_body)
 }
 
 /// What a forced crossing constrains: the grammar, and — on the judge wire
@@ -242,8 +254,12 @@ fn cross_inner(
     forced: Option<&Forced>,
 ) -> Result<ProbeArtifact, ChekovError> {
     let upstream_body = post_upstream(wire, req, forced)?;
-    let timings = read_timings(&upstream_body)?;
-    let anthropic_body = wire.facade.translate_response(&upstream_body)?;
+    artifact_of(wire, &upstream_body)
+}
+
+fn artifact_of(wire: &ProbeWire, upstream_body: &str) -> Result<ProbeArtifact, ChekovError> {
+    let timings = read_timings(upstream_body)?;
+    let anthropic_body = wire.facade.translate_response(upstream_body)?;
     Ok(ProbeArtifact {
         anthropic_body,
         timings,
