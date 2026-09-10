@@ -430,11 +430,25 @@ fn measured_of(trial: &Trial) -> Option<Measured> {
         decode: trial.decode.clone()?,
         prefill: trial.prefill.clone()?,
         prompt_n: trial.prompt_n?,
+        draft_n: trial.draft_n,
+        draft_n_accepted: trial.draft_n_accepted,
     })
 }
 
+/// The baseline's cells and flags — and its acceptance when it drafted, so
+/// a candidate's clause has something to be read against.
 fn baseline_line(trial: &Trial) -> String {
-    let cells = measured_of(trial).map_or_else(String::new, |m| tune::measured_cells(&m));
+    let label = CandidateLabel {
+        stage: Stage::Spec,
+        value: "off",
+    };
+    let cells = measured_of(trial).map_or_else(String::new, |m| {
+        format!(
+            "{}{}",
+            tune::measured_cells(&m),
+            tune::accept_note(&label, &m)
+        )
+    });
     let flags = trial.argv.join(" ");
     format!("  {:<10} {cells}   {flags}\n", "baseline")
 }
@@ -527,6 +541,8 @@ fn trial_row(trial: &TrialOutcome, verdict: Option<&Verdict>) -> Trial {
         decode: measured.map(|m| m.decode.clone()),
         prefill: measured.map(|m| m.prefill.clone()),
         prompt_n: measured.map(|m| m.prompt_n),
+        draft_n: measured.map_or(0, |m| m.draft_n),
+        draft_n_accepted: measured.map_or(0, |m| m.draft_n_accepted),
         speed_limit_pct: trial.therm,
         reason,
         verdict: verdict.map(|v| v.phrase.clone()),
@@ -549,6 +565,8 @@ fn carried(measured: &Measured) -> Measured {
         decode: measured.decode.clone(),
         prefill: measured.prefill.clone(),
         prompt_n: measured.prompt_n,
+        draft_n: measured.draft_n,
+        draft_n_accepted: measured.draft_n_accepted,
     }
 }
 
@@ -1015,6 +1033,8 @@ mod tests {
             decode: Some(summary(31.2, 0.4)),
             prefill: Some(summary(402.0, 4.0)),
             prompt_n: Some(4101),
+            draft_n: 0,
+            draft_n_accepted: 0,
             speed_limit_pct: [None, None],
             reason: None,
             verdict: None,
@@ -1183,6 +1203,8 @@ mod tests {
                     decode: summary(31.2, 0.4),
                     prefill: summary(402.0, 4.0),
                     prompt_n: 4101,
+                    draft_n: 0,
+                    draft_n_accepted: 0,
                 }),
                 therm: [None, None],
             },
@@ -1518,6 +1540,8 @@ mod tests {
                 decode: summary(31.2, 0.4),
                 prefill: summary(402.0, 4.0),
                 prompt_n: 4101,
+                draft_n: 0,
+                draft_n_accepted: 0,
             },
         };
         let mtp1 = Candidate {

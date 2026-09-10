@@ -445,6 +445,10 @@ pub struct Measured {
     pub decode: Summary,
     pub prefill: Summary,
     pub prompt_n: u64,
+    /// Draft tokens proposed and accepted over every repetition, the warmup
+    /// included — zero-both when nothing drafted (n-gram design §13).
+    pub draft_n: u64,
+    pub draft_n_accepted: u64,
 }
 
 impl Measured {
@@ -480,6 +484,8 @@ pub fn classify(result: &DepthResult, depth: u32) -> Outcome {
         decode: decode.clone(),
         prefill: prefill.clone(),
         prompt_n: result.prompt_n,
+        draft_n: result.draft_n,
+        draft_n_accepted: result.draft_n_accepted,
     })
 }
 
@@ -633,6 +639,30 @@ fn dirty_note(dirty: Option<u32>) -> String {
     })
 }
 
+/// `   acceptance 63% (189 of 300 drafted)` for a trial that drafted.
+///
+/// `   no drafts` for a spec-stage candidate that did not — the expected
+/// reading of a history-based drafter on a prompt with nothing to match
+/// (n-gram design §13); nothing for any other trial.
+#[must_use]
+pub fn accept_note(label: &CandidateLabel, measured: &Measured) -> String {
+    if measured.draft_n > 0 {
+        let pct = u128::from(measured.draft_n_accepted) * 200 / u128::from(measured.draft_n);
+        return format!(
+            "   acceptance {}% ({} of {} drafted)",
+            pct.div_ceil(2).min(100),
+            measured.draft_n_accepted,
+            measured.draft_n
+        );
+    }
+    let speculative = label.stage == Stage::Spec && label.value != "off";
+    if speculative {
+        "   no drafts".to_owned()
+    } else {
+        String::new()
+    }
+}
+
 /// Which candidate a report line names — bundled with `LineContext` so
 /// `stage_line` stays at this crate's clippy argument floor (`clippy.toml`,
 /// §3.4) despite the spec's five logically independent inputs.
@@ -658,7 +688,8 @@ pub fn stage_line(label: &CandidateLabel, outcome: &Outcome, context: &LineConte
             let cells = measured_cells(measured);
             let phrase = context.verdict.map_or("", |v| v.phrase.as_str());
             let note = dirty_note(context.dirty);
-            format!("  {stage:<10} {value:<8} {cells}   {phrase}{note}")
+            let accept = accept_note(label, measured);
+            format!("  {stage:<10} {value:<8} {cells}   {phrase}{note}{accept}")
         }
         Outcome::Skipped(reason) => format!("  {stage:<10} {value:<8} skipped: {reason}"),
         Outcome::Degenerate(reason) => format!("  {stage:<10} {value:<8} degenerate: {reason}"),
@@ -729,6 +760,12 @@ pub struct Trial {
     pub decode: Option<Summary>,
     pub prefill: Option<Summary>,
     pub prompt_n: Option<u64>,
+    /// Draft tokens proposed and accepted over the probe's repetitions
+    /// (n-gram design §13). Records from before the fields load as zero-both.
+    #[serde(default)]
+    pub draft_n: u64,
+    #[serde(default)]
+    pub draft_n_accepted: u64,
     /// Speed limit before and after the probe (spec §6); either below 100
     /// marks the trial's clock as dirty without voiding it.
     pub speed_limit_pct: [Option<u32>; 2],
@@ -983,6 +1020,8 @@ mod tests {
             decode: summary(decode, 0.3),
             prefill: summary(prefill, 3.0),
             prompt_n: 4101,
+            draft_n: 0,
+            draft_n_accepted: 0,
         }
     }
 
@@ -1268,6 +1307,8 @@ mod tests {
                 decode: Some(summary(31.2, 0.3)),
                 prefill: Some(summary(402.0, 3.0)),
                 prompt_n: Some(4101),
+                draft_n: 0,
+                draft_n_accepted: 0,
                 speed_limit_pct: [None, Some(87)],
                 reason: None,
                 verdict: None,
