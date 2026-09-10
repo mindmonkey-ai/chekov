@@ -2053,6 +2053,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fresh_prefill_records_zero_cached_tokens() {
+        let outcome = super::classify(&drafted_result(0, 0), 4096);
+        let json = serde_json::to_value(outcome.measurements()).unwrap();
+        assert_eq!(json[0]["measured"]["cache_n"], 0);
+    }
+
+    #[test]
+    fn legacy_measurements_keep_the_cache_count_unknown() {
+        let mut json = serde_json::to_value(measured(30.0, 400.0)).unwrap();
+        json.as_object_mut().unwrap().remove("cache_n");
+        let legacy: super::Measured = serde_json::from_value(json).unwrap();
+        assert!(serde_json::to_value(legacy).unwrap()["cache_n"].is_null());
+    }
+
     fn quiet() -> super::LineContext<'static> {
         super::LineContext {
             verdict: None,

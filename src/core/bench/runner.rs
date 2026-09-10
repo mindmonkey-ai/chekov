@@ -182,6 +182,15 @@ pub fn cross(wire: &ProbeWire, req: &HttpRequest) -> Result<ProbeArtifact, Cheko
     cross_inner(wire, req, None)
 }
 
+/// A tuning crossing that requires a fresh prompt evaluation.
+pub fn cross_fresh_prefill(
+    wire: &ProbeWire,
+    req: &HttpRequest,
+) -> Result<ProbeArtifact, ChekovError> {
+    // TODO: disable prompt caching on the upstream request after translation.
+    cross(wire, req)
+}
+
 /// What a forced crossing constrains: the grammar, and — on the judge wire
 /// only — the engine's reasoning effort. Candidate probes never set the latter.
 pub struct Forced<'a> {
@@ -1955,6 +1964,76 @@ mod tests {
             "{}",
             sent(&probe)
         );
+    }
+
+    #[test]
+    fn fresh_prefill_disables_cache_on_every_repetition_and_depth() {
+        let mut body: serde_json::Value = serde_json::from_str(&openai_with_timings()).unwrap();
+        body["timings"]["cache_n"] = 0.into();
+        let http = CannedUpstream::new(body.to_string());
+        let facade = ClaudeFacade::new("m");
+        let up = fake_upstream();
+        let wire = wire(&http, &facade, &up);
+        let plan = crate::core::bench::sweep::SweepPlan {
+            depths: vec![256, 512],
+            repetitions: 3,
+            max_tokens: 32,
+        };
+        let mut calls = 0;
+        let outcome = crate::core::tune::measure_depths(&plan, &mut |req| {
+            let artifact = super::cross_fresh_prefill(&wire, req)?;
+            let sent: serde_json::Value =
+                serde_json::from_str(http.sent_body.borrow().as_deref().unwrap()).unwrap();
+            assert_eq!(sent["cache_prompt"], false);
+            assert_eq!(sent["temperature"], 0);
+            assert_eq!(sent["seed"], 42);
+            calls += 1;
+            Ok(artifact)
+        });
+        assert!(matches!(outcome, crate::core::tune::Outcome::Measured(_)));
+        assert_eq!(calls, 6);
+    }
+
+    #[test]
+    fn ordinary_crossings_keep_the_servers_cache_policy() {
+        let http = CannedUpstream::new(openai_with_timings());
+        let facade = ClaudeFacade::new("m");
+        let up = fake_upstream();
+        let artifact = super::cross(&wire(&http, &facade, &up), &anthropic_request("hi")).unwrap();
+        let sent: serde_json::Value =
+            serde_json::from_str(http.sent_body.borrow().as_deref().unwrap()).unwrap();
+        assert!(sent.get("cache_prompt").is_none());
+        assert_eq!(artifact.timings.cache_n, 512);
+    }
+
+    #[test]
+    fn fresh_prefill_rejects_and_retains_a_servers_cached_measurement() {
+        let http = CannedUpstream::new(openai_with_timings());
+        let facade = ClaudeFacade::new("m");
+        let up = fake_upstream();
+        let wire = wire(&http, &facade, &up);
+        let plan = crate::core::bench::sweep::SweepPlan {
+            depths: vec![512, 1024],
+            repetitions: 3,
+            max_tokens: 32,
+        };
+        let outcome = crate::core::tune::measure_depths(&plan, &mut |req| {
+            super::cross_fresh_prefill(&wire, req)
+        });
+        let crate::core::tune::Outcome::Incomplete {
+            measurements,
+            reason,
+        } = outcome
+        else {
+            panic!("cached prefill must never produce a tuning verdict");
+        };
+        assert!(
+            reason.contains("512") && reason.contains("cached"),
+            "{reason}"
+        );
+        let json = serde_json::to_value(measurements).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["measured"]["cache_n"], 512);
     }
 
     #[test]
