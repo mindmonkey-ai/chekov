@@ -1023,7 +1023,7 @@ fn speculative_line(log: &RunLog) -> String {
 }
 
 /// The suites in the order the line names them.
-const THINKING_SUITES: [&str; 6] = [
+pub(super) const THINKING_SUITES: [&str; 6] = [
     "throughput",
     "tool_emit",
     "grammar_gap",
@@ -1052,18 +1052,22 @@ fn thinking_line(log: &RunLog) -> Option<String> {
     ))
 }
 
-/// The median whole-percent share over the suite's measured rows, `None`
-/// when no row of the suite measured any characters. Rounded per row the
-/// way `percent` rounds, then the upper-middle median, both in integers.
 fn suite_share(log: &RunLog, suite: &str) -> Option<u128> {
-    let mut shares: Vec<u128> = rows_of(log, suite)
-        .map(|row| (row.measure.thinking_chars, row.measure.answer_chars))
-        .filter(|(thinking, answer)| thinking + answer > 0)
-        .map(|(thinking, answer)| {
-            (u128::from(thinking) * 200 / u128::from(thinking + answer))
-                .div_ceil(2)
-                .min(100)
+    median_thinking_share(rows_of(log, suite))
+}
+
+/// The median whole-percent share over measured rows, or `None` when no
+/// row measured characters. Round per row, then take the upper-middle median.
+pub(super) fn median_thinking_share<'a>(rows: impl Iterator<Item = &'a TaskRow>) -> Option<u128> {
+    let mut shares: Vec<u128> = rows
+        .map(|row| {
+            (
+                u128::from(row.measure.thinking_chars),
+                u128::from(row.measure.answer_chars),
+            )
         })
+        .filter(|(thinking, answer)| thinking + answer > 0)
+        .map(|(thinking, answer)| (thinking * 200 / (thinking + answer)).div_ceil(2).min(100))
         .collect();
     if shares.is_empty() {
         return None;

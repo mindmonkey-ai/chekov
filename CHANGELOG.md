@@ -7,6 +7,12 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `capability compare` shows each run's median recorded thinking share beside
+  the other run, grouped by suite and transport. Only matching cases with
+  character counts in both runs contribute; measured/shared pair counts expose
+  incomplete coverage. Older or unmeasured rows show `N/A`, while a measured
+  answer without thinking shows `0%`. These are character shares, not token
+  counts or latency measurements, and use the report's same median calculation.
 - `chekov tune`'s `spec` stage trials the engine's history-based drafters:
   `[tune] spec_drafts` accepts `ngram:<type>` (`ngram-simple`,
   `ngram-map-k`, `ngram-map-k4v`, `ngram-mod`, `ngram-cache`) beside `off`

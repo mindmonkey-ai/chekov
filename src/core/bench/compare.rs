@@ -55,6 +55,17 @@ pub struct RunComparison {
     pub depths: Vec<DepthComparison>,
     pub agentic: AgenticComparison,
     pub codebase: CodebaseComparison,
+    pub thinking: Vec<ThinkingComparison>,
+}
+
+#[derive(Debug)]
+pub struct ThinkingComparison {
+    pub suite: String,
+    pub transport: Transport,
+    pub a: Option<u128>,
+    pub b: Option<u128>,
+    pub measured_pairs: usize,
+    pub shared_pairs: usize,
 }
 
 /// Which of the two runs recorded a section at all.
@@ -225,7 +236,53 @@ pub fn compare_runs(
         depths: depth_comparisons(&pair, opts.significance_pct),
         agentic: compare_agentic(&pair),
         codebase: compare_codebase(&pair),
+        thinking: thinking_comparisons(&pair),
     })
+}
+
+fn thinking_comparisons(pair: &RunPair) -> Vec<ThinkingComparison> {
+    store::THINKING_SUITES
+        .iter()
+        .flat_map(|suite| {
+            [Transport::Buffered, Transport::Streamed]
+                .into_iter()
+                .filter_map(move |transport| thinking_comparison(pair, suite, transport))
+        })
+        .collect()
+}
+
+fn thinking_comparison(
+    pair: &RunPair,
+    suite: &str,
+    transport: Transport,
+) -> Option<ThinkingComparison> {
+    let shared: Vec<_> = pair
+        .a
+        .rows
+        .iter()
+        .filter(|row| row.suite == suite && row.transport == transport)
+        .filter_map(|a| pair.b.rows.iter().find(|b| same_case(a, b)).map(|b| (a, b)))
+        .collect();
+    if shared.is_empty() {
+        return None;
+    }
+    let shared_pairs = shared.len();
+    let measured: Vec<_> = shared
+        .into_iter()
+        .filter(|(a, b)| has_reply_chars(a) && has_reply_chars(b))
+        .collect();
+    Some(ThinkingComparison {
+        suite: suite.to_owned(),
+        transport,
+        a: store::median_thinking_share(measured.iter().map(|(a, _)| *a)),
+        b: store::median_thinking_share(measured.iter().map(|(_, b)| *b)),
+        measured_pairs: measured.len(),
+        shared_pairs,
+    })
+}
+
+const fn has_reply_chars(row: &TaskRow) -> bool {
+    row.measure.thinking_chars > 0 || row.measure.answer_chars > 0
 }
 
 fn depth_comparisons(pair: &RunPair, significance_pct: f64) -> Vec<DepthComparison> {
@@ -1003,7 +1060,37 @@ pub fn render_comparison(pair: &RunPair, comparison: &RunComparison) -> String {
     }
     out.push_str(&render_agentic(pair, &comparison.agentic));
     out.push_str(&render_codebase(pair, &comparison.codebase));
+    out.push_str(&render_thinking(&comparison.thinking));
     out
+}
+
+fn render_thinking(rows: &[ThinkingComparison]) -> String {
+    if rows.is_empty() {
+        return "thinking: no case recorded in both runs\n".to_owned();
+    }
+    let width = column_width(
+        rows.iter()
+            .map(|row| row.suite.len() + door_tag(row.transport).len()),
+        22,
+    );
+    let mut out = String::from(
+        "thinking (median recorded share of reply characters; measured/shared pairs)\n",
+    );
+    out.extend(rows.iter().map(|row| thinking_totals_line(row, width)));
+    out
+}
+
+fn thinking_totals_line(row: &ThinkingComparison, width: usize) -> String {
+    let label = format!("{}{}", row.suite, door_tag(row.transport));
+    let percent =
+        |share: Option<u128>| share.map_or_else(|| "N/A".to_owned(), |value| format!("{value}%"));
+    format!(
+        "  {label:<width$}{} vs {}; {}/{} pairs\n",
+        percent(row.a),
+        percent(row.b),
+        row.measured_pairs,
+        row.shared_pairs,
+    )
 }
 
 /// A section one run never measured is named as absent. A section that simply
@@ -1317,6 +1404,199 @@ mod tests {
             cross_runtime: false,
             cross_flags: false,
         }
+    }
+
+    fn thinking_run(model: &str, rows: Vec<TaskRow>) -> RunLog {
+        RunLog {
+            head: head(model),
+            rows,
+        }
+    }
+
+    fn thinking_row(suite: &str, task_id: &str, counts: (u64, u64)) -> TaskRow {
+        TaskRow {
+            schema: 1,
+            run_id: "r".into(),
+            seq: 0,
+            suite: suite.into(),
+            task_id: task_id.into(),
+            transport: Transport::Buffered,
+            measure: Measure {
+                thinking_chars: counts.0,
+                answer_chars: counts.1,
+                ..empty_measure()
+            },
+            grade: Some(GradeRow::pass()),
+            codebase: None,
+            judge: None,
+            tool_loop: None,
+        }
+    }
+
+    #[test]
+    fn thinking_comparison_uses_medians_over_shared_cases_not_pooled_characters() {
+        let a = thinking_run(
+            "m1",
+            [
+                ("one", (1, 9)),
+                ("two", (500, 500)),
+                ("three", (900, 100)),
+                ("only-a", (10, 0)),
+            ]
+            .into_iter()
+            .map(|(id, counts)| thinking_row("tool_emit", id, counts))
+            .collect(),
+        );
+        let b = thinking_run(
+            "m2",
+            [
+                ("one", (0, 10)),
+                ("two", (2, 8)),
+                ("three", (4, 6)),
+                ("only-b", (10, 0)),
+            ]
+            .into_iter()
+            .map(|(id, counts)| thinking_row("tool_emit", id, counts))
+            .collect(),
+        );
+        let result = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        let share = &result.thinking[0];
+        assert_eq!((share.a, share.b), (Some(50), Some(20)));
+        assert_eq!((share.measured_pairs, share.shared_pairs), (3, 3));
+        let rendered = render_comparison(&RunPair { a: &a, b: &b }, &result);
+        assert!(rendered.contains("50% vs 20%"), "{rendered}");
+        assert!(rendered.contains("3/3 pairs"), "{rendered}");
+    }
+
+    #[test]
+    fn thinking_comparison_keeps_the_two_transports_separate() {
+        let buffered_a = thinking_row("instruction", "one", (1, 3));
+        let mut streamed_a = thinking_row("instruction", "one", (4, 1));
+        streamed_a.transport = Transport::Streamed;
+        let buffered_b = thinking_row("instruction", "one", (1, 1));
+        let mut streamed_b = thinking_row("instruction", "one", (1, 4));
+        streamed_b.transport = Transport::Streamed;
+        let a = thinking_run("m1", vec![buffered_a, streamed_a]);
+        let b = thinking_run("m2", vec![streamed_b, buffered_b]);
+        let result = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        assert_eq!(result.thinking.len(), 2);
+        let buffered = &result.thinking[0];
+        let streamed = &result.thinking[1];
+        assert_eq!(buffered.transport, Transport::Buffered);
+        assert_eq!(streamed.transport, Transport::Streamed);
+        assert_eq!((buffered.a, buffered.b), (Some(25), Some(50)));
+        assert_eq!((streamed.a, streamed.b), (Some(80), Some(20)));
+    }
+
+    #[test]
+    fn thinking_comparison_excludes_a_pair_when_either_run_lacks_counts() {
+        let mut legacy = serde_json::to_value(thinking_row("instruction", "old", (1, 1)))
+            .expect("serialize row");
+        legacy["measure"]
+            .as_object_mut()
+            .unwrap()
+            .remove("thinking_chars");
+        legacy["measure"]
+            .as_object_mut()
+            .unwrap()
+            .remove("answer_chars");
+        let a = thinking_run(
+            "m1",
+            vec![
+                serde_json::from_value(legacy).expect("older rows still load"),
+                thinking_row("instruction", "new", (1, 9)),
+                thinking_row("instruction", "other-old", (9, 1)),
+            ],
+        );
+        let b = thinking_run(
+            "m2",
+            vec![
+                thinking_row("instruction", "old", (9, 1)),
+                thinking_row("instruction", "new", (2, 8)),
+                thinking_row("instruction", "other-old", (0, 0)),
+            ],
+        );
+        let result = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        let share = &result.thinking[0];
+        assert_eq!((share.a, share.b), (Some(10), Some(20)));
+        assert_eq!((share.measured_pairs, share.shared_pairs), (1, 3));
+    }
+
+    #[test]
+    fn thinking_comparison_prints_na_when_shared_counts_are_unmeasured() {
+        let a = thinking_run("m1", vec![thinking_row("tool_emit", "one", (0, 0))]);
+        let b = thinking_run("m2", vec![thinking_row("tool_emit", "one", (5, 5))]);
+        let result = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        let share = &result.thinking[0];
+        assert_eq!((share.a, share.b), (None, None));
+        assert_eq!((share.measured_pairs, share.shared_pairs), (0, 1));
+        let rendered = render_comparison(&RunPair { a: &a, b: &b }, &result);
+        assert!(rendered.contains("N/A vs N/A"), "{rendered}");
+        assert!(rendered.contains("0/1 pairs"), "{rendered}");
+    }
+
+    #[test]
+    fn thinking_comparison_distinguishes_zero_thinking_from_unmeasured() {
+        let a = thinking_run("m1", vec![thinking_row("tool_emit", "one", (0, 10))]);
+        let b = thinking_run("m2", vec![thinking_row("tool_emit", "one", (10, 0))]);
+        let result = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        let share = &result.thinking[0];
+        assert_eq!((share.a, share.b), (Some(0), Some(100)));
+        let rendered = render_comparison(&RunPair { a: &a, b: &b }, &result);
+        assert!(rendered.contains("0% vs 100%"), "{rendered}");
+    }
+
+    #[test]
+    fn thinking_comparison_handles_maximum_character_counts() {
+        let a = thinking_run(
+            "m1",
+            vec![thinking_row("tool_emit", "one", (u64::MAX, u64::MAX))],
+        );
+        let b = thinking_run("m2", vec![thinking_row("tool_emit", "one", (u64::MAX, 0))]);
+        let result = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        assert_eq!(
+            (result.thinking[0].a, result.thinking[0].b),
+            (Some(50), Some(100))
+        );
+    }
+
+    #[test]
+    fn thinking_comparison_covers_every_suite_with_character_measurements() {
+        let suites = [
+            "throughput",
+            "tool_emit",
+            "grammar_gap",
+            "instruction",
+            "tool_loop",
+            "codebase",
+        ];
+        let rows = suites
+            .iter()
+            .map(|suite| thinking_row(suite, "one", (1, 1)))
+            .collect();
+        let a = thinking_run("m1", rows);
+        let b = thinking_run("m2", a.rows.clone());
+        let result = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        assert_eq!(result.thinking.len(), suites.len());
+        for (share, suite) in result.thinking.iter().zip(suites) {
+            assert_eq!(share.suite, suite);
+            assert_eq!((share.a, share.b), (Some(50), Some(50)));
+        }
+        let rendered = render_comparison(&RunPair { a: &a, b: &b }, &result);
+        assert!(rendered.contains("reply characters"), "{rendered}");
+    }
+
+    #[test]
+    fn thinking_comparison_names_an_empty_intersection() {
+        let a = thinking_run("m1", vec![thinking_row("tool_emit", "only-a", (1, 1))]);
+        let b = thinking_run("m2", vec![thinking_row("tool_emit", "only-b", (1, 1))]);
+        let result = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        assert!(result.thinking.is_empty());
+        let rendered = render_comparison(&RunPair { a: &a, b: &b }, &result);
+        assert!(
+            rendered.contains("thinking: no case recorded in both runs"),
+            "{rendered}"
+        );
     }
 
     /// Two llama.cpp runs that differ only on launch flags are the flag
