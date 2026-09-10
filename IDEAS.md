@@ -813,8 +813,7 @@ IMPLEMENTED 2026-09-10: opt-in `[tune] depths` overrides the legacy single
 deep metrics within the configured regression guard at every deeper depth.
 The plan estimates the whole sweep, and records/reports carry per-depth
 measurements. A failed depth prevents a win and preserves earlier evidence;
-old single-depth records still load. TODO: run real-machine deep-context
-validation before claiming a performance improvement.
+old single-depth records still load. Live acceptance is recorded below.
 Cache correction IMPLEMENTED 2026-09-10: the live check recorded on
 `feat/tune-depths` (`43f56f3`, run `20260910T050933Z-ornith-1.5-35b-a3b`)
 found that repeated prompts reused their prefix cache: retained samples
@@ -826,8 +825,24 @@ old records load with that count unknown. Any reported cache reuse prevents
 a verdict, retains the cached measurement and earlier depths, and names the
 reason. Ordinary capability benchmarks keep their existing cache policy.
 Regression tests cover the request wire, retained cache evidence, and old
-records. TODO: repeat live fresh-prefill acceptance before claiming a
-performance improvement.
+records.
+Live acceptance PASSED 2026-09-10 on `c9ff5d7`: Ornith Q8_0 revision
+`fbbaed45c2f0`, engine `0f194b907`, ctx 262144. The 4K smoke record is
+`tune/20260910T225924Z-ornith-1.5-35b-a3b.json`; the `[4096, 65536]`
+comparison is `tune/20260910T230114Z-ornith-1.5-35b-a3b.json` (727 seconds).
+Both used five repetitions per depth, retaining four after each warmup drop.
+All 25 probes had `cache_n = 0`; server logs confirmed every repetition
+evaluated the full 4,127 or 65,567 prompt tokens. Decode medians at 4K/64K
+were 81.4/57.8 tok/s for the existing `mtp:1` baseline and 70.0/54.8 for
+drafting off; prefill medians were 2164/972 and 1862/1003 tok/s respectively.
+At the existing 5% comparison threshold and 20% guard, off lost on shallow
+decode; both deep guards passed. The recorded "defaults won" verdict matched
+an independent audit of medians, percentile ranges, and guard calculations
+against the server logs. This run did not exercise a deep veto or find new
+winning flags. Config was restored byte-for-byte, the registry was unchanged,
+and the server returned to its original stopped state. Local evidence,
+including logs, the verification JSON, and restoration hashes, is under
+`reports/fresh-prefill-acceptance-20260910T225909Z/` (ignored).
 Proposed 2026-09-06 — status: IMPLEMENTED 2026-09-10 (approved 2026-09-09)
 
 ## Reasoning effort is a launch flag nobody stamps, and a cost nobody measures (2026-09-06)
