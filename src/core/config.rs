@@ -206,8 +206,11 @@ impl Default for BenchSection {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TuneSection {
-    /// Probe prompt depth, in tokens, used to measure every candidate.
+    /// Legacy single probe depth, used when `depths` is absent.
     pub depth: u32,
+    /// Ascending probe depths; overrides the legacy `depth` when present.
+    #[serde(deserialize_with = "tune_depths")]
+    pub depths: Option<Vec<u32>>,
     /// Stage spec: `off`, `mtp:<n>` — llama.cpp's native MTP draft head at
     /// draft length `n` — or `ngram:<type>`, one of the engine's five
     /// history-based drafters. Validated at plan time, not here.
@@ -232,6 +235,7 @@ impl Default for TuneSection {
     fn default() -> Self {
         Self {
             depth: 4096,
+            depths: None,
             spec_drafts: ["off", "mtp:1", "mtp:2", "mtp:3"]
                 .map(String::from)
                 .to_vec(),
@@ -242,6 +246,24 @@ impl Default for TuneSection {
             guard_tolerance_pct: 15,
         }
     }
+}
+
+impl TuneSection {
+    #[must_use]
+    pub fn probe_depths(&self) -> Vec<u32> {
+        self.depths.clone().unwrap_or_else(|| vec![self.depth])
+    }
+}
+
+fn tune_depths<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Option<Vec<u32>>, D::Error> {
+    let depths = Vec::<u32>::deserialize(reader)?;
+    if depths.is_empty() || depths.contains(&0) || depths.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(serde::de::Error::custom(
+            "[tune] depths must be a nonempty, strictly increasing list of positive token counts",
+        ));
+    }
+    Ok(Some(depths))
 }
 
 /// Resolved runtime configuration: root directory + file settings.
@@ -574,6 +596,28 @@ mod tests {
     }
 
     #[test]
+    fn tune_depths_preserve_legacy_settings_and_allow_an_explicit_sweep() {
+        let default: super::FileConfig = toml::from_str("").expect("defaults");
+        assert_eq!(default.tune.probe_depths(), vec![4096]);
+        let legacy: super::FileConfig =
+            toml::from_str("[tune]\ndepth = 2048\n").expect("legacy depth");
+        assert_eq!(legacy.tune.probe_depths(), vec![2048]);
+        let multiple: super::FileConfig =
+            toml::from_str("[tune]\ndepth = 2048\ndepths = [4096, 65536]\n")
+                .expect("explicit depths override the legacy setting");
+        assert_eq!(multiple.tune.probe_depths(), vec![4096, 65536]);
+    }
+
+    #[test]
+    fn tune_depths_reject_empty_zero_duplicate_and_descending_lists() {
+        for depths in ["[]", "[0]", "[4096, 4096]", "[65536, 4096]"] {
+            let text = format!("[tune]\ndepths = {depths}\n");
+            let error = toml::from_str::<super::FileConfig>(&text).expect_err("invalid depths");
+            assert!(error.to_string().contains("depths"), "{error}");
+        }
+    }
+
+    #[test]
     fn the_tune_section_defaults_and_parses() {
         let cfg: super::FileConfig = toml::from_str("").expect("defaults");
         assert_eq!(cfg.tune.depth, 4096);
@@ -595,7 +639,7 @@ mod tests {
             "0 restores the strict guard"
         );
         assert!(
-            toml::from_str::<super::FileConfig>("[tune]\ndepths = [1]\n").is_err(),
+            toml::from_str::<super::FileConfig>("[tune]\ndepthz = [1]\n").is_err(),
             "unknown keys are refused"
         );
         let root = std::path::Path::new("/r");

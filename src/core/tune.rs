@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::bench::sweep::DepthResult;
+use crate::core::bench::sweep::{self, DepthResult, ProbeExec, SweepPlan};
 use crate::core::clock::utc_compact_now;
 use crate::core::config::TuneSection;
 use crate::core::machine::pmset_therm;
@@ -441,6 +441,8 @@ pub fn stages(requested: Option<&[String]>) -> Result<Vec<Stage>, ChekovError> {
 
 /// One depth's measurement, promoted out of a raw `DepthResult` once it has
 /// enough samples to be judged (spec §5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Measured {
     pub decode: Summary,
     pub prefill: Summary,
@@ -449,6 +451,13 @@ pub struct Measured {
     /// included — zero-both when nothing drafted (n-gram design §13).
     pub draft_n: u64,
     pub draft_n_accepted: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DepthMeasurement {
+    pub depth: u32,
+    pub measured: Measured,
 }
 
 impl Measured {
@@ -462,9 +471,23 @@ impl Measured {
 
 /// What a depth's raw result becomes once classified (spec §5).
 pub enum Outcome {
-    Measured(Measured),
+    Measured(Vec<DepthMeasurement>),
+    Incomplete {
+        measurements: Vec<DepthMeasurement>,
+        reason: String,
+    },
     Degenerate(String),
     Skipped(String),
+}
+
+impl Outcome {
+    #[must_use]
+    pub fn measurements(&self) -> &[DepthMeasurement] {
+        match self {
+            Self::Measured(measurements) | Self::Incomplete { measurements, .. } => measurements,
+            Self::Degenerate(_) | Self::Skipped(_) => &[],
+        }
+    }
 }
 
 /// A trial too thin to trust: too few samples to summarise after the warmup
@@ -480,13 +503,71 @@ pub fn classify(result: &DepthResult, depth: u32) -> Outcome {
             result.prompt_n
         ));
     }
-    Outcome::Measured(Measured {
-        decode: decode.clone(),
-        prefill: prefill.clone(),
-        prompt_n: result.prompt_n,
-        draft_n: result.draft_n,
-        draft_n_accepted: result.draft_n_accepted,
-    })
+    Outcome::Measured(vec![DepthMeasurement {
+        depth,
+        measured: Measured {
+            decode: decode.clone(),
+            prefill: prefill.clone(),
+            prompt_n: result.prompt_n,
+            draft_n: result.draft_n,
+            draft_n_accepted: result.draft_n_accepted,
+        },
+    }])
+}
+
+pub fn validate_probe(plan: &SweepPlan, ctx_size: u32) -> Result<(), String> {
+    if plan.depths.is_empty()
+        || plan.depths.contains(&0)
+        || plan.depths.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err("set [tune] depths to strictly increasing positive token counts".into());
+    }
+    if plan.repetitions < 3 {
+        return Err(
+            "set [bench] repetitions to at least 3: one warmup and two measured samples per depth"
+                .into(),
+        );
+    }
+    if plan.max_tokens == 0 {
+        return Err("set [bench] max_tokens to a positive completion budget".into());
+    }
+    if let Some(depth) = plan
+        .depths
+        .iter()
+        .find(|&&depth| u64::from(depth) + u64::from(plan.max_tokens) > u64::from(ctx_size))
+    {
+        return Err(format!(
+            "probe depth {depth} plus {} generated tokens exceeds ctx {ctx_size}; \
+             reduce [tune] depths or increase this model's ctx_size",
+            plan.max_tokens
+        ));
+    }
+    Ok(())
+}
+
+pub fn measure_depths(plan: &SweepPlan, exec: &mut ProbeExec) -> Outcome {
+    if plan.depths.is_empty() {
+        return Outcome::Degenerate("no probe depths; configure [tune] depths".into());
+    }
+    let mut measurements = Vec::new();
+    for &depth in &plan.depths {
+        let outcome = sweep::measure_depth(plan, depth, exec).map_or_else(
+            |error| Outcome::Degenerate(error.to_string()),
+            |result| classify(&result, depth),
+        );
+        match outcome {
+            Outcome::Measured(mut measured) => measurements.append(&mut measured),
+            Outcome::Degenerate(reason)
+            | Outcome::Skipped(reason)
+            | Outcome::Incomplete { reason, .. } => {
+                return Outcome::Incomplete {
+                    measurements,
+                    reason: format!("depth {depth}: {reason}"),
+                };
+            }
+        }
+    }
+    Outcome::Measured(measurements)
 }
 
 /// Whether a candidate replaces the incumbent, and the report phrase either
@@ -589,6 +670,97 @@ pub fn judge(candidate: &Measured, incumbent: &Measured, criteria: JudgeCriteria
     Verdict { wins, phrase: text }
 }
 
+#[must_use]
+pub fn judge_depths(
+    candidate: &[DepthMeasurement],
+    incumbent: &[DepthMeasurement],
+    criteria: JudgeCriteria,
+) -> Verdict {
+    let Some((first, baseline)) = candidate.first().zip(incumbent.first()) else {
+        return depth_refusal("missing probe depths");
+    };
+    if candidate.len() != incumbent.len()
+        || candidate
+            .iter()
+            .zip(incumbent)
+            .any(|(a, b)| a.depth != b.depth)
+    {
+        return depth_refusal("probe depths differ");
+    }
+    let primary = judge(&first.measured, &baseline.measured, criteria);
+    if candidate.len() == 1 {
+        return primary;
+    }
+    let shallow = primary
+        .phrase
+        .trim_end_matches(" — new incumbent")
+        .trim_end_matches(" — incumbent kept");
+    let mut notes = vec![format!("depth {}: {shallow}", first.depth)];
+    let mut wins = primary.wins;
+    for pair in candidate.iter().zip(incumbent).skip(1) {
+        let (passed, note) = guard_depth(pair, &criteria);
+        wins &= passed;
+        notes.push(note);
+    }
+    let decision = if wins {
+        "new incumbent"
+    } else {
+        "incumbent kept"
+    };
+    Verdict {
+        wins,
+        phrase: format!("{} — {decision}", notes.join("; ")),
+    }
+}
+
+fn depth_refusal(reason: &str) -> Verdict {
+    Verdict {
+        wins: false,
+        phrase: format!("{reason} — incumbent kept"),
+    }
+}
+
+fn guard_depth(
+    pair: (&DepthMeasurement, &DepthMeasurement),
+    criteria: &JudgeCriteria,
+) -> (bool, String) {
+    let checks: Vec<_> = [Metric::Decode, Metric::Prefill]
+        .into_iter()
+        .map(|metric| {
+            let summaries = (
+                pair.0.measured.by_metric(metric),
+                pair.1.measured.by_metric(metric),
+            );
+            guard_metric(summaries, metric, criteria)
+        })
+        .collect();
+    let passed = checks.iter().all(|(passed, _)| *passed);
+    let notes: Vec<_> = checks.into_iter().map(|(_, note)| note).collect();
+    (
+        passed,
+        format!("depth {}: {}", pair.0.depth, notes.join(", ")),
+    )
+}
+
+fn guard_metric(
+    pair: (&Summary, &Summary),
+    metric: Metric,
+    criteria: &JudgeCriteria,
+) -> (bool, String) {
+    let label = metric.label();
+    if compare(pair.0, pair.1, criteria.significance_pct) != Comparison::Slower {
+        return (true, format!("{label} not slower"));
+    }
+    let delta = delta_pct(pair.0.median, pair.1.median);
+    let tolerance = criteria.guard_tolerance_pct;
+    let passed = -delta <= tolerance;
+    let relation = if passed { "within" } else { "beyond" };
+    (
+        passed,
+        format!("{label} {delta:+.0}% is {relation} the {tolerance:.0}% guard"),
+    )
+}
+
 /// `candidate` relative to `incumbent` in percent, negative for a loss; an
 /// incumbent median of zero has no percentage and reads as no loss.
 fn delta_pct(candidate: f64, incumbent: f64) -> f64 {
@@ -601,15 +773,16 @@ fn delta_pct(candidate: f64, incumbent: f64) -> f64 {
 /// The stage's winning candidate: the highest primary median among those
 /// that beat the incumbent, ties kept at the earlier candidate.
 #[must_use]
-pub fn pick_winner<'a>(
-    scored: &'a [(Candidate, Measured, Verdict)],
-) -> Option<&'a (Candidate, Measured, Verdict)> {
-    let mut best: Option<(&'a (Candidate, Measured, Verdict), f64)> = None;
+pub fn pick_winner(scored: &[ScoredTrial]) -> Option<&ScoredTrial> {
+    let mut best: Option<(&ScoredTrial, f64)> = None;
     for entry @ (candidate, measured, verdict) in scored {
         if !verdict.wins {
             continue;
         }
-        let median = measured.by_metric(candidate.stage.metric()).median;
+        let Some(shallow) = measured.first() else {
+            continue;
+        };
+        let median = shallow.measured.by_metric(candidate.stage.metric()).median;
         match best {
             Some((_, best_median)) if median <= best_median => {}
             _ => best = Some((entry, median)),
@@ -617,6 +790,8 @@ pub fn pick_winner<'a>(
     }
     best.map(|(entry, _)| entry)
 }
+
+pub type ScoredTrial = (Candidate, Vec<DepthMeasurement>, Verdict);
 
 /// The two metric cells of a stage-tuning report line (spec §9).
 pub(crate) fn measured_cells(measured: &Measured) -> String {
@@ -629,6 +804,21 @@ pub(crate) fn measured_cells(measured: &Measured) -> String {
         measured.prefill.p10,
         measured.prefill.p90,
     )
+}
+
+pub(crate) fn depth_lines(label: &CandidateLabel, depths: &[DepthMeasurement]) -> String {
+    depths
+        .iter()
+        .map(|entry| {
+            format!(
+                "\n    depth {}: {}{}",
+                entry.depth,
+                measured_cells(&entry.measured),
+                accept_note(label, &entry.measured)
+            )
+        })
+        .collect::<Vec<_>>()
+        .concat()
 }
 
 /// The dirty-clock note appended to a report line, or empty when the clock
@@ -684,13 +874,28 @@ pub fn stage_line(label: &CandidateLabel, outcome: &Outcome, context: &LineConte
     let stage = label.stage.label();
     let value = label.value;
     match outcome {
-        Outcome::Measured(measured) => {
-            let cells = measured_cells(measured);
+        Outcome::Measured(depths) => {
+            let Some(first) = depths.first() else {
+                return format!("  {stage:<10} {value:<8} degenerate: no probe depths");
+            };
+            let cells = measured_cells(&first.measured);
             let phrase = context.verdict.map_or("", |v| v.phrase.as_str());
             let note = dirty_note(context.dirty);
-            let accept = accept_note(label, measured);
-            format!("  {stage:<10} {value:<8} {cells}   {phrase}{note}{accept}")
+            let accept = accept_note(label, &first.measured);
+            let extra = if depths.len() > 1 {
+                depth_lines(label, depths)
+            } else {
+                String::new()
+            };
+            format!("  {stage:<10} {value:<8} {cells}   {phrase}{note}{accept}{extra}")
         }
+        Outcome::Incomplete {
+            measurements,
+            reason,
+        } => format!(
+            "  {stage:<10} {value:<8} degenerate: {reason}{}",
+            depth_lines(label, measurements)
+        ),
         Outcome::Skipped(reason) => format!("  {stage:<10} {value:<8} skipped: {reason}"),
         Outcome::Degenerate(reason) => format!("  {stage:<10} {value:<8} degenerate: {reason}"),
     }
@@ -741,6 +946,8 @@ pub fn thermal_note(before: Option<u32>, after: Option<u32>) -> Option<u32> {
 #[serde(deny_unknown_fields)]
 pub struct Probe {
     pub depth: u32,
+    #[serde(default)]
+    pub depths: Vec<u32>,
     pub repetitions: u32,
     pub max_tokens: u32,
 }
@@ -760,6 +967,8 @@ pub struct Trial {
     pub decode: Option<Summary>,
     pub prefill: Option<Summary>,
     pub prompt_n: Option<u64>,
+    #[serde(default)]
+    pub depths: Vec<DepthMeasurement>,
     /// Draft tokens proposed and accepted over the probe's repetitions
     /// (n-gram design §13). Records from before the fields load as zero-both.
     #[serde(default)]
@@ -1025,6 +1234,231 @@ mod tests {
         }
     }
 
+    fn single_depth(measured: super::Measured) -> Vec<super::DepthMeasurement> {
+        vec![super::DepthMeasurement {
+            depth: 4096,
+            measured,
+        }]
+    }
+
+    fn depth_measurements(values: &[(u32, f64, f64)]) -> Vec<super::DepthMeasurement> {
+        values
+            .iter()
+            .map(|&(depth, decode, prefill)| super::DepthMeasurement {
+                depth,
+                measured: super::Measured {
+                    prompt_n: u64::from(depth),
+                    ..measured(decode, prefill)
+                },
+            })
+            .collect()
+    }
+
+    fn probe_artifact(depth: u32) -> crate::core::bench::runner::ProbeArtifact {
+        crate::core::bench::runner::ProbeArtifact {
+            anthropic_body: "{}".into(),
+            timings: crate::core::bench::runner::Timings {
+                prompt_n: u64::from(depth),
+                prompt_per_second: 300.0,
+                predicted_n: 32,
+                predicted_per_second: 50.0,
+                cache_n: 0,
+                draft_n: 10,
+                draft_n_accepted: 6,
+                thinking_chars: 0,
+                answer_chars: 32,
+            },
+        }
+    }
+
+    #[test]
+    fn multi_depth_tune_measures_full_repetitions_and_drops_each_depths_warmup() {
+        let plan = super::SweepPlan {
+            depths: vec![4096, 65536],
+            repetitions: 5,
+            max_tokens: 32,
+        };
+        let mut requests = Vec::new();
+        let outcome = super::measure_depths(&plan, &mut |request| {
+            let depth = if requests.len() < 5 { 4096 } else { 65536 };
+            requests.push(request.body.len());
+            Ok(probe_artifact(depth))
+        });
+        let super::Outcome::Measured(depths) = outcome else {
+            panic!("both depths measured")
+        };
+        assert_eq!(requests.len(), 10);
+        assert!(
+            requests[5] > requests[0] * 8,
+            "the deep request contains the deeper prompt"
+        );
+        assert_eq!(
+            depths.iter().map(|entry| entry.depth).collect::<Vec<_>>(),
+            plan.depths
+        );
+        for entry in depths {
+            assert_eq!((entry.measured.decode.n, entry.measured.prefill.n), (4, 4));
+            assert_eq!(
+                (
+                    entry.measured.decode.warmup_dropped,
+                    entry.measured.prefill.warmup_dropped
+                ),
+                (1, 1)
+            );
+            assert_eq!(
+                (entry.measured.draft_n, entry.measured.draft_n_accepted),
+                (50, 30)
+            );
+        }
+    }
+
+    #[test]
+    fn multi_depth_tune_preserves_shallow_results_when_a_deep_probe_fails() {
+        let plan = super::SweepPlan {
+            depths: vec![4096, 65536],
+            repetitions: 5,
+            max_tokens: 32,
+        };
+        let mut calls = 0;
+        let outcome = super::measure_depths(&plan, &mut |_| {
+            calls += 1;
+            if calls == 6 {
+                return Err(crate::error::ChekovError::TuneBaselineDegenerate {
+                    name: "fake".into(),
+                    reason: "upstream stopped".into(),
+                });
+            }
+            Ok(probe_artifact(4096))
+        });
+        assert_eq!(calls, 6);
+        let super::Outcome::Incomplete {
+            measurements,
+            reason,
+        } = outcome
+        else {
+            panic!("a partial run cannot become a measured candidate")
+        };
+        assert_eq!(measurements.len(), 1);
+        assert_eq!(measurements[0].measured.decode.n, 4);
+        assert!(
+            reason.contains("65536") && reason.contains("upstream stopped"),
+            "{reason}"
+        );
+    }
+
+    fn depth_verdict(values: &[(u32, f64, f64)], tolerance: f64) -> super::Verdict {
+        let incumbent = depth_measurements(&[(4096, 100.0, 400.0), (65536, 50.0, 200.0)]);
+        super::judge_depths(
+            &depth_measurements(values),
+            &incumbent,
+            super::JudgeCriteria {
+                stage: super::Stage::Fa,
+                significance_pct: 5.0,
+                guard_tolerance_pct: tolerance,
+            },
+        )
+    }
+
+    #[test]
+    fn multi_depth_tune_rejects_a_shallow_win_with_a_deep_decode_regression() {
+        let verdict = depth_verdict(&[(4096, 120.0, 400.0), (65536, 30.0, 200.0)], 15.0);
+        assert!(!verdict.wins);
+        assert!(verdict.phrase.contains("65536"), "{}", verdict.phrase);
+        assert!(verdict.phrase.contains("decode -40%"), "{}", verdict.phrase);
+        assert!(
+            !verdict.phrase.contains("new incumbent"),
+            "{}",
+            verdict.phrase
+        );
+    }
+
+    #[test]
+    fn multi_depth_tune_guards_both_metrics_at_depth() {
+        let verdict = depth_verdict(&[(4096, 120.0, 400.0), (65536, 50.0, 140.0)], 15.0);
+        assert!(!verdict.wins);
+        assert!(
+            verdict.phrase.contains("prefill -30%"),
+            "{}",
+            verdict.phrase
+        );
+    }
+
+    #[test]
+    fn multi_depth_tune_accepts_a_deep_loss_only_within_the_configured_guard() {
+        let values = [(4096, 120.0, 400.0), (65536, 45.0, 180.0)];
+        let tolerated = depth_verdict(&values, 15.0);
+        assert!(tolerated.wins, "{}", tolerated.phrase);
+        assert!(tolerated.phrase.contains("4096"), "{}", tolerated.phrase);
+        assert!(tolerated.phrase.contains("65536"), "{}", tolerated.phrase);
+        assert!(tolerated.phrase.contains("within"), "{}", tolerated.phrase);
+        assert!(!depth_verdict(&values, 0.0).wins);
+    }
+
+    #[test]
+    fn multi_depth_tune_requires_a_shallow_win_even_when_the_deep_probe_wins() {
+        let verdict = depth_verdict(&[(4096, 100.0, 400.0), (65536, 80.0, 250.0)], 15.0);
+        assert!(!verdict.wins);
+        assert!(verdict.phrase.contains("no significant difference"));
+    }
+
+    #[test]
+    fn multi_depth_tune_refuses_missing_mismatched_or_empty_depth_sets() {
+        for values in [
+            vec![(4096, 120.0, 400.0)],
+            vec![(4096, 120.0, 400.0), (32768, 50.0, 200.0)],
+            vec![],
+        ] {
+            let verdict = depth_verdict(&values, 15.0);
+            assert!(!verdict.wins);
+            assert!(verdict.phrase.contains("depth"), "{}", verdict.phrase);
+        }
+    }
+
+    #[test]
+    fn multi_depth_tune_checks_every_guard_depth() {
+        let incumbent = depth_measurements(&[
+            (4096, 100.0, 400.0),
+            (32768, 70.0, 300.0),
+            (65536, 50.0, 200.0),
+        ]);
+        let candidate = depth_measurements(&[
+            (4096, 120.0, 400.0),
+            (32768, 70.0, 300.0),
+            (65536, 20.0, 200.0),
+        ]);
+        let verdict = super::judge_depths(
+            &candidate,
+            &incumbent,
+            super::JudgeCriteria {
+                stage: super::Stage::Fa,
+                significance_pct: 5.0,
+                guard_tolerance_pct: 15.0,
+            },
+        );
+        assert!(!verdict.wins);
+        assert!(verdict.phrase.contains("65536"), "{}", verdict.phrase);
+    }
+
+    #[test]
+    fn multi_depth_tune_selects_only_a_winner_that_passes_the_deep_guard() {
+        let mut trials = Vec::new();
+        for (value, shallow, deep) in [("safe", 120.0, 50.0), ("unsafe", 150.0, 20.0)] {
+            let values = [(4096, shallow, 400.0), (65536, deep, 200.0)];
+            trials.push((
+                super::Candidate {
+                    stage: super::Stage::Fa,
+                    value: value.into(),
+                    argv: vec![],
+                },
+                depth_measurements(&values),
+                depth_verdict(&values, 15.0),
+            ));
+        }
+        let winner = super::pick_winner(&trials).expect("the safe candidate wins");
+        assert_eq!(winner.0.value, "safe");
+        assert!((winner.1[1].measured.decode.median - 50.0).abs() < f64::EPSILON);
+    }
+
     #[test]
     fn a_candidate_wins_its_stage_only_on_its_own_metric_without_losing_the_other() {
         let inc = measured(31.2, 402.0);
@@ -1134,10 +1568,10 @@ mod tests {
             phrase: "slower on prefill — incumbent kept".into(),
         };
         let scored = vec![
-            (cand("512"), measured(31.0, 288.0), lose),
-            (cand("1024"), measured(31.0, 466.0), win("w")),
-            (cand("4096"), measured(31.0, 466.0), win("w")),
-            (cand("2048"), measured(31.0, 431.0), win("w")),
+            (cand("512"), single_depth(measured(31.0, 288.0)), lose),
+            (cand("1024"), single_depth(measured(31.0, 466.0)), win("w")),
+            (cand("4096"), single_depth(measured(31.0, 466.0)), win("w")),
+            (cand("2048"), single_depth(measured(31.0, 431.0)), win("w")),
         ];
         let winner = super::pick_winner(&scored).expect("two winners");
         assert_eq!(winner.0.value, "1024");
@@ -1194,7 +1628,7 @@ mod tests {
                 stage: super::Stage::Ubatch,
                 value: "1024",
             },
-            &super::Outcome::Measured(m),
+            &super::Outcome::Measured(single_depth(m)),
             &super::LineContext {
                 verdict: Some(&v),
                 dirty: Some(87),
@@ -1292,6 +1726,7 @@ mod tests {
             chekov_version: "0.1.0".into(),
             probe: super::Probe {
                 depth: 4096,
+                depths: Vec::new(),
                 repetitions: 5,
                 max_tokens: 128,
             },
@@ -1307,6 +1742,7 @@ mod tests {
                 decode: Some(summary(31.2, 0.3)),
                 prefill: Some(summary(402.0, 3.0)),
                 prompt_n: Some(4101),
+                depths: Vec::new(),
                 draft_n: 0,
                 draft_n_accepted: 0,
                 speed_limit_pct: [None, Some(87)],
@@ -1636,7 +2072,7 @@ mod tests {
                 stage: super::Stage::Fa,
                 value: "off",
             },
-            &super::Outcome::Measured(drafted),
+            &super::Outcome::Measured(single_depth(drafted)),
             &quiet(),
         );
         assert!(
@@ -1647,7 +2083,7 @@ mod tests {
 
     #[test]
     fn no_drafts_is_said_only_on_a_spec_candidate_that_drafted_nothing() {
-        let dry = || super::Outcome::Measured(measured(60.0, 140.0));
+        let dry = || super::Outcome::Measured(single_depth(measured(60.0, 140.0)));
         let line = |stage, value| {
             super::stage_line(&super::CandidateLabel { stage, value }, &dry(), &quiet())
         };
@@ -1669,7 +2105,10 @@ mod tests {
         let super::Outcome::Measured(m) = super::classify(&drafted_result(300, 189), 4096) else {
             panic!("measured");
         };
-        assert_eq!((m.draft_n, m.draft_n_accepted), (300, 189));
+        assert_eq!(
+            (m[0].measured.draft_n, m[0].measured.draft_n_accepted),
+            (300, 189)
+        );
         let record = sample_record(argv(&[]), crate::core::bench::stamp::launch_flags(&[]));
         let json = serde_json::to_string(&record).expect("ser");
         assert!(json.contains("\"draft_n\":0,"), "{json}");
