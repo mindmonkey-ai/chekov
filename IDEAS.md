@@ -775,13 +775,14 @@ codebase check is the confirming measurement; and chaining
 quality question: every draft is verified by the target, so greedy output
 is unchanged.
 Design APPROVED 2026-09-09 (`docs/superpowers/specs/2026-09-09-ngram-spec-design.md`,
-binding): `ngram:<type>` as a third `spec_drafts` spelling, the
-three skips narrowed (head gate on `mtp:` only, engine gate on the type name,
-foreign gate on draft-file types, chains and a static cache), the acceptance
-clause on every speculative stage line, and a closing caution that the
-probe is a poor instrument for a drafter that needs repetition. Live
-acceptance needs the daily driver stopped — same window as the 9B spread.
-Proposed 2026-09-06 — status: APPROVED 2026-09-09
+binding; §13 amended after a six-agent seam map and critique). SHIPPED
+2026-09-09: `ngram:<type>` as a third spelling; per-candidate skips (the head
+gates `mtp:` only, the engine's type list by whole token, `ngram-mod` and
+`ngram-cache` by name because their draft table outlives the request and the
+repeated probe would replay the first reply); the acceptance clause on every
+drafting trial; the closing caution that the three lookup types cannot draft
+on the probe. Live acceptance owed to the stopped-driver window.
+Proposed 2026-09-06 — status: SHIPPED 2026-09-09
 
 ## tune judges at 4096 tokens; the workload lives at 50–165K (2026-09-06)
 `[tune] depth = 4096` is the only depth any stage measures, and a flag's

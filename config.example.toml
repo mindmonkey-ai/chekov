@@ -50,7 +50,7 @@ tool_loop_max_turns = 8 # --suite agentic: turn budget per tool_loop case; still
 
 [tune]                         # `chekov tune` sweep
 depth = 4096                   # probe prompt depth in tokens
-spec_drafts = ["off", "mtp:1", "mtp:2", "mtp:3"]   # stage spec: off, or draft-mtp at that draft length
+spec_drafts = ["off", "mtp:1", "mtp:2", "mtp:3"]   # stage spec: off, mtp:<n> (draft-mtp at that length), or ngram:<type> — the engine's five history-based drafters; opt in per machine
 flash_attn = ["on", "off"]                # stage fa: --flash-attn candidates
 cache_types = ["q8_0", "f16"]             # stage kv: --cache-type-k/-v candidates
 batch_sizes = [512, 1024, 2048, 4096]     # stage batch: --batch-size candidates

@@ -60,6 +60,8 @@ It runs first because the four existing stages tune the kernel and batch
 geometry around whatever decode path is active, and the head changes that
 path. `--stages` still lets a reader run it alone or last.
 
+Status 2026-09-09: the grammar gains a third spelling, `ngram:<type>` — see `docs/superpowers/specs/2026-09-09-ngram-spec-design.md`.
+
 **Candidate grammar.** Each `spec_drafts` entry is `off` or `mtp:<n>` with
 `n ≥ 1`. Anything else is `TuneBadSpecCandidate { value }` at plan time —
 before the confirm gate, before any launch — because the value has to be
@@ -108,6 +110,8 @@ at. `pick_winner`, ties, `defaults won`, the record and `--apply` all apply
 as written in the tune spec.
 
 ## 4. Skips — the stage is honest about what it cannot measure
+
+Status 2026-09-09: the three skips became per-candidate gates, plus a fourth for the two n-gram types that keep a draft table across requests — see the n-gram design §4 and §13.
 
 Three pre-launch skips, each recorded as `Outcome::Skipped(reason)` per
 candidate exactly like `kv_skip` and `fa_skip` (before any spawn; costs

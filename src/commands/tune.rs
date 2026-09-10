@@ -625,6 +625,7 @@ fn report(record: &Record, lines: &[String], path: &Path) -> String {
     parts.extend(lines.iter().map(|line| format!("{line}\n")));
     parts.push(verdict_block(record));
     parts.push(format!("  {:<10} {written}\n", "record"));
+    parts.extend(ngram_caution(record));
     if record.winner.is_some() {
         let model = &record.model;
         parts.push(format!(
@@ -633,6 +634,22 @@ fn report(record: &Record, lines: &[String], path: &Path) -> String {
         ));
     }
     parts.concat()
+}
+
+/// The closing caution when an n-gram candidate was measured: the probe is
+/// a poor instrument for a drafter that needs repetition (n-gram design §5).
+fn ngram_caution(record: &Record) -> Option<String> {
+    let ran = record.trials.iter().any(|t| {
+        t.stage == "spec"
+            && t.outcome == "measured"
+            && t.value.as_deref().is_some_and(|v| v.starts_with("ngram:"))
+    });
+    ran.then(|| {
+        "  n-gram drafting depends on repetition in the workload; the probe is a poor \
+         instrument for it — confirm with a codebase bench under the candidate's flags and \
+         compare --cross-flags\n"
+            .to_owned()
+    })
 }
 
 /// The record row for one trial (spec §8's shape).
@@ -1375,6 +1392,30 @@ mod tests {
         assert!(line.contains("acceptance 25% (10 of 40 drafted)"), "{line}");
         let plain = measured_trial("baseline", None, argv(&[]));
         assert!(!super::baseline_line(&plain).contains("drafts"));
+    }
+
+    #[test]
+    fn the_report_closes_with_the_ngram_caution_only_when_an_ngram_candidate_was_measured() {
+        let ngram = measured_trial(
+            "spec",
+            Some("ngram:ngram-simple"),
+            argv(&["--spec-type", "ngram-simple"]),
+        );
+        let baseline = || measured_trial("baseline", None, argv(&[]));
+        let record = record_of(vec![baseline(), ngram], None);
+        let out = super::report(&record, &[], Path::new("tune/x-m.json"));
+        assert!(
+            out.contains(
+                "  n-gram drafting depends on repetition in the workload; the probe is a poor \
+                 instrument for it — confirm with a codebase bench under the candidate's flags \
+                 and compare --cross-flags\n"
+            ),
+            "{out}"
+        );
+        let mtp = measured_trial("spec", Some("mtp:1"), argv(&["--spec-type", "draft-mtp"]));
+        let record = record_of(vec![baseline(), mtp], None);
+        let out = super::report(&record, &[], Path::new("tune/x-m.json"));
+        assert!(!out.contains("n-gram drafting"), "{out}");
     }
 
     #[test]
