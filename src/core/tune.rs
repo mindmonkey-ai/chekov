@@ -719,8 +719,8 @@ pub fn write_record(path: &Path, record: &Record) -> Result<(), ChekovError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Candidate, Flag, Metric, SpecDraft, Stage, candidates, rewrite, spec_values, stages, strip,
-        value_of,
+        Candidate, Flag, Metric, NgramType, SpecDraft, Stage, candidates, rewrite, spec_values,
+        stages, strip, value_of,
     };
     use crate::core::config::TuneSection;
     use crate::error::ChekovError;
@@ -1404,5 +1404,87 @@ mod tests {
             argv(&["--temp", "0.6", "--flash-attn", "on"]),
             "nothing to strip, nothing stripped"
         );
+    }
+
+    #[test]
+    fn the_spec_grammar_accepts_the_five_ngram_types_and_refuses_the_rest() {
+        for (spelling, expected) in [
+            ("ngram:ngram-simple", NgramType::Simple),
+            ("ngram:ngram-map-k", NgramType::MapK),
+            ("ngram:ngram-map-k4v", NgramType::MapK4v),
+            ("ngram:ngram-mod", NgramType::Mod),
+            ("ngram:ngram-cache", NgramType::Cache),
+        ] {
+            let parsed = SpecDraft::parse(spelling).expect(spelling);
+            assert_eq!(parsed, SpecDraft::Ngram(expected));
+            assert_eq!(parsed.label(), spelling, "the label is the spelling");
+            assert_eq!(expected.label(), &spelling["ngram:".len()..]);
+        }
+        for bad in [
+            "ngram:",
+            "ngram:mtp",
+            "ngram:ngram-simple,ngram-mod",
+            "ngram:ngram-map-k4",
+        ] {
+            let err = SpecDraft::parse(bad).expect_err(bad);
+            assert!(
+                matches!(&err, ChekovError::TuneBadSpecCandidate { value } if value == bad),
+                "{bad}: {err}"
+            );
+        }
+        assert!(NgramType::Mod.keeps_memory() && NgramType::Cache.keeps_memory());
+        assert!(!NgramType::Simple.keeps_memory());
+        assert_eq!(NgramType::ALL.len(), 5);
+    }
+
+    #[test]
+    fn an_ngram_candidate_writes_the_type_and_strips_the_draft_length_only() {
+        let cfg = TuneSection {
+            spec_drafts: vec!["off".into(), "ngram:ngram-mod".into()],
+            ..TuneSection::default()
+        };
+        let drafted = argv(&[
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "3",
+            "--spec-ngram-mod-n-match",
+            "24",
+        ]);
+        let spec = candidates(Stage::Spec, &drafted, &cfg);
+        let values: Vec<&str> = spec.iter().map(|c| c.value.as_str()).collect();
+        assert_eq!(values, vec!["off", "ngram:ngram-mod"]);
+        assert_eq!(
+            spec[1].argv,
+            argv(&["--spec-type", "ngram-mod", "--spec-ngram-mod-n-match", "24"]),
+            "the type is rewritten in place, the length stripped, the engine's own knob kept"
+        );
+    }
+
+    #[test]
+    fn apply_strips_a_stale_draft_length_behind_an_ngram_winner() {
+        let current = argv(&[
+            "--temp",
+            "0.6",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "3",
+        ]);
+        let ngram_won = argv(&["--temp", "0.6", "--spec-type", "ngram-mod"]);
+        assert_eq!(
+            super::applied_extra_flags(&current, &ngram_won),
+            argv(&["--temp", "0.6", "--spec-type", "ngram-mod"]),
+            "a winner without the length lost it in the stage; the current flags lose it too"
+        );
+        let mtp_won = argv(&[
+            "--temp",
+            "0.6",
+            "--spec-type",
+            "draft-mtp",
+            "--spec-draft-n-max",
+            "1",
+        ]);
+        assert_eq!(super::applied_extra_flags(&current, &mtp_won), mtp_won);
     }
 }
