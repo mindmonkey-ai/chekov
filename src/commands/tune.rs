@@ -141,18 +141,24 @@ fn incumbent_value(stage: Stage, incumbent: &[String]) -> String {
     tune::value_of(incumbent, flag_of(stage)).unwrap_or_else(|| engine_default(stage))
 }
 
-/// `off` without `--spec-type draft-mtp`; otherwise `mtp:<n>` with the
-/// engine's own draft length when the flag is absent (spec-stage design §3).
-/// Any other `--spec-type` reads as `off` here and is named by
-/// `foreign_spec_skip`.
+/// `mtp:<n>` under `--spec-type draft-mtp` (the engine's own draft length
+/// when the flag is absent), `ngram:<type>` under one of the five n-gram
+/// types, `off` otherwise (spec-stage design §3; n-gram design §3). A
+/// draft-file type reads as `off` here and is named by `foreign_spec_skip`.
 fn spec_incumbent(incumbent: &[String]) -> String {
-    if tune::value_of(incumbent, tune::Flag::SpecType).as_deref() != Some("draft-mtp") {
-        return engine_default(Stage::Spec);
+    match tune::value_of(incumbent, tune::Flag::SpecType).as_deref() {
+        Some("draft-mtp") => {
+            let length = tune::value_of(incumbent, tune::Flag::SpecDraftNMax)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(tune::ENGINE_DEFAULT_SPEC_DRAFT_N_MAX);
+            tune::SpecDraft::Mtp(length).label()
+        }
+        Some(name) => tune::NgramType::parse(name).map_or_else(
+            || engine_default(Stage::Spec),
+            |t| tune::SpecDraft::Ngram(t).label(),
+        ),
+        None => engine_default(Stage::Spec),
     }
-    let length = tune::value_of(incumbent, tune::Flag::SpecDraftNMax)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(tune::ENGINE_DEFAULT_SPEC_DRAFT_N_MAX);
-    tune::SpecDraft::Mtp(length).label()
 }
 
 /// The candidates a stage actually launches: its value list minus the one the
@@ -433,15 +439,38 @@ fn spec_gate(ctx: &Ctx, eff: &Effective) -> SpecGate {
     }
 }
 
-/// Skip 3: `--spec-type` set to anything but `draft-mtp` alone — chekov does
-/// not guess what a user's ngram or separate-draft configuration is worth.
+/// The engine's lookup-cache flags, both spellings each: an `ngram-cache`
+/// fed from a file is a configuration the stage cannot reason about.
+const LOOKUP_CACHE_FLAGS: [&str; 4] = [
+    "-lcs",
+    "--lookup-cache-static",
+    "-lcd",
+    "--lookup-cache-dynamic",
+];
+
+/// Skip 3: what the stage cannot reason about (n-gram design §13) — a
+/// draft-file type, a chain (a comma, or the flag repeated: the engine
+/// appends), or an `ngram-cache` fed from a lookup-cache file.
 fn foreign_spec_skip(candidate: &tune::Candidate, incumbent: &[String]) -> Option<String> {
     if candidate.stage != Stage::Spec {
         return None;
     }
     let value = tune::value_of(incumbent, tune::Flag::SpecType)?;
-    (value != "draft-mtp").then(|| {
-        format!("the spec stage tunes draft-mtp only; the incumbent runs --spec-type {value}")
+    let repeated = incumbent
+        .iter()
+        .filter(|a| a.as_str() == "--spec-type")
+        .count()
+        > 1;
+    let cached = value == "ngram-cache"
+        && incumbent
+            .iter()
+            .any(|a| LOOKUP_CACHE_FLAGS.contains(&a.as_str()));
+    let known = value == "draft-mtp" || tune::NgramType::parse(&value).is_some();
+    (!known || value.contains(',') || repeated || cached).then(|| {
+        format!(
+            "the spec stage tunes draft-mtp and the n-gram types; the incumbent runs \
+             --spec-type {value}"
+        )
     })
 }
 
@@ -1595,19 +1624,33 @@ mod tests {
             skip(&["--spec-type", "draft-mtp", "--spec-type", "ngram-mod"]).is_some(),
             "the engine appends a repeated flag: a chain by another spelling"
         );
+        let fa = Candidate {
+            stage: Stage::Fa,
+            value: "off".into(),
+            argv: vec![],
+        };
+        assert!(super::foreign_spec_skip(&fa, &argv(&["--spec-type", "draft-simple"])).is_none());
+    }
+
+    #[test]
+    fn a_cached_ngram_incumbent_is_foreign_and_a_plain_one_is_ours() {
+        let mtp1 = Candidate {
+            stage: Stage::Spec,
+            value: "mtp:1".into(),
+            argv: vec![],
+        };
+        let skip = |flags: &[&str]| super::foreign_spec_skip(&mtp1, &argv(flags));
         assert!(
             skip(&["--spec-type", "ngram-cache", "-lcs", "cache.bin"]).is_some(),
             "a lookup cache fed from a file"
         );
-        assert!(
-            skip(&[
-                "--spec-type",
-                "ngram-cache",
-                "--lookup-cache-dynamic",
-                "d.bin"
-            ])
-            .is_some()
-        );
+        let dynamic = [
+            "--spec-type",
+            "ngram-cache",
+            "--lookup-cache-dynamic",
+            "d.bin",
+        ];
+        assert!(skip(&dynamic).is_some());
         assert!(
             skip(&["--spec-type", "ngram-cache"]).is_none(),
             "the bare cache type is ours"
@@ -1618,12 +1661,6 @@ mod tests {
         );
         assert!(skip(&["--spec-type", "draft-mtp"]).is_none());
         assert!(skip(&[]).is_none());
-        let fa = Candidate {
-            stage: Stage::Fa,
-            value: "off".into(),
-            argv: vec![],
-        };
-        assert!(super::foreign_spec_skip(&fa, &argv(&["--spec-type", "draft-simple"])).is_none());
     }
 
     #[test]
