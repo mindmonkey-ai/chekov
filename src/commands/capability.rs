@@ -1149,6 +1149,7 @@ fn bench_estimate(
     Ok(lifecycle::estimate_secs(steps, plan)
         + trace_estimate(inputs)
         + agentic_estimate_secs(inputs.args.suite, inputs.max_turns)?
+            .saturating_mul(inputs.candidates as u64)
         + codebase_secs
         + lifecycle::judge_estimate_secs(judge_crossings(inputs)))
 }
@@ -4250,6 +4251,53 @@ mod tests {
             super::agentic_estimate_secs(Some(Suite::Throughput), 8).expect("estimate"),
             0
         );
+    }
+
+    #[test]
+    fn expanded_agentic_estimate_covers_188_single_turn_crossings_and_all_loop_turns() {
+        use crate::core::bench::lifecycle::Suite;
+        assert_eq!(
+            super::agentic_estimate_secs(Some(Suite::Agentic), 8).expect("estimate"),
+            (188 + 12 * 8) * 8
+        );
+    }
+
+    fn expanded_bench_estimate(candidates: usize) -> u64 {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "chekov",
+            "capability",
+            "bench",
+            "--suite",
+            "agentic",
+        ])
+        .expect("CLI");
+        let opts = match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Bench(opts)) => opts,
+                other => panic!("expected bench, got {other:?}"),
+            },
+            other => panic!("expected capability, got {other:?}"),
+        };
+        let args = super::bench_args(&opts).expect("args");
+        let inputs = super::RunInputs {
+            args: &args,
+            prepared: None,
+            judge: None,
+            candidates,
+            max_turns: 8,
+        };
+        let plan = crate::core::bench::sweep::SweepPlan {
+            depths: vec![1024],
+            max_tokens: 128,
+            repetitions: 5,
+        };
+        super::bench_estimate(&[], &plan, &inputs).expect("estimate")
+    }
+
+    #[test]
+    fn agentic_bench_estimate_includes_every_selected_candidate() {
+        assert_eq!(expanded_bench_estimate(3), 3 * expanded_bench_estimate(1));
     }
 
     #[test]

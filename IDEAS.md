@@ -256,6 +256,119 @@ trace report. The owned server shut down and released its budget; `chekov status
 reports `running no`. The registry context remains 262144.
 Proposed 2026-09-10 — status: IMPLEMENTED 2026-09-10; live acceptance passed.
 
+## Harder agentic questions: corpus expansion decision (2026-09-10)
+
+**Question:** Should the default agent benchmark gain a larger set of harder
+questions now, accepting that its new results cannot be compared directly with
+saved results from the current question set?
+
+**Recommendation:** Make one deliberate corpus update: 39 tool-selection cases
+(30 calls and 9 abstentions), 30 paired forced-grammar checks, and 40 instruction
+cases. Keep the existing questions and add 23 call cases, 6 abstentions, and 28
+instruction cases. This is a proposal; the corpus has not been changed.
+
+The roadmap's current counts are 10 tool cases, 7 grammar checks, and 12
+instruction cases, against targets of 30/30/40. Grammar checks are not an
+independent question set: the runner repeats each call-expected tool case with
+forced output grammar, on the buffered transport only. Abstention cases do not
+get that forced pass. Reaching 30 grammar checks while retaining meaningful
+abstention coverage therefore requires more than 30 total tool cases. The
+recommended 39/30/40 counts supersede the earlier count targets if approved.
+
+**Concrete scope:**
+
+| Addition | Count | Behavior to exercise |
+| --- | --- | --- |
+| Tool calls | 8 | Choosing among plausible tools with overlapping descriptions |
+| Tool calls | 8 | Preserving nested arguments, arrays, types, and optional fields |
+| Tool calls | 7 | Exact strings, quotes, escapes, and paths in tool arguments |
+| Abstentions | 6 | Three unavailable capabilities and three requests missing required information |
+| Instructions | 10 | Combined required and forbidden content |
+| Instructions | 10 | Line limits combined with required or forbidden content |
+| Instructions | 8 | Fenced Rust output combined with content and line constraints |
+
+Every added case must have one unambiguous expected result and a distinct
+failure target, not merely different names or numbers. Use the existing
+grader vocabulary. Any case requiring a new checker returns for a separate
+scope decision. Retain existing case ids and the six tool-loop scenarios.
+Both unconstrained transports remain covered; the forced pass remains buffered.
+The single-turn work grows from 51 to 188 crossings per model, plus the existing
+variable-turn tool-loop workload. Dry-run estimates must reflect the new counts.
+
+**Compatibility:** Use the existing content hash as the workload identity;
+no selector, second loader, or relaxed comparison mask is proposed. The TOML
+schema stays at version 0 because its shape is unchanged. Editing its content
+changes the hash for every agentic/all run, including runs containing unchanged
+tool-loop cases. Old runs remain readable and comparable with other matching
+old runs; old/new comparison and resume must refuse. Throughput-only hashes
+remain unchanged. Freeze the new content before the measurement campaign and
+record its hash with the results.
+
+**Validation:** Follow the existing committed-red protocol, then run
+`make lint && make test`. Verify the case counts, all goldens and constraints,
+negative answers for each new category, both unconstrained transports, the
+call-only forced subset, complete cost estimates, and hash/refusal behavior.
+Select three registered models of different capability before measurement;
+inspect the printed cost and server availability before running them. Record
+per-case and per-category scores, including unavailable grammar results.
+Publish any all-pass or all-fail category as non-discriminating, and revisit
+its content before claiming the expansion produces useful rankings. This
+proposal does not authorize that live campaign or release the separate
+compiled-in fixture.
+
+**Scope for approval:** Up to nine existing files, limited to the probe TOML
+(`src/core/bench/agentic_v0.toml`), focused inline tests in
+`src/core/bench/probeset.rs`, `src/core/bench/probes.rs`,
+`src/core/bench/grade.rs`, and `src/commands/capability.rs`, plus `README.md`,
+`CHANGELOG.md`, `IDEAS.md`, and `docs/capability-spec.md`. Touch only the sites
+needed for the expansion and its validation. Preserve the runner, grader,
+persistence layout, dependencies, and gates; no new files are proposed.
+
+**Resolution paths:**
+
+1. **Rule now (recommended):** approve the counts, case categories, one-time
+   corpus cutover, and bounded scope of more than five files above, then
+   implement and validate the expansion.
+2. **Research first:** assess the current per-case results and category gaps
+   across three models before approving new questions; use a dry-run to agree
+   the measurement cost and server window first.
+3. **Spike first:** spend at most one hour on `spike/agentic-probe-expansion`
+   drafting a small representative sample with checked goldens; never merge
+   the spike. Return with the sample, unresolved ambiguities, and revised scope.
+
+**More information / tags:** capability spec §7.2; the count/comparability
+decision in the capability roadmap above; `src/core/bench/probeset.rs:151`
+(`content_hash`), `src/core/bench/probes.rs:51` (`suite_prompt_hash`),
+`src/commands/capability.rs:1962` (`run_tool_case`), and
+`src/core/bench/grade.rs:272` (`check_one`).
+Proposed 2026-09-10 — status: IMPLEMENTED 2026-09-10. The user
+authorized the recommended counts, corpus cutover, and nine-file scope with
+"merge and continue". The corpus now has 39 tool cases (30 calls and 9
+abstentions), 30 paired grammar checks, and 40 instruction cases. Its frozen
+content hash is `e0d71495afd7`; the original was `6e2669a1c242`. A regression
+pins every original question and all six tool-loop scenarios byte-for-byte
+below the schema declaration. The format and grader vocabulary are unchanged.
+
+Automated validation: red commit `7699bc0` passed lint and failed ten checks
+for the missing cases, unchanged hash, and underestimated multi-model cost.
+After implementation, `make lint && make test` passes (894 unit and 10
+integration tests). Independent JSON Schema validation confirms all tool
+schemas are valid and all 30 golden calls conform to their own schemas.
+Good/bad answer fixtures exercise all 23 added calls, all 6 added abstentions,
+and all 28 added instruction cases. The single-turn estimate is 188 crossings
+per model plus the loop ceiling; a regression also exposed and fixed the
+planner counting agentic work only once for a multi-model run.
+
+The CLI dry-run for `--suite agentic --models ornith-1.5-35b-a3b` succeeds and
+estimates about 51 minutes on the current configuration. The proposed campaign
+uses `qwen3.5-9b`, `ornith-1.5-35b-a3b`, and `gpt-oss-120b`, selected for different
+model sizes and families; their actual score spread is still unmeasured.
+The three-model dry-run correctly refuses because an existing Ornith server
+is running (pid 15573 at validation time). This work did not start or stop it.
+TODO: agree a server window, rerun the three-model dry-run, and obtain campaign
+approval before live measurement. Publish the per-category spread, including
+non-discriminating and unavailable results, before claiming live acceptance.
+
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
 samplers") by this engine for `ornith-1.5-35b-a3b`, so the §7.2 grammar_gap
