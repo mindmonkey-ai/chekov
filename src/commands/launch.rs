@@ -401,6 +401,92 @@ mod tests {
         assert_eq!(cmd.args, ["exec", "hello"]);
     }
 
+    fn codex_preview(tag: &str) -> (Ctx, super::LaunchCmd) {
+        let ctx = scratch_ctx(tag);
+        let mut entry = any_effective().entry;
+        entry.ctx_size = Some(524_288);
+        let registry = crate::core::registry::Registry {
+            active: Some("test-model".to_owned()),
+            models: [("test-model".to_owned(), entry)].into(),
+            ..Default::default()
+        };
+        registry
+            .save(&ctx.config.registry_path())
+            .expect("registry");
+        let cmd = super::LaunchCmd {
+            agent: crate::core::proxy::AgentKind::Codex,
+            model: None,
+            proxy_only: false,
+            port: 8787,
+            print: true,
+            args: vec!["exec".to_owned(), "hello".to_owned()],
+        };
+        (ctx, cmd)
+    }
+
+    #[test]
+    fn codex_preview_writes_metadata_for_the_selected_model() {
+        use crate::commands::Command;
+        let (ctx, cmd) = codex_preview("chekov-test-codex-catalog");
+        cmd.run(&ctx).expect("preview");
+        let files: Vec<_> = std::fs::read_dir(ctx.config.agent_dir("codex"))
+            .expect("generated catalog directory")
+            .map(|entry| entry.expect("catalog entry").path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        let text = std::fs::read_to_string(&files[0]).expect("catalog");
+        let catalog: serde_json::Value = serde_json::from_str(&text).expect("catalog JSON");
+        assert_eq!(catalog["models"].as_array().expect("models").len(), 1);
+        let model = &catalog["models"][0];
+        assert_eq!(model["slug"], "test-model");
+        assert_eq!(model["context_window"], 524_288);
+        assert_eq!(model["max_context_window"], 524_288);
+        assert_eq!(model["input_modalities"], serde_json::json!(["text"]));
+        assert_eq!(model["supports_reasoning_summary_parameter"], false);
+        assert!(
+            !model["base_instructions"]
+                .as_str()
+                .expect("instructions")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn codex_command_loads_catalog_without_replacing_user_home() {
+        let (ctx, cmd) = codex_preview("chekov-test-codex-catalog-command");
+        let session = cmd.resolve(&ctx).expect("session");
+        let command = cmd.agent_command(&session);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().expect("UTF-8"))
+            .collect();
+        assert_eq!(&args[args.len() - 2..], ["exec", "hello"]);
+        let settings = args[..args.len() - 2]
+            .chunks_exact(2)
+            .map(|pair| pair[1])
+            .collect::<Vec<_>>()
+            .join("\n");
+        let config: toml::Table = toml::from_str(&settings).expect("TOML overrides");
+        let path = config.get("model_catalog_json").expect("catalog override");
+        assert_eq!(
+            Path::new(path.as_str().expect("catalog path")).parent(),
+            Some(session.dir.as_path())
+        );
+        assert!(command.get_envs().all(|(key, _)| key != "CODEX_HOME"));
+    }
+
+    #[test]
+    fn codex_catalog_write_failure_aborts_the_launch() {
+        use crate::commands::Command;
+        let (ctx, cmd) = codex_preview("chekov-test-codex-catalog-error");
+        std::fs::create_dir_all(ctx.config.root.join("agents")).expect("agents directory");
+        std::fs::write(ctx.config.agent_dir("codex"), "obstruction").expect("obstruction");
+        assert!(
+            cmd.run(&ctx).is_err(),
+            "missing metadata must not silently fall back"
+        );
+    }
+
     impl HttpClient for NoHttp {
         fn get(&self, _url: &str) -> Result<String, ChekovError> {
             unreachable!("launch preflight never fetches")
