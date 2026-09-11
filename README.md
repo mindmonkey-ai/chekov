@@ -597,11 +597,16 @@ The corpus content hash changes for agentic and combined runs, so comparisons
 and resume across the old and expanded corpus refuse. Old records remain
 readable; throughput-only hashes are unchanged. Run `--dry-run` first: its
 estimate includes the agentic work for every selected model. Automated checks
-pass. The authorized three-model campaign is awaiting a server window: its
-2026-09-11 UTC preflight found all weights available but refused another
-session's running server. No expanded-corpus model scores have been measured.
+pass. The 2026-09-11 UTC campaign completed 200 crossings each on Qwen 3.5 9B,
+Ornith 1.5 35B A3B, and GPT-OSS 120B without interrupting another session's
+server. Strict instruction scores were 9/40, 29/40, and 39/40; tools were
+36/39, 35/39, and 35/39, and loops 6/6, 6/6, and 5/6. Pass/fail agreed on both
+transports. Different registered contexts and flags make this a descriptive
+comparison of configured stacks. Empty visible answers and near-ceiling axes
+limit interpretation; cases and grades were kept frozen.
 See the [campaign receipt](IDEAS.md#three-model-campaign-preflight-2026-09-11-utc)
-for resources, evidence, and the command to resume preparation.
+for per-case results, raw evidence, configuration caveats, and the recommended
+follow-up on answer/budget observability.
 
 ### Long-context traces
 

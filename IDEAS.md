@@ -366,12 +366,13 @@ model sizes and families; their actual score spread is still unmeasured.
 The three-model dry-run correctly refuses because an existing Ornith server
 is running (pid 15573 at validation time). This work did not start or stop it.
 The continuation request on 2026-09-10 authorizes the three-model campaign;
-the server-window prerequisite remains open. See the current receipt below.
+it subsequently completed using isolated server state. See the receipt below.
 
 ### Three-model campaign preflight (2026-09-11 UTC)
 
-Status: **AUTHORIZED; BLOCKED on another session's server; live acceptance
-PENDING.** Fetched origin and fast-forward checked `develop`: still `a196881`
+Status: **COMPLETE — 600/600 crossings measured; configured stacks discriminate.**
+The heading retains the preflight anchor used by existing links. Fetched origin
+and fast-forward checked `develop`: still `a196881`
 (PRs #84 and #85 merged), with a clean working tree. Built and used
 `target/debug/chekov`; the installed CLI was not used. The corpus SHA-256 is
 `e0d71495afd7b79b34a24ea972c020fc9dd4529bba6441c7e931be005dc1c389`.
@@ -389,37 +390,150 @@ volume. `capability explain` gives these configured footprints:
 | `ornith-1.5-35b-a3b` | Q8_0 / `fbbaed45c2f0` | 262144 | 40654275840 |
 | `gpt-oss-120b` | F16 / `ff1a82da6ad4` | 98304 | 69219388800 |
 
-These are footprint estimates, excluding runtime overhead; they do not establish
-a free server window. Another terminal initially ran `chekov tune --apply` on
+These are footprint estimates, excluding runtime overhead. Another terminal
+initially ran `chekov tune --apply` on
 Ornith BF16, then `chekov launch codex` (observed parent pid 91490) started
 llama-server pid 91540 on port 8080. That server remained alive after its parent
 exited. It belongs to the other session; this campaign did not stop it or send
 it inference requests. The three-model dry-run refused the running
 `ornith-1.5-35b-a3b-bf16` before producing a plan or wall-clock estimate.
-The earlier single-model 51-minute estimate is not a current campaign estimate.
+That initial refusal is retained as operational evidence, not a model failure.
+
+The campaign then used the supported `CHEKOV_HOME` override with isolated
+config, PID state, and logs under `/tmp/chekov-agentic-campaign-dnx6jfgm`, on
+port 18080. The copied configuration differed only in `server.port`; the
+model registry was copied byte-for-byte, with symlinks to the same weights,
+engine, and `eval` directory. The three-model dry-run passed and estimated
+158 minutes; the remaining two-model plan estimated 108 minutes, and the final
+GPT-only recovery plan 55 minutes. Resource gates remained enabled. Campaign
+servers were started sequentially and only campaign-owned servers were stopped.
+The foreign server, pid 91540, remained running afterward. Sampled VM counters
+showed no swap-ins, swap-outs, or page-outs; this was still a shared GPU run.
 
 Examined all 43 stored `eval/*/stamp.json` files: none identifies
-`agentic-v0:e0d71495afd7`. No existing run can supply or resume this campaign.
-**Measurements: unavailable for all three models.** Aggregate and per-case
-scores, category spread, ceiling/floor effects, and recurring model failures
-remain unmeasured. The ownership refusal is an operational blocker, not a
-model failure or an all-fail category. No discrimination conclusion follows.
+`agentic-v0:e0d71495afd7` before this campaign. Qwen was interrupted after 192
+stored crossings and resumed in the same run. Ornith completed in the remaining
+two-model campaign. Its supervisor and the first GPT loader subsequently
+disappeared without an exit receipt or GPT stamp; the cause is unknown. A fresh
+GPT-only run completed successfully. Completed measurements were reused, and
+no failed case was rerun to select a better score.
 
-Local raw preflight output is preserved in
-`logs/agentic-campaign-20260911-preflight.json`; validation output is in
-`logs/agentic-campaign-20260911-tests.log`, with the first sandbox attempt in
-`logs/agentic-campaign-20260911-tests-sandbox.log`. These gitignored receipts
-remain on the measurement machine. `make lint && make test` passes: 897 unit
-and 10 integration tests. The sandbox attempt failed two Codex launch tests
-because localhost binding was denied; both pass outside the sandbox.
+All three final runs contain exactly 200 unique expected crossings: 78 tool,
+30 forced grammar, 80 instruction, and 12 loop rows. There are no missing,
+duplicate, partial, ungraded, or unavailable rows. The engine is `0f194b907`,
+machine stamp `c057455fb3a1`, prompt-set hash `ac1955773bbf`, seed 42, and request
+temperature 0. No production code, cases, grading, or model configuration changed.
 
-**Next item / TODO:** obtain the owner's released server window, rerun
-`target/debug/chekov capability bench --suite agentic --models qwen3.5-9b,ornith-1.5-35b-a3b,gpt-oss-120b --dry-run`,
-inspect its estimate, then run the same command with `--yes` instead of
-`--dry-run`. Preserve each run's stamp and JSONL and compare every category
-and case, reporting unavailable and non-discriminating results. Complete this
-campaign before selecting further corpus changes; the evidence does not yet
-justify a model ranking or release of the separate compiled-in fixture.
+| Candidate | Run ID | Tools | Forced / paired unconstrained | Instruction strict / loose | Loops |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Qwen | `20260911T034515Z-qwen3.5-9b` | 36/39 | 29/30 / 27/30 | 9/40 / 9/40 | 6/6 |
+| Ornith | `20260911T041044Z-ornith-1.5-35b-a3b` | 35/39 | 29/30 / 27/30 | 29/40 / 30/40 | 6/6 |
+| GPT-OSS | `20260911T043659Z-gpt-oss-120b` | 35/39 | 27/30 / 27/30 | 39/40 / 39/40 | 5/6 |
+
+Tools, instructions, and loop pass/fail agree on both transports for every
+case; table values apply separately to each transport. Forced grammar is
+buffered only and uses the recorded `deepseek` reasoning extraction. The
+strict totals are 131, 169, and 185 of 200 crossings, respectively; these totals
+weight paired transports twice and should not replace the individual axes.
+
+Normal `capability compare` refuses every pair because contexts differ. The
+preserved descriptive comparisons explicitly use `--cross-runtime --cross-flags`.
+Besides context and quantization, Ornith enables MTP draft length 1, and GPT
+uses engine-default reasoning formatting while Qwen/Ornith request `none`.
+These are comparisons of registered model stacks, not a controlled model-only
+ranking. Shared GPU activity also prevents an isolated speed comparison. One
+seed and paired transports do not establish statistical robustness.
+
+| Category (per transport) | Qwen | Ornith | GPT-OSS |
+| --- | ---: | ---: | ---: |
+| Legacy tool calls | 7/7 | 6/7 | 6/7 |
+| Legacy abstentions | 3/3 | 2/3 | 3/3 |
+| Overlapping tools | 8/8 | 7/8 | 7/8 |
+| Nested / typed arguments | 6/8 | 7/8 | 8/8 |
+| Exact strings / escaping | 6/7 | 7/7 | 6/7 |
+| Unavailable capabilities | 3/3 | 3/3 | 2/3 |
+| Missing required information | 3/3 | 3/3 | 3/3 |
+| Legacy instructions | 6/12 | 11/12 | 12/12 |
+| Required / forbidden content | 1/10 | 4/10 | 10/10 |
+| Line / content constraints | 2/10 | 7/10 | 9/10 |
+| Fenced Rust / combined constraints | 0/8 | 7/8 | 8/8 |
+
+**Discrimination and saturation.** Of 115 distinct axis/case pairs, 45 have
+mixed pass/fail outcomes and 70 pass on all three stacks; none fails on all
+three. Counting transports yields 86 mixed and 114 all-pass crossings. The
+expansion contributes 34 mixed pairs among its 80 added axis/case pairs,
+including 25 of 28 added instruction cases. Instruction scores distinguish
+all three stacks; tools are near ceiling and tie Ornith/GPT in aggregate while
+their failures differ. Forced grammar is also near ceiling, with 26/30 common
+passes. Missing-information abstentions saturate at 3/3, and five of six loops
+pass everywhere. Qwen has a model-specific floor on the eight added fenced
+Rust cases; there is no shared all-model floor. GPT has a ceiling on required /
+forbidden content and fenced Rust, and near ceiling on instructions overall.
+
+**Per-case failures.** Tool failures on both transports are Qwen `te-021`,
+`te-022`, `te-032`; Ornith `te-003`, `te-010`, `te-015`, `te-022`; and GPT
+`te-003`, `te-017`, `te-032`, `te-036`. Recurring failures include reading
+instead of editing (`te-003`, Ornith/GPT), preserving a JSON null cursor
+(`te-022`, Qwen/Ornith), and exact JSON text plus a newline (`te-032`, Qwen/GPT).
+Ornith fabricates `grep` for the deletion abstention (`te-010`); GPT calls
+`stat_file` when asked to change permissions with inspection-only tools
+(`te-036`). Qwen emits no call for typed zero/false/empty values (`te-021`).
+Ornith's edit preview (`te-015`) and GPT's definition lookup (`te-017`) have
+argument mismatches. The retained rows do not contain the actual arguments.
+
+Forced failures are Qwen `gg-te-013` (`walk_tree` instead of `list_dir`),
+Ornith `gg-te-003` (read instead of edit), and GPT `gg-te-003`, `gg-te-022`
+(null-cursor arguments), `gg-te-029` (forced reply not JSON for exact newline /
+tab content). The aggregate grammar gains of 2, 2, and 0 cases hide regressions:
+Qwen regresses on `te-013`; GPT regresses on `te-022` and `te-029` while fixing
+`te-017` and `te-032`. GPT alone exhausts eight turns with eight calls on
+`tl-005`, the legacy off-by-one repair, on both transports. Reached-loop turn
+min/median/max are Qwen 3/4/6, Ornith 4/6/7, GPT 4/5/6 buffered and 4/5/5 streamed.
+
+All 31 Qwen instruction failures per transport have zero visible-answer
+characters and nonzero thinking characters. The fixed instruction budget is
+512 tokens (`src/core/bench/probes.rs:144`); engine-log tasks 9749 and 10263
+confirm 512-token generations for buffered `if-002` and `if-003`. Budget
+starvation is a supported explanation for those rows, and a hypothesis for
+the other empty failures, not proof of an inability to write Rust. Ornith's
+11 instruction failures are `if-009`, `if-014`, `if-018`–`if-022`, `if-024`,
+`if-026`, `if-030`, and `if-033`; only `if-026` passes loose grading, and only
+`if-019` / `if-033` have empty visible answers. Several failures retain forbidden
+substrings (`failed`, `acct-482`, `override`, `error:`). GPT's sole instruction
+failure is `if-028`, missing the exact substring `dry-run`. It has no observed
+zero-answer crossing with nonzero thinking.
+
+**Measurement blind spot.** Qwen `if-006` passes on both transports despite
+zero answer characters: its checks only forbid `process` and cap line count,
+which an empty answer satisfies. Qwen `te-008` similarly passes the no-tool
+contract without a visible answer to the requested definition. These are
+retained as original passes, not rescored. The JSONL records grades, character
+counts, timing, and loop summaries, but not full response bodies or turn
+transcripts. Exact mismatched arguments, the malformed forced response, and
+the sequence of GPT's repeated calls therefore cannot be reconstructed here.
+
+**Evidence and validation.** The portable
+[raw evidence archive](docs/agentic-campaign-20260911.tar.gz) contains all three
+`eval/<run>/stamp.json` and `results.jsonl` pairs, the 200-row three-model outcome
+matrix in `logs/agentic-campaign-20260911-analysis.json`, all pairwise comparison
+and refusal logs, engine output, preflight/isolation/recovery receipts, and
+validation logs. Its `manifest.json` gives SHA-256 hashes for every member.
+Original gitignored artifacts remain on the measurement machine. `make lint &&
+make test` passes: 897 unit and 10 integration tests. Earlier sandbox failures
+denied localhost binding; unrestricted runs pass. No product fix was made, so
+there is no new committed-red cycle in this documentation/evidence change.
+
+**Recommended next item / TODO (proposed, not a ruling):** resolve visible-answer
+and generation-budget observability before expanding the corpus again. A
+successful check can currently conceal no answer, while a low score can reflect
+the fixed thinking budget. The resolution paths are: rule now that answer-required
+instruction checks must reject empty output; research first (recommended) to
+reproduce empty passes, retain termination/response evidence, and distinguish
+budget exhaustion from parsing or model behavior; or a one-session `spike/`
+branch to trial diagnostics, never merged. File the resulting scope/decision
+here before implementation and use committed-red TDD for fixes. Preserve this
+campaign unchanged and give any changed grading/budget a distinct comparison
+identity. The separate compiled-in fixture remains deferred.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
