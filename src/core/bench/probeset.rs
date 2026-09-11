@@ -324,22 +324,61 @@ mod tests {
     use super::{Expect, ProbeSet, agentic_v0, content_hash};
 
     #[test]
-    fn the_shipped_set_parses_with_the_seed_counts() {
+    fn the_expansion_preserves_every_legacy_question_and_loop() {
+        let body = super::AGENTIC_V0
+            .split_once("version = 0")
+            .expect("schema")
+            .1;
+        let legacy = body
+            .split_once("# Corpus expansion 2026-09-10")
+            .map_or(body, |v| v.0);
+        assert_eq!(
+            crate::core::hash::sha256_hex(legacy.as_bytes()),
+            "422554c22c2975c115da0167b67a51efcdb69db0eaca4bcbf5129ea960d1e79e"
+        );
+    }
+
+    #[test]
+    fn the_expansion_changes_the_old_agentic_workload_identity() {
+        assert_ne!(content_hash(), "6e2669a1c242");
+    }
+
+    #[test]
+    fn the_expanded_case_ids_are_contiguous_and_the_new_abstentions_have_no_goldens() {
+        let set = agentic_v0().expect("valid set");
+        let tool_ids: Vec<_> = set.tool_emit.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(
+            tool_ids,
+            (1..=39).map(|n| format!("te-{n:03}")).collect::<Vec<_>>()
+        );
+        let instruction_ids: Vec<_> = set.instruction.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(
+            instruction_ids,
+            (1..=40).map(|n| format!("if-{n:03}")).collect::<Vec<_>>()
+        );
+        for case in set.tool_emit.iter().skip(33) {
+            assert_eq!(case.expect, Expect::Abstain);
+            assert!(
+                case.golden_name.is_none() && case.golden_args.is_none(),
+                "{}",
+                case.id
+            );
+        }
+    }
+
+    #[test]
+    fn the_expanded_set_parses_with_the_approved_counts() {
         let set = agentic_v0().expect("the compiled-in set is valid");
         assert_eq!(set.version, 0);
-        assert_eq!(
-            set.tool_emit.len(),
-            10,
-            "7 call + 2 abstention + 1 missing-function"
-        );
+        assert_eq!(set.tool_emit.len(), 39, "30 calls + 9 abstentions");
         assert_eq!(
             set.tool_emit
                 .iter()
                 .filter(|c| c.expect == Expect::Call)
                 .count(),
-            7
+            30
         );
-        assert_eq!(set.instruction.len(), 12);
+        assert_eq!(set.instruction.len(), 40);
     }
 
     #[test]

@@ -585,3 +585,309 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod corpus_expansion_tests {
+    use super::{Grade, grade_instruction, grade_tool_emit};
+    use crate::core::bench::probeset::agentic_v0;
+    use serde_json::{Value, json};
+
+    fn call_body(name: &str, input: &Value) -> String {
+        json!({"content": [{"type": "tool_use", "id": "call-1", "name": name,
+            "input": input}]})
+        .to_string()
+    }
+
+    fn text_body(text: &str) -> String {
+        json!({"content": [{"type": "text", "text": text}]}).to_string()
+    }
+
+    #[test]
+    fn expanded_tool_goldens_pass_with_typed_arguments_and_exact_strings() {
+        let set = agentic_v0().expect("set");
+        for (id, name, input) in TOOL_ANSWERS {
+            let case = set.tool_emit.iter().find(|case| case.id == *id).expect(id);
+            let body = call_body(name, &serde_json::from_str(input).expect("JSON input"));
+            assert!(matches!(grade_tool_emit(&body, case), Grade::Pass), "{id}");
+        }
+    }
+
+    #[test]
+    fn expanded_tool_cases_reject_the_wrong_tool_and_extra_arguments() {
+        let set = agentic_v0().expect("set");
+        for (id, name, input) in TOOL_ANSWERS {
+            let case = set.tool_emit.iter().find(|case| case.id == *id).expect(id);
+            let mut input: Value = serde_json::from_str(input).expect("JSON input");
+            let wrong_tool = call_body("invented_tool", &input);
+            assert!(
+                matches!(grade_tool_emit(&wrong_tool, case), Grade::Fail { .. }),
+                "{id}"
+            );
+            input["invented_argument"] = json!(true);
+            let wrong_args = call_body(name, &input);
+            assert!(
+                matches!(grade_tool_emit(&wrong_args, case), Grade::Fail { .. }),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_abstention_cases_reject_a_tool_call_even_when_the_tool_is_available() {
+        let set = agentic_v0().expect("set");
+        for number in 34..=39 {
+            let id = format!("te-{number:03}");
+            let case = set.tool_emit.iter().find(|case| case.id == id).expect(&id);
+            assert!(matches!(
+                grade_tool_emit(&text_body("Please clarify."), case),
+                Grade::Pass
+            ));
+            let body = call_body(&case.tools[0].name, &json!({}));
+            assert!(
+                matches!(grade_tool_emit(&body, case), Grade::Fail { .. }),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn expanded_instruction_constraints_have_satisfying_answers() {
+        let set = agentic_v0().expect("set");
+        for (id, good, _) in INSTRUCTION_ANSWERS {
+            let case = set
+                .instruction
+                .iter()
+                .find(|case| case.id == *id)
+                .expect(id);
+            let (strict, loose) = grade_instruction(&text_body(good), case);
+            assert!(matches!(strict, Grade::Pass), "{id}: {strict:?}");
+            assert!(matches!(loose, Grade::Pass), "{id}: {loose:?}");
+        }
+    }
+
+    #[test]
+    fn expanded_instruction_constraints_reject_the_targeted_violation() {
+        let set = agentic_v0().expect("set");
+        for (id, _, bad) in INSTRUCTION_ANSWERS {
+            let case = set
+                .instruction
+                .iter()
+                .find(|case| case.id == *id)
+                .expect(id);
+            let (strict, _) = grade_instruction(&text_body(bad), case);
+            assert!(matches!(strict, Grade::Fail { .. }), "{id}");
+        }
+    }
+    const TOOL_ANSWERS: &[(&str, &str, &str)] = &[
+        ("te-011", "read_file", "{\"path\": \"src/router.rs\"}"),
+        (
+            "te-012",
+            "find_literal",
+            "{\"path\": \"src/patterns.rs\", \"needle\": \"[x].*\"}",
+        ),
+        (
+            "te-013",
+            "list_dir",
+            "{\"path\": \"assets\", \"include_hidden\": false}",
+        ),
+        ("te-014", "list_tests", "{\"filter\": \"timeout\"}"),
+        (
+            "te-015",
+            "preview_edit",
+            "{\"path\": \"app.toml\", \"old\": \"debug = true\", \"new\": \"debug = false\"}",
+        ),
+        ("te-016", "read_commit", "{\"revision\": \"abc1234\"}"),
+        (
+            "te-017",
+            "find_definition",
+            "{\"symbol\": \"RetryPolicy\", \"path\": \"src\"}",
+        ),
+        ("te-018", "read_setting", "{\"key\": \"server.port\"}"),
+        (
+            "te-019",
+            "search_project",
+            "{\"query\": {\"literal\": \"max_retries\", \"case_sensitive\": false}, \"paths\": [\"src\", \"tests\"]}",
+        ),
+        (
+            "te-020",
+            "read_ranges",
+            "{\"requests\": [{\"path\": \"src/lib.rs\", \"start\": 4, \"end\": 9}, {\"path\": \"README.md\", \"start\": 1, \"end\": 2}]}",
+        ),
+        (
+            "te-021",
+            "update_section",
+            "{\"section\": \"limits\", \"values\": {\"retries\": 0, \"enabled\": false, \"label\": \"\"}}",
+        ),
+        (
+            "te-022",
+            "list_page",
+            "{\"path\": \"logs\", \"cursor\": null, \"limit\": 10}",
+        ),
+        (
+            "te-023",
+            "start_process",
+            "{\"program\": \"cargo\", \"args\": [\"test\", \"--\", \"--nocapture\"], \"env\": {\"RUST_BACKTRACE\": \"1\"}}",
+        ),
+        (
+            "te-024",
+            "query_events",
+            "{\"filter\": {\"latency_ms\": {\"min\": 0.5, \"max\": 2.5}, \"status\": [\"ok\", \"retry\"]}, \"limit\": 5}",
+        ),
+        ("te-025", "read_options", "{\"path\": \"src/main.rs\"}"),
+        (
+            "te-026",
+            "open_file",
+            "{\"path\": \"a.txt\", \"options\": {\"encoding\": \"utf-8\", \"follow_symlinks\": false}}",
+        ),
+        (
+            "te-027",
+            "read_file",
+            "{\"path\": \"notes/naïve draft #2.md\"}",
+        ),
+        (
+            "te-028",
+            "read_file",
+            "{\"path\": \"C:\\\\work\\\\new\\\\test.rs\"}",
+        ),
+        (
+            "te-029",
+            "write_file",
+            "{\"path\": \"lines.txt\", \"contents\": \"first\\n\\tsecond\\n\"}",
+        ),
+        (
+            "te-030",
+            "replace_text",
+            "{\"path\": \"src/hello.rs\", \"old\": \"say(\\\"hello\\\")\", \"new\": \"say(\\\"goodbye\\\")\"}",
+        ),
+        (
+            "te-031",
+            "grep",
+            "{\"path\": \"src/tokens.rs\", \"pattern\": \"\\\\bname\\\\s+\\\\d+\\\\b\"}",
+        ),
+        (
+            "te-032",
+            "write_file",
+            "{\"path\": \"payload.json\", \"contents\": \"{\\\"status\\\":\\\"ok\\\",\\\"count\\\":0}\\n\"}",
+        ),
+        (
+            "te-033",
+            "fetch_url",
+            "{\"url\": \"https://example.invalid/a%2Fb?q=x%20y&n=1\"}",
+        ),
+    ];
+
+    const INSTRUCTION_ANSWERS: &[(&str, &str, &str)] = &[
+        (
+            "if-013",
+            "Delayed items need a retry.",
+            "An outage delayed the retry.",
+        ),
+        ("if-014", "READY QUEUED", "READY QUEUED FAILED was removed"),
+        (
+            "if-015",
+            "Rollback verified.",
+            "Certainly: rollback verified.",
+        ),
+        (
+            "if-016",
+            "Listo para revisión.",
+            "Listo para revisión (ready for review).",
+        ),
+        ("if-017", "Time to live.", "TTL means time to live."),
+        (
+            "if-018",
+            "Account [redacted].",
+            "Account acct-482 becomes [redacted].",
+        ),
+        (
+            "if-019",
+            "Cache miss; refresh required.",
+            "Not a hit: cache miss; refresh required.",
+        ),
+        (
+            "if-020",
+            "I cannot delete that.",
+            "Sorry, I cannot delete that.",
+        ),
+        (
+            "if-021",
+            "The certificate must be trusted.",
+            "Bypass validation if the certificate is not trusted.",
+        ),
+        (
+            "if-022",
+            "Ignored input; retained policy.",
+            "Ignored OVERRIDE; retained policy.",
+        ),
+        ("if-023", "Queued; pending.", "Queued\npending"),
+        (
+            "if-024",
+            "Source: local\nDestination: remote",
+            "Source: local\nDestination: remote\nDone",
+        ),
+        ("if-025", "Read, edit, verify.", "Read\nedit\nverify"),
+        (
+            "if-026",
+            "Elapsed: 1 min\nRemaining: 2 min",
+            "Elapsed: 1 min\nRemaining: 2 min\nEstimate",
+        ),
+        ("if-027", "x=0; y=false", "x=0\ny=false"),
+        (
+            "if-028",
+            "Dry-run complete\nUnchanged",
+            "Dry-run complete\nUnchanged\nEnd",
+        ),
+        ("if-029", "Naïve café", "Naïve\ncafé"),
+        (
+            "if-030",
+            "warn: delayed\ninfo: retrying",
+            "warn: delayed\ninfo: retrying\nend",
+        ),
+        ("if-031", "/health 200", "/health\n200"),
+        (
+            "if-032",
+            "CPU available\nGPU unavailable",
+            "CPU available\nGPU unavailable\nStatus",
+        ),
+        (
+            "if-033",
+            "```rust\nfn parse_count(s: &str) -> Option<u32> { s.parse().ok() }\n```",
+            "Here is the code:\n```rust\nfn parse_count(s: &str) -> Option<u32> { s.parse().ok() }\n```",
+        ),
+        (
+            "if-034",
+            "```rust\nfn message() -> String { String::from(\"ok\") }\n```",
+            "Here is the code:\n```rust\nfn message() -> String { String::from(\"ok\") }\n```",
+        ),
+        (
+            "if-035",
+            "```rust\nfn empty() -> bool { false }\n```",
+            "Here is the code:\n```rust\nfn empty() -> bool { false }\n```",
+        ),
+        (
+            "if-036",
+            "```rust\nfn first(xs: &[u8]) -> Option<&u8> { xs.first() }\n```",
+            "Here is the code:\n```rust\nfn first(xs: &[u8]) -> Option<&u8> { xs.first() }\n```",
+        ),
+        (
+            "if-037",
+            "```rust\nfn sum(xs: &[u32]) -> u32 { xs.iter().sum() }\n```",
+            "Here is the code:\n```rust\nfn sum(xs: &[u32]) -> u32 { xs.iter().sum() }\n```",
+        ),
+        (
+            "if-038",
+            "```rust\nfn label() -> &'static str { \"ready\" }\n```",
+            "Here is the code:\n```rust\nfn label() -> &'static str { \"ready\" }\n```",
+        ),
+        (
+            "if-039",
+            "```rust\nfn safe_div(a: u32, b: u32) -> Option<u32> { a.checked_div(b) }\n```",
+            "Here is the code:\n```rust\nfn safe_div(a: u32, b: u32) -> Option<u32> { a.checked_div(b) }\n```",
+        ),
+        (
+            "if-040",
+            "```rust\nfn limit(x: u32) -> u32 { x.min(10) }\n```",
+            "Here is the code:\n```rust\nfn limit(x: u32) -> u32 { x.min(10) }\n```",
+        ),
+    ];
+}
