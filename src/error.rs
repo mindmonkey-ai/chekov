@@ -221,6 +221,11 @@ pub enum ChekovError {
     )]
     BenchStampMismatch { field: String, a: String, b: String },
 
+    #[error(
+        "long-context trace: {reason} — check `chekov capability bench --long-ctx-trace <LENGTHS>`"
+    )]
+    LongContextInvalid { reason: String },
+
     #[error("--runtime '{value}' is not <name>@<version> — {reason}")]
     RuntimeFlagInvalid { value: String, reason: String },
 

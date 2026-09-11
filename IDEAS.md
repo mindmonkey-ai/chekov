@@ -165,7 +165,7 @@ fresh-prefill live acceptance have also shipped.
 their current work and prompt hashes when the option is absent. No dependency,
 new configuration file, registry write, or default deep sweep is proposed.
 
-The implementation would:
+The approved implementation:
 
 - Generate four deterministic two-hop cases at each requested length, with
   the linked facts separated and their positions varied through a seeded
@@ -191,14 +191,13 @@ The implementation would:
   `--dry-run` before inference. Use the existing server ownership and context
   checks; an unsupported length must be named, not silently shortened.
 
-**Scope for approval:** More than five files, limited to benchmark generation,
+**Approved scope:** More than five files, limited to benchmark generation,
 CLI orchestration, run recording/reporting/comparison, focused tests, existing
-user documentation, and generated completions. Likely edit sites are
-`src/commands/capability.rs`, `src/core/bench/probes.rs`,
-`src/core/bench/store.rs`, `src/core/bench/compare.rs`, and the benchmark module
-registration. A dedicated generator module is PROPOSED; its exact path and any
-additional required schema consumers will be verified before editing. This
-does not authorize changes to the proxy, dependencies, gates, or module layout.
+user documentation, and generated completions. Implementation lives in
+`src/core/bench/longctx.rs`, with CLI orchestration, runner translation helpers,
+run header/row persistence, comparison, and benchmark module registration.
+Existing record fixtures gained absent trace fields. The proxy, dependencies,
+gates, and existing module layout were not changed.
 
 **Resolution paths:**
 
@@ -217,8 +216,24 @@ acceptance step whose printed cost and available server window must be checked.
 
 **More information / tags:** capability spec §7.2 `long_ctx_trace`, §13 Q8;
 `AGENTS.md` scope discipline (changes touching >5 files).
-TODO: implement and record validation evidence.
-Proposed 2026-09-10 — status: APPROVED 2026-09-10, including the >5-file scope.
+IMPLEMENTED 2026-09-10. The optional saved plan pins the generator version,
+lengths, sampling seed, and 256-token answer budget. Each row retains its
+expected answer, observed answer, requested length, calibrated and observed
+token counts, context limit, and completion state. Recommendations require
+every planned case on both transports, with duplicate/missing/unverified rows
+preventing a passing range. Foreign runtimes get answer checks but no context
+recommendation because their template and context were not calibrated.
+
+Validation: `make lint && make test` passed (884 unit + 10 integration tests;
+19 new trace tests). The initial red commit is `ebbaf03`. A parallel-test
+fixture collision was fixed by adding an atomic directory identifier, without
+changing the assertions. CLI help and the real four-length dry-run passed;
+the latter prints 32 crossings for the active Ornith model and ~334 minutes
+including its ordinary throughput suite, using the stated conservative rates.
+Zsh completions were regenerated; `shell/_chekov` is ignored by the repository.
+TODO: run live deep-context acceptance in an agreed server window; no model
+inference, launch, or settings change was performed during this implementation.
+Proposed 2026-09-10 — status: IMPLEMENTED 2026-09-10; live acceptance owed.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize

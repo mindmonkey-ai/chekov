@@ -35,6 +35,8 @@ const PAIRED: [&str; 3] = ["tool_emit", "instruction", "tool_loop"];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunHead {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_ctx_trace: Option<super::longctx::Plan>,
     pub model: String,
     /// Human-readable beside the hashed `machine_id`.
     pub machine_brand: Option<String>,
@@ -53,6 +55,8 @@ pub struct RunHead {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_ctx_trace: Option<super::longctx::Row>,
     pub schema: u32,
     pub run_id: String,
     pub seq: u32,
@@ -362,6 +366,7 @@ impl RunWriter {
         head: &RunHead,
     ) -> Result<(Self, RunLog), ChekovError> {
         let log = RunLog::load(&eval_dir.join(run_id))?;
+        super::longctx::assert_same(&log.head, head)?;
         if let Some(refusal) = mismatch_error(&log.head.stamp, &head.stamp) {
             return Err(refusal);
         }
@@ -381,7 +386,24 @@ impl RunWriter {
 
     /// One row, one flushed `O_APPEND` write — a crash loses at most this task.
     pub fn append(&mut self, task: Task) -> Result<(), ChekovError> {
+        self.append_evidence(task, None)
+    }
+
+    pub(crate) fn append_trace(
+        &mut self,
+        task: Task,
+        trace: super::longctx::Row,
+    ) -> Result<(), ChekovError> {
+        self.append_evidence(task, Some(trace))
+    }
+
+    fn append_evidence(
+        &mut self,
+        task: Task,
+        long_ctx_trace: Option<super::longctx::Row>,
+    ) -> Result<(), ChekovError> {
         let row = TaskRow {
+            long_ctx_trace,
             schema: SCHEMA_VERSION,
             run_id: self.run_id.clone(),
             seq: self.seq,
@@ -578,6 +600,7 @@ pub fn render_run(log: &RunLog) -> String {
         .collect();
     out.push_str(&probes);
     out.push_str(&suite_summaries(log));
+    out.push_str(&super::longctx::render(log));
     out.push_str(&render_codebase(log));
     out
 }
@@ -1954,6 +1977,7 @@ mod tests {
     /// the flag fields from the argv, so the two must agree.
     fn head() -> RunHead {
         RunHead {
+            long_ctx_trace: None,
             model: "ornith-1.5-35b-a3b".into(),
             machine_brand: Some("Apple M3 Ultra".into()),
             launch_args: [

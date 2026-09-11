@@ -316,6 +316,41 @@ fn forward_of(wire: &ProbeWire, req: &HttpRequest) -> Result<(String, String), C
     Ok((forward.path, body))
 }
 
+pub(crate) fn prepare_trace(
+    wire: &ProbeWire,
+    req: &HttpRequest,
+    transport: Transport,
+) -> Result<JsonRequest, ChekovError> {
+    let (path, body) = match transport {
+        Transport::Buffered => forward_of(wire, req)?,
+        Transport::Streamed => forward_of(wire, &with_stream_flag(req)?)?,
+    };
+    Ok(JsonRequest {
+        url: format!("{}{}", wire.upstream.base_url, path),
+        body: adjust_body(&body, wire.pins, None)?,
+        bearer: Some(wire.upstream.api_key.clone()),
+    })
+}
+
+pub(crate) fn translate_trace(
+    wire: &ProbeWire,
+    response: &str,
+    transport: Transport,
+) -> Result<String, ChekovError> {
+    match transport {
+        Transport::Buffered => wire.facade.translate_response(response),
+        Transport::Streamed => {
+            let mut translator = wire.facade.stream_translator();
+            let mut events = Vec::new();
+            for data in data_lines(response) {
+                events.extend(translator.on_chunk(data));
+            }
+            events.extend(translator.finish());
+            assemble(&events)
+        }
+    }
+}
+
 /// Which door a probe took. Claude Code streams; the buffered door is the one
 /// `doctor` and the first bench runs used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]

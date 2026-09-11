@@ -7,6 +7,13 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `capability bench --long-ctx-trace LENGTHS` adds opt-in, seeded two-hop
+  context checks on both transports. Reports compare exact answers by length
+  and recommend only a complete, verified contiguous passing range. Managed
+  runs check templated token counts before inference and response usage after
+  it; foreign lengths remain unverified. The dry-run estimates every crossing,
+  saved plans protect resume/comparison, and ordinary benchmark defaults and
+  prompt hashes are preserved. Model settings are never written.
 - `capability compare` shows each run's median recorded thinking share beside
   the other run, grouped by suite and transport. Only matching cases with
   character counts in both runs contribute; measured/shared pair counts expose
