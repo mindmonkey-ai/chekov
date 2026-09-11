@@ -341,8 +341,9 @@ decision in the capability roadmap above; `src/core/bench/probeset.rs:151`
 (`content_hash`), `src/core/bench/probes.rs:51` (`suite_prompt_hash`),
 `src/commands/capability.rs:1962` (`run_tool_case`), and
 `src/core/bench/grade.rs:272` (`check_one`).
-Proposed 2026-09-10 — status: PROPOSED; awaiting a written ruling on the counts
-and corpus cutover. No probe content or runtime behavior has changed.
+Proposed 2026-09-10 — status: APPROVED 2026-09-10. The user
+authorized the recommended counts, corpus cutover, and nine-file scope with
+"merge and continue". Implementation and automated validation are underway.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
