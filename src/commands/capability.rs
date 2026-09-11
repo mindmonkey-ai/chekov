@@ -1149,6 +1149,7 @@ fn bench_estimate(
     Ok(lifecycle::estimate_secs(steps, plan)
         + trace_estimate(inputs)
         + agentic_estimate_secs(inputs.args.suite, inputs.max_turns)?
+            .saturating_mul(inputs.candidates as u64)
         + codebase_secs
         + lifecycle::judge_estimate_secs(judge_crossings(inputs)))
 }

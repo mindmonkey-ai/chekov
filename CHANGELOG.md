@@ -7,6 +7,13 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- The agentic corpus now has 39 tool cases (30 calls and 9 abstentions),
+  30 paired forced-grammar checks, and 40 instruction cases. All original
+  questions and six tool-loop scenarios are preserved. New cases exercise
+  overlapping palettes, nested and typed arguments, exact strings, abstention,
+  and combined output constraints. Agentic/all workload hashes change;
+  comparisons and resume across old/new corpora refuse. Bench estimates also
+  count the agentic workload for every selected model.
 - `capability bench --long-ctx-trace LENGTHS` adds opt-in, seeded two-hop
   context checks on both transports. Reports compare exact answers by length
   and recommend only a complete, verified contiguous passing range. Managed

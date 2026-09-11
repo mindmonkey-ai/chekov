@@ -581,6 +581,24 @@ do **not** refresh the binary on your PATH. `make install` does — it re-runs
 commits, run `make install` before blaming a missing flag on the tool: a
 days-old `~/.cargo/bin/chekov` is the likelier explanation.
 
+### Agentic probe corpus
+
+`chekov capability bench --suite agentic` runs 39 tool-selection cases
+(30 calls and 9 abstentions), 30 paired forced-grammar checks, and 40
+instruction cases, followed by the existing six tool-loop scenarios.
+Tool selection and instruction cases cross both buffered and streamed paths;
+the forced-grammar check crosses only the buffered path for call cases.
+That is 188 single-turn requests per model, plus the variable-turn loops.
+
+The expanded questions cover overlapping tools, nested and typed arguments,
+exact strings and escaping, missing capabilities or required information,
+and combined output constraints. The original questions are preserved.
+The corpus content hash changes for agentic and combined runs, so comparisons
+and resume across the old and expanded corpus refuse. Old records remain
+readable; throughput-only hashes are unchanged. Run `--dry-run` first: its
+estimate includes the agentic work for every selected model. Automated checks
+pass; a three-model campaign is still needed to assess discrimination.
+
 ### Long-context traces
 
 Add a length list explicitly; ordinary benchmarks keep their current task set:

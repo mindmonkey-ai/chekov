@@ -341,9 +341,33 @@ decision in the capability roadmap above; `src/core/bench/probeset.rs:151`
 (`content_hash`), `src/core/bench/probes.rs:51` (`suite_prompt_hash`),
 `src/commands/capability.rs:1962` (`run_tool_case`), and
 `src/core/bench/grade.rs:272` (`check_one`).
-Proposed 2026-09-10 — status: APPROVED 2026-09-10. The user
+Proposed 2026-09-10 — status: IMPLEMENTED 2026-09-10. The user
 authorized the recommended counts, corpus cutover, and nine-file scope with
-"merge and continue". Implementation and automated validation are underway.
+"merge and continue". The corpus now has 39 tool cases (30 calls and 9
+abstentions), 30 paired grammar checks, and 40 instruction cases. Its frozen
+content hash is `e0d71495afd7`; the original was `6e2669a1c242`. A regression
+pins every original question and all six tool-loop scenarios byte-for-byte
+below the schema declaration. The format and grader vocabulary are unchanged.
+
+Automated validation: red commit `7699bc0` passed lint and failed ten checks
+for the missing cases, unchanged hash, and underestimated multi-model cost.
+After implementation, `make lint && make test` passes (894 unit and 10
+integration tests). Independent JSON Schema validation confirms all tool
+schemas are valid and all 30 golden calls conform to their own schemas.
+Good/bad answer fixtures exercise all 23 added calls, all 6 added abstentions,
+and all 28 added instruction cases. The single-turn estimate is 188 crossings
+per model plus the loop ceiling; a regression also exposed and fixed the
+planner counting agentic work only once for a multi-model run.
+
+The CLI dry-run for `--suite agentic --models ornith-1.5-35b-a3b` succeeds and
+estimates about 51 minutes on the current configuration. The proposed campaign
+uses `qwen3.5-9b`, `ornith-1.5-35b-a3b`, and `gpt-oss-120b`, selected for different
+model sizes and families; their actual score spread is still unmeasured.
+The three-model dry-run correctly refuses because an existing Ornith server
+is running (pid 15573 at validation time). This work did not start or stop it.
+TODO: agree a server window, rerun the three-model dry-run, and obtain campaign
+approval before live measurement. Publish the per-category spread, including
+non-discriminating and unavailable results, before claiming live acceptance.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
