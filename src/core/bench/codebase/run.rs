@@ -518,6 +518,7 @@ mod tests {
     /// hydrates to the same flags.
     fn run_head() -> RunHead {
         RunHead {
+            long_ctx_trace: None,
             model: "local-model".into(),
             machine_brand: None,
             launch_args: ["-ctk", "q8_0", "-ctv", "q8_0", "-fa", "on"]

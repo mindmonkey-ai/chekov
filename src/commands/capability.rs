@@ -115,6 +115,10 @@ impl From<MetricArg> for frontier::Metric {
 
 #[derive(Debug, clap::Args)]
 pub struct BenchOpts {
+    /// Add four two-hop traces per estimated prompt length on both transports.
+    /// Opt-in; for example 4096,16384,65536,131072. Prints a context recommendation.
+    #[arg(long, value_delimiter = ',', value_name = "LENGTHS")]
+    pub long_ctx_trace: Vec<u32>,
     /// Graded probe set (TOML). There is no compiled-in fixture yet:
     /// fixture-v1 is release-gated on a three-model measurement campaign.
     #[arg(long)]
@@ -897,6 +901,7 @@ fn resolve_judge(
 
 /// The bench invocation's own inputs, bundled (§4).
 struct BenchArgs<'a> {
+    long_ctx_trace: Option<crate::core::bench::longctx::Plan>,
     fixture: Option<&'a std::path::Path>,
     resume: Option<&'a str>,
     models: &'a [String],
@@ -921,6 +926,7 @@ struct BenchArgs<'a> {
 /// server is asked about.
 fn bench_args(opts: &BenchOpts) -> Result<BenchArgs<'_>, ChekovError> {
     Ok(BenchArgs {
+        long_ctx_trace: crate::core::bench::longctx::Plan::optional(&opts.long_ctx_trace, 0)?,
         fixture: opts.fixture.as_deref(),
         resume: opts.resume.as_deref(),
         models: &opts.models,
@@ -1083,8 +1089,54 @@ fn judge_crossings(inputs: &RunInputs) -> u64 {
         * u64::try_from(inputs.candidates).unwrap_or(0)
 }
 
-/// The wall-clock estimate: the sweep, the agentic crossings, and the
-/// codebase set (6s per crossing — a `cross_file_first` task is two).
+fn trace_estimate(inputs: &RunInputs) -> u64 {
+    inputs.args.long_ctx_trace.as_ref().map_or(0, |plan| {
+        plan.estimate_secs()
+            .saturating_mul(inputs.candidates as u64)
+    })
+}
+
+fn trace_plan_line(inputs: &RunInputs) -> String {
+    inputs
+        .args
+        .long_ctx_trace
+        .as_ref()
+        .map_or_else(String::new, |plan| plan.plan_line(inputs.candidates))
+}
+
+fn trace_head(
+    mut head: crate::core::bench::store::RunHead,
+    args: &BenchArgs,
+    seed: u32,
+) -> crate::core::bench::store::RunHead {
+    if let Some(plan) = &args.long_ctx_trace {
+        let plan = plan.with_seed(seed);
+        head.stamp.prompt_set_hash = plan.wrap_hash(&head.stamp.prompt_set_hash);
+        head.long_ctx_trace = Some(plan);
+    }
+    head
+}
+
+fn trace_preflight(
+    candidates: &[(
+        crate::core::registry::Effective,
+        crate::core::bench::lifecycle::StepAction,
+    )],
+    args: &BenchArgs,
+) -> Result<(), ChekovError> {
+    let Some(plan) = &args.long_ctx_trace else {
+        return Ok(());
+    };
+    if args.runtime.is_some() {
+        return Ok(());
+    }
+    for (candidate, _) in candidates {
+        plan.check_context(candidate.ctx_size)?;
+    }
+    Ok(())
+}
+
+/// Includes the sweep, agentic crossings, codebase set, and optional context traces.
 fn bench_estimate(
     steps: &[crate::core::bench::lifecycle::BenchStep],
     plan: &crate::core::bench::sweep::SweepPlan,
@@ -1095,6 +1147,7 @@ fn bench_estimate(
         .prepared
         .map_or(0, |p| codebase_estimate_secs(p, inputs.args.allow_exec));
     Ok(lifecycle::estimate_secs(steps, plan)
+        + trace_estimate(inputs)
         + agentic_estimate_secs(inputs.args.suite, inputs.max_turns)?
         + codebase_secs
         + lifecycle::judge_estimate_secs(judge_crossings(inputs)))
@@ -1109,6 +1162,7 @@ fn render_dry_run(
 ) -> String {
     use crate::core::bench::lifecycle::render_plan;
     let mut out = String::new();
+    out.push_str(&trace_plan_line(inputs));
     if let (Some(p), Some(repo)) = (inputs.prepared, inputs.args.codebase) {
         out.push_str(&codebase_plan_line(p, repo, inputs.args.allow_exec));
     }
@@ -1132,6 +1186,7 @@ fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
     // before a single question about servers or models is asked.
     let prepared = prepare_codebase(ctx, args)?;
     let candidates = resolve_candidates(ctx, args)?;
+    trace_preflight(&candidates, args)?;
     let judge = resolve_judge(ctx, args, &candidates)?;
     let inputs = RunInputs {
         args,
@@ -1147,6 +1202,7 @@ fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
         print!("{}", render_dry_run(&steps, estimate, &inputs));
         return finish_codebase(prepared).map(|()| ExitCode::SUCCESS);
     }
+    eprint!("{}", trace_plan_line(&inputs));
     confirm_launches(&steps, estimate, args.yes)?;
     let outcome = run_candidates(ctx, &candidates, &inputs)
         .and_then(|dirs| judge_phase(ctx, &dirs, judge.as_ref()));
@@ -1456,6 +1512,7 @@ fn measure_candidate(
     };
     let plan: sweep::SweepPlan = (&cfg.file.bench).into();
     let head = build_head(ctx, setup, &head_inputs(props, &plan, inputs))?;
+    let head = trace_head(head, args, cfg.file.bench.seed);
     let (mut writer, done) = open_run(ctx, &head, args.resume)?;
     run_suites(
         &mut TaskSink {
@@ -1728,6 +1785,7 @@ fn run_suites(sink: &mut TaskSink, ctx: &Ctx, inputs: &SuiteInputs) -> Result<()
         },
     };
     let runtime = inputs.runtime.as_deref();
+    crate::core::bench::longctx::run(sink.writer, &wire, sink.done)?;
     let recast = |e| runner::foreign_timings_error(e, runtime);
     let pass = SuitePass {
         wire: &wire,
@@ -2614,6 +2672,7 @@ fn build_head(
         .is_some_and(crate::core::bench::lifecycle::Suite::runs_agentic)
         .then(|| crate::core::bench::runner::FORCED_REASONING_FORMAT.to_owned());
     Ok(store::RunHead {
+        long_ctx_trace: None,
         model: setup.eff.name.clone(),
         machine_brand: identity.machine_brand,
         launch_args: identity.launch_args,
@@ -3725,6 +3784,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&eval);
         std::fs::create_dir_all(&eval).expect("scratch dir");
         let head = RunHead {
+            long_ctx_trace: None,
             model: "ornith-1.5-35b-a3b".into(),
             machine_brand: None,
             launch_args: vec![],
@@ -4252,5 +4312,661 @@ mod tests {
     fn json_keeps_provenance_as_a_field() {
         let out = render_json(&m3_ultra(Some(Probed::new(196_608, Provenance::Predicted))));
         assert!(out.contains("\"provenance\":\"predicted\""), "{out}");
+    }
+    mod long_context {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use clap::Parser;
+        use serde_json::{Value, json};
+
+        use crate::core::bench::store::{RunHead, RunLog, RunWriter, Transport};
+        use crate::core::hub::{HttpClient, JsonRequest};
+        use crate::error::ChekovError;
+
+        #[derive(Clone, Copy)]
+        enum Reply {
+            Exact,
+            Prose,
+            Truncated,
+            ShortPrompt,
+            NoUsage,
+        }
+
+        struct Fake {
+            reply: Reply,
+            requests: Rc<RefCell<Vec<Value>>>,
+        }
+
+        fn template(body: &Value) -> String {
+            let messages = body["messages"].as_array().expect("messages");
+            let text: Vec<&str> = messages
+                .iter()
+                .map(|message| message["content"].as_str().expect("text message"))
+                .collect();
+            format!("CHAT\n{}\nASSISTANT", text.join("\n"))
+        }
+
+        fn solve(body: &Value) -> String {
+            let text = template(body);
+            let target = text
+                .split("Query: ")
+                .nth(1)
+                .expect("query")
+                .split_whitespace()
+                .next()
+                .expect("target");
+            let anchor = text
+                .lines()
+                .find(|line| line.starts_with(&format!("const {target}:")))
+                .expect("named constant");
+            let function = anchor
+                .split(" = ")
+                .nth(1)
+                .expect("function pointer")
+                .trim_end_matches(';');
+            let definition = text
+                .lines()
+                .find(|line| line.starts_with(&format!("fn {function}()")))
+                .expect("separated function");
+            definition
+                .split('{')
+                .nth(1)
+                .expect("function body")
+                .split('}')
+                .next()
+                .expect("return value")
+                .trim()
+                .to_owned()
+        }
+
+        fn completion(body: &Value, reply: Reply) -> Value {
+            let gold = solve(body);
+            let answer = match reply {
+                Reply::Prose => format!("The answer is {gold}."),
+                Reply::Exact | Reply::Truncated | Reply::ShortPrompt | Reply::NoUsage => gold,
+            };
+            let full = template(body).split_whitespace().count();
+            let count = match reply {
+                Reply::ShortPrompt => full / 2,
+                Reply::Exact | Reply::Prose | Reply::Truncated | Reply::NoUsage => full,
+            };
+            let stop = match reply {
+                Reply::Truncated => "length",
+                Reply::Exact | Reply::Prose | Reply::ShortPrompt | Reply::NoUsage => "stop",
+            };
+            let usage = match reply {
+                Reply::NoUsage => Value::Null,
+                _ => {
+                    json!({"prompt_tokens": count, "completion_tokens": 3, "total_tokens": count + 3})
+                }
+            };
+            json!({
+                "id": "trace-reply", "model": "trace-model", "object": "chat.completion",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": answer},
+                    "finish_reason": stop}], "usage": usage,
+            })
+        }
+
+        fn streamed(body: &Value) -> String {
+            let start = json!({"id": "trace-reply", "choices": [{"index": 0,
+                "delta": {"role": "assistant", "content": body["choices"][0]["message"]["content"]},
+                "finish_reason": null}]});
+            let end = json!({"id": "trace-reply", "choices": [{"index": 0, "delta": {},
+                "finish_reason": body["choices"][0]["finish_reason"]}], "usage": body["usage"]});
+            format!("data: {start}\n\ndata: {end}\n\ndata: [DONE]\n\n")
+        }
+
+        fn reply_to(fake: &Fake, request: &JsonRequest) -> String {
+            let body: Value = serde_json::from_str(&request.body).expect("request JSON");
+            if request.url.ends_with("/apply-template") {
+                return json!({"prompt": template(&body)}).to_string();
+            }
+            if request.url.ends_with("/tokenize") {
+                let count = body["content"]
+                    .as_str()
+                    .expect("content")
+                    .split_whitespace()
+                    .count();
+                return json!({"tokens": vec![0; count]}).to_string();
+            }
+            assert!(request.url.ends_with("/v1/chat/completions"));
+            fake.requests.borrow_mut().push(body.clone());
+            let response = completion(&body, fake.reply);
+            if body["stream"] == true {
+                streamed(&response)
+            } else {
+                response.to_string()
+            }
+        }
+
+        impl HttpClient for Fake {
+            fn get(&self, url: &str) -> Result<String, ChekovError> {
+                panic!("unexpected GET: {url}")
+            }
+
+            fn post_json(&self, request: &JsonRequest) -> Result<String, ChekovError> {
+                Ok(reply_to(self, request))
+            }
+        }
+
+        fn head(lengths: &[u32]) -> RunHead {
+            let mut stamp = super::local_stamp(&super::plan_fixture());
+            stamp.ctx = 262_144;
+            stamp.seed = 42;
+            stamp.set_flags(&crate::core::bench::stamp::launch_flags(&[]));
+            let mut value = json!({"model": "trace-model", "machine_brand": null,
+                "launch_args": [], "forced_reasoning_format": null, "stamp": stamp});
+            if !lengths.is_empty() {
+                value["long_ctx_trace"] = json!({"version": 1, "lengths": lengths,
+                    "seed": 42, "max_tokens": 256});
+            }
+            serde_json::from_value(value).expect("trace header loads")
+        }
+
+        fn writer(head: &RunHead) -> RunWriter {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "chekov-longctx-{}-{nonce}-{serial}",
+                std::process::id()
+            ));
+            RunWriter::create(&root, "trace", head).expect("writer")
+        }
+
+        fn run(writer: &mut RunWriter, fake: Fake, done: &[(String, String, Transport)]) {
+            use super::super::{SuiteInputs, TaskSink, TimingClock};
+            use crate::core::bench::runner::FimTransport;
+            let ctx = crate::commands::Ctx {
+                config: crate::core::config::Config::load(writer.dir()).expect("config"),
+                http: Box::new(fake),
+            };
+            let upstream = crate::core::proxy::serve::Upstream {
+                base_url: "http://fake".into(),
+                api_key: "test".into(),
+            };
+            let plan = super::plan_fixture();
+            let inputs = SuiteInputs {
+                plan: &plan,
+                upstream: &upstream,
+                model: "trace-model",
+                fixture: None,
+                suite: None,
+                prepared: None,
+                fim: FimTransport::Infill,
+                clock: TimingClock::Server,
+                runtime: None,
+            };
+            super::super::run_suites(&mut TaskSink { writer, done }, &ctx, &inputs).expect("suite");
+        }
+
+        fn measured(reply: Reply) -> (RunLog, Vec<Value>) {
+            let requests = Rc::new(RefCell::new(Vec::new()));
+            let mut writer = writer(&head(&[1024, 4096]));
+            run(
+                &mut writer,
+                Fake {
+                    reply,
+                    requests: requests.clone(),
+                },
+                &[],
+            );
+            let log = RunLog::load(writer.dir()).expect("recorded run");
+            let captured = requests.borrow().clone();
+            (log, captured)
+        }
+
+        fn options(cli: crate::cli::Cli) -> super::super::BenchOpts {
+            let crate::cli::Cmd::Capability(cap) = cli.cmd else {
+                panic!("expected capability")
+            };
+            let Some(super::super::CapAction::Bench(opts)) = cap.action else {
+                panic!("expected bench")
+            };
+            opts
+        }
+
+        #[test]
+        fn long_context_cli_accepts_an_explicit_length_list() {
+            let cli = crate::cli::Cli::try_parse_from([
+                "chekov",
+                "capability",
+                "bench",
+                "--long-ctx-trace",
+                "4096,16384,65536,131072",
+                "--dry-run",
+            ]);
+            assert!(cli.is_ok(), "{cli:?}");
+        }
+
+        #[test]
+        fn long_context_cli_rejects_invalid_lengths_before_any_io() {
+            for lengths in ["0", "2048,1024", "1024,1024", "4294967295"] {
+                let parsed = crate::cli::Cli::try_parse_from([
+                    "chekov",
+                    "capability",
+                    "bench",
+                    "--long-ctx-trace",
+                    lengths,
+                ]);
+                match parsed {
+                    Err(_) => (),
+                    Ok(cli) => assert!(
+                        super::super::bench_args(&options(cli)).is_err(),
+                        "{lengths}"
+                    ),
+                }
+            }
+        }
+
+        #[test]
+        fn long_context_runs_four_two_hop_cases_per_length_on_both_transports() {
+            let (log, requests) = measured(Reply::Exact);
+            assert_eq!(requests.len(), 16);
+            assert_eq!(log.rows.len(), 16);
+            assert!(
+                log.rows
+                    .iter()
+                    .all(|row| row.grade.as_ref().is_some_and(|grade| grade.pass))
+            );
+            assert_eq!(
+                log.rows
+                    .iter()
+                    .filter(|row| row.transport == Transport::Streamed)
+                    .count(),
+                8
+            );
+            for request in &requests {
+                assert_eq!(request["model"], "trace-model");
+                assert_eq!(request["temperature"], 0);
+                assert_eq!(request["cache_prompt"], false);
+                assert_eq!(request["max_tokens"], 256);
+            }
+            let sizes: Vec<usize> = requests
+                .iter()
+                .map(|request| template(request).len())
+                .collect();
+            assert!(
+                sizes.iter().max().expect("deep") > &(sizes.iter().min().expect("shallow") * 2)
+            );
+            let row = serde_json::to_value(&log.rows[0]).expect("row");
+            assert!(
+                row["long_ctx_trace"]["expected_prompt_tokens"]
+                    .as_u64()
+                    .is_some()
+            );
+            assert_eq!(
+                row["long_ctx_trace"]["prompt_tokens"],
+                row["long_ctx_trace"]["expected_prompt_tokens"]
+            );
+        }
+
+        #[test]
+        fn long_context_exact_grading_rejects_prose_around_the_right_value() {
+            let (log, _) = measured(Reply::Prose);
+            assert!(
+                log.rows
+                    .iter()
+                    .all(|row| row.grade.as_ref().is_some_and(|grade| !grade.pass))
+            );
+            let report = crate::core::bench::store::render_run(&log);
+            assert!(report.contains("recommended ctx_size: N/A"), "{report}");
+        }
+
+        #[test]
+        fn long_context_output_truncation_never_passes_even_with_the_right_value() {
+            let (log, _) = measured(Reply::Truncated);
+            assert!(
+                log.rows
+                    .iter()
+                    .all(|row| row.grade.as_ref().is_some_and(|grade| !grade.pass))
+            );
+        }
+
+        #[test]
+        fn long_context_shortened_input_is_unavailable_and_cannot_recommend() {
+            let (log, _) = measured(Reply::ShortPrompt);
+            assert!(
+                log.rows
+                    .iter()
+                    .all(|row| row.grade.as_ref().is_some_and(|grade| grade.unavailable))
+            );
+            let report = crate::core::bench::store::render_run(&log);
+            assert!(report.contains("recommended ctx_size: N/A"), "{report}");
+        }
+
+        #[test]
+        fn long_context_missing_token_evidence_cannot_recommend() {
+            let (log, _) = measured(Reply::NoUsage);
+            let report = crate::core::bench::store::render_run(&log);
+            assert!(report.contains("recommended ctx_size: N/A"), "{report}");
+            assert!(report.contains("unverified"), "{report}");
+        }
+
+        #[test]
+        fn long_context_context_refusal_happens_before_inference() {
+            let mut head = head(&[1024]);
+            head.stamp.ctx = 512;
+            let requests = Rc::new(RefCell::new(Vec::new()));
+            let mut writer = writer(&head);
+            run(
+                &mut writer,
+                Fake {
+                    reply: Reply::Exact,
+                    requests: requests.clone(),
+                },
+                &[],
+            );
+            assert!(requests.borrow().is_empty());
+            let log = RunLog::load(writer.dir()).expect("log");
+            assert_eq!(log.rows.len(), 8);
+            assert!(
+                log.rows
+                    .iter()
+                    .all(|row| row.grade.as_ref().is_some_and(|grade| grade.unavailable))
+            );
+        }
+
+        #[test]
+        fn long_context_resume_skips_recorded_cases_on_both_transports() {
+            let head = head(&[1024]);
+            let mut writer = writer(&head);
+            let requests = Rc::new(RefCell::new(Vec::new()));
+            run(
+                &mut writer,
+                Fake {
+                    reply: Reply::Exact,
+                    requests: requests.clone(),
+                },
+                &[],
+            );
+            let log = RunLog::load(writer.dir()).expect("log");
+            let done: Vec<_> = log
+                .rows
+                .iter()
+                .map(|row| (row.suite.clone(), row.task_id.clone(), row.transport))
+                .collect();
+            run(
+                &mut writer,
+                Fake {
+                    reply: Reply::Exact,
+                    requests: requests.clone(),
+                },
+                &done,
+            );
+            assert_eq!(requests.borrow().len(), 8);
+            assert_eq!(RunLog::load(writer.dir()).expect("log").rows.len(), 8);
+        }
+
+        #[test]
+        fn long_context_recommendation_requires_every_case_at_every_lower_length() {
+            let (mut log, _) = measured(Reply::Exact);
+            let full = crate::core::bench::store::render_run(&log);
+            assert!(!full.contains("recommended ctx_size: N/A"), "{full}");
+            assert!(full.contains("tested lower bound"), "{full}");
+            log.rows.remove(0);
+            let incomplete = crate::core::bench::store::render_run(&log);
+            assert!(
+                incomplete.contains("recommended ctx_size: N/A"),
+                "{incomplete}"
+            );
+        }
+
+        #[test]
+        fn long_context_duplicate_rows_cannot_inflate_accuracy() {
+            let (mut log, _) = measured(Reply::Exact);
+            log.rows.push(log.rows[0].clone());
+            let report = crate::core::bench::store::render_run(&log);
+            assert!(report.contains("recommended ctx_size: N/A"), "{report}");
+            assert!(report.contains("duplicate"), "{report}");
+        }
+
+        #[test]
+        fn long_context_compare_and_resume_refuse_different_plans_even_with_matching_stamps() {
+            use crate::core::bench::compare::{CompareOpts, compare_runs};
+            let a = RunLog {
+                head: head(&[1024]),
+                rows: vec![],
+            };
+            let b = RunLog {
+                head: head(&[2048]),
+                rows: vec![],
+            };
+            let opts = CompareOpts {
+                significance_pct: 5.0,
+                cross_runtime: true,
+                cross_flags: true,
+            };
+            assert!(compare_runs(&a, &b, &opts).is_err());
+            let writer = writer(&a.head);
+            let root = writer.dir().parent().expect("eval").to_path_buf();
+            drop(writer);
+            assert!(RunWriter::resume(&root, "trace", &b.head).is_err());
+        }
+
+        #[test]
+        fn long_context_absent_preserves_old_headers_and_makes_no_requests() {
+            let head = head(&[]);
+            let requests = Rc::new(RefCell::new(Vec::new()));
+            let mut writer = writer(&head);
+            run(
+                &mut writer,
+                Fake {
+                    reply: Reply::Exact,
+                    requests: requests.clone(),
+                },
+                &[],
+            );
+            assert!(requests.borrow().is_empty());
+            assert_eq!(
+                RunLog::load(writer.dir()).expect("log").head.stamp,
+                head.stamp
+            );
+        }
+
+        fn return_value(line: &str) -> &str {
+            line.split('{')
+                .nth(1)
+                .expect("body")
+                .trim_end_matches('}')
+                .trim()
+        }
+
+        #[test]
+        fn long_context_facts_are_separated_and_distractors_have_the_same_shape() {
+            let (_, requests) = measured(Reply::Exact);
+            for body in requests {
+                let text = template(&body);
+                let target = text
+                    .split("Query: ")
+                    .nth(1)
+                    .expect("query")
+                    .split_whitespace()
+                    .next()
+                    .expect("target");
+                let anchor = text
+                    .lines()
+                    .find(|line| line.starts_with(&format!("const {target}:")))
+                    .expect("anchor");
+                let pointer = anchor
+                    .split(" = ")
+                    .nth(1)
+                    .expect("pointer")
+                    .trim_end_matches(';');
+                let start = text.find(anchor).expect("anchor position");
+                let finish = text
+                    .find(&format!("fn {pointer}()"))
+                    .expect("function position");
+                assert!(start.abs_diff(finish) > text.len() / 4);
+                let values: Vec<&str> = text
+                    .lines()
+                    .filter(|line| line.starts_with("fn node_"))
+                    .map(return_value)
+                    .collect();
+                assert!(values.len() >= 24);
+                assert!(values.iter().all(|value| value.len() == 8));
+                assert_eq!(
+                    values
+                        .iter()
+                        .filter(|value| **value == solve(&body))
+                        .count(),
+                    1
+                );
+            }
+        }
+
+        fn stamped(lengths: Option<&str>, seed: u32) -> RunHead {
+            let mut tokens = vec!["chekov", "capability", "bench"];
+            if let Some(lengths) = lengths {
+                tokens.extend(["--long-ctx-trace", lengths]);
+            }
+            let opts = options(crate::cli::Cli::try_parse_from(tokens).expect("parse"));
+            let args = super::super::bench_args(&opts).expect("args");
+            super::super::trace_head(head(&[]), &args, seed)
+        }
+
+        #[test]
+        fn long_context_hash_pins_lengths_and_seed_without_changing_ordinary_runs() {
+            let ordinary = head(&[]).stamp.prompt_set_hash;
+            assert_eq!(stamped(None, 42).stamp.prompt_set_hash, ordinary);
+            let traced = stamped(Some("1024,4096"), 42).stamp.prompt_set_hash;
+            assert_ne!(traced, ordinary);
+            assert_eq!(traced, stamped(Some("1024,4096"), 42).stamp.prompt_set_hash);
+            assert_ne!(traced, stamped(Some("1024,8192"), 42).stamp.prompt_set_hash);
+            assert_ne!(traced, stamped(Some("1024,4096"), 43).stamp.prompt_set_hash);
+        }
+
+        fn estimate(lengths: &str, candidates: usize) -> (u64, String) {
+            let opts = options(
+                crate::cli::Cli::try_parse_from([
+                    "chekov",
+                    "capability",
+                    "bench",
+                    "--long-ctx-trace",
+                    lengths,
+                ])
+                .expect("parse"),
+            );
+            let args = super::super::bench_args(&opts).expect("args");
+            let inputs = super::super::RunInputs {
+                args: &args,
+                prepared: None,
+                judge: None,
+                candidates,
+                max_turns: 8,
+            };
+            (
+                super::super::trace_estimate(&inputs),
+                super::super::trace_plan_line(&inputs),
+            )
+        }
+
+        #[test]
+        fn long_context_plan_counts_both_transports_every_length_and_every_candidate() {
+            let (one, _) = estimate("4096,16384,65536,131072", 1);
+            let (three, line) = estimate("4096,16384,65536,131072", 3);
+            assert_eq!(three, 3 * one);
+            assert!(one > estimate("4096,16384", 1).0);
+            assert!(
+                line.contains("32 crossings per model, 3 model(s)"),
+                "{line}"
+            );
+            assert!(
+                line.contains("full-prefill") && line.contains("131072"),
+                "{line}"
+            );
+        }
+
+        #[test]
+        fn long_context_saved_plans_reject_unknown_fields_and_unsupported_versions() {
+            let mut value = serde_json::to_value(head(&[1024])).expect("header");
+            value["long_ctx_trace"]["version"] = json!(2);
+            assert!(serde_json::from_value::<RunHead>(value.clone()).is_err());
+            value["long_ctx_trace"]["version"] = json!(1);
+            value["long_ctx_trace"]["ignore_missing"] = json!(true);
+            assert!(serde_json::from_value::<RunHead>(value).is_err());
+        }
+
+        #[test]
+        fn long_context_foreign_unknown_context_grades_answers_without_a_recommendation() {
+            let mut head = head(&[1024]);
+            head.stamp.ctx = 0;
+            head.stamp.runtime = "foreign 1".into();
+            let mut writer = writer(&head);
+            let requests = Rc::new(RefCell::new(Vec::new()));
+            run(
+                &mut writer,
+                Fake {
+                    reply: Reply::Exact,
+                    requests: requests.clone(),
+                },
+                &[],
+            );
+            assert_eq!(requests.borrow().len(), 8);
+            let log = RunLog::load(writer.dir()).expect("log");
+            assert!(
+                log.rows
+                    .iter()
+                    .all(|row| row.grade.as_ref().is_some_and(|grade| grade.pass))
+            );
+            let report = crate::core::bench::store::render_run(&log);
+            assert!(report.contains("recommended ctx_size: N/A"), "{report}");
+        }
+
+        fn discard_last_row(writer: &RunWriter) {
+            let mut log = RunLog::load(writer.dir()).expect("log");
+            assert_eq!(
+                log.rows.pop().expect("last case").transport,
+                Transport::Streamed
+            );
+            let lines: Vec<String> = log
+                .rows
+                .iter()
+                .map(|row| serde_json::to_string(row).expect("row"))
+                .collect();
+            std::fs::write(writer.dir().join("results.jsonl"), lines.join("\n") + "\n")
+                .expect("partial run");
+        }
+
+        #[test]
+        fn long_context_resume_runs_only_the_missing_streamed_case() {
+            let head = head(&[1024]);
+            let mut writer = writer(&head);
+            let requests = Rc::new(RefCell::new(Vec::new()));
+            run(
+                &mut writer,
+                Fake {
+                    reply: Reply::Exact,
+                    requests: requests.clone(),
+                },
+                &[],
+            );
+            discard_last_row(&writer);
+            let root = writer.dir().parent().expect("eval").to_path_buf();
+            drop(writer);
+            let (mut resumed, log) = RunWriter::resume(&root, "trace", &head).expect("resume");
+            let done: Vec<_> = log
+                .rows
+                .iter()
+                .map(|row| (row.suite.clone(), row.task_id.clone(), row.transport))
+                .collect();
+            run(
+                &mut resumed,
+                Fake {
+                    reply: Reply::Exact,
+                    requests: requests.clone(),
+                },
+                &done,
+            );
+            assert_eq!(requests.borrow().len(), 9);
+            let restored = RunLog::load(resumed.dir()).expect("restored");
+            assert_eq!(restored.rows.len(), 8);
+            assert_eq!(restored.rows.last().expect("last").seq, 7);
+        }
     }
 }

@@ -324,6 +324,7 @@ fn depth_of(row: &TaskRow) -> Option<u32> {
 /// being compared, not what must match. `--cross-runtime` additionally
 /// masks the runtime allow-list (spec §7).
 fn assert_same_environment(pair: &RunPair, opts: &CompareOpts) -> Result<(), ChekovError> {
+    super::longctx::assert_same(&pair.a.head, &pair.b.head)?;
     let a = &pair.a.head.stamp;
     let mut b_env = pair.b.head.stamp.clone();
     b_env.weights_revision.clone_from(&a.weights_revision);
@@ -1061,6 +1062,7 @@ pub fn render_comparison(pair: &RunPair, comparison: &RunComparison) -> String {
     out.push_str(&render_agentic(pair, &comparison.agentic));
     out.push_str(&render_codebase(pair, &comparison.codebase));
     out.push_str(&render_thinking(&comparison.thinking));
+    out.push_str(&super::longctx::compare(pair.a, pair.b));
     out
 }
 
@@ -1357,6 +1359,7 @@ mod tests {
 
     fn head_of(model: &str, stamp: Stamp) -> RunHead {
         RunHead {
+            long_ctx_trace: None,
             model: model.into(),
             machine_brand: None,
             launch_args: vec![],
@@ -1373,6 +1376,7 @@ mod tests {
         RunLog {
             head: head_of(model, stamp),
             rows: vec![TaskRow {
+                long_ctx_trace: None,
                 schema: 1,
                 run_id: "r".into(),
                 seq: 0,
@@ -1415,6 +1419,7 @@ mod tests {
 
     fn thinking_row(suite: &str, task_id: &str, counts: (u64, u64)) -> TaskRow {
         TaskRow {
+            long_ctx_trace: None,
             schema: 1,
             run_id: "r".into(),
             seq: 0,
@@ -1946,6 +1951,7 @@ mod tests {
     fn only_depths_present_in_both_runs_are_compared() {
         let mut a = run("m1", stamp("dda1b0d67", "r1/s1"), &[19.0, 21.0, 22.0]);
         a.rows.push(TaskRow {
+            long_ctx_trace: None,
             schema: 1,
             run_id: "r".into(),
             seq: 1,
@@ -2037,6 +2043,7 @@ mod tests {
 
     fn graded_row(seq: usize, case: Case) -> TaskRow {
         TaskRow {
+            long_ctx_trace: None,
             schema: 1,
             run_id: "r".into(),
             seq: u32::try_from(seq).unwrap_or(0),
@@ -2086,6 +2093,7 @@ mod tests {
 
     fn codebase_row(seq: usize, case: CodeCase) -> TaskRow {
         TaskRow {
+            long_ctx_trace: None,
             schema: 1,
             run_id: "r".into(),
             seq: u32::try_from(seq).unwrap_or(0),
@@ -2593,6 +2601,7 @@ mod tests {
 
     fn judge_row(seq: usize, task_id: &str, row: JudgeRow) -> TaskRow {
         TaskRow {
+            long_ctx_trace: None,
             schema: 1,
             run_id: "r".into(),
             seq: u32::try_from(seq).unwrap_or(0),

@@ -241,6 +241,7 @@ mod tests {
 
     fn depth_row(run_id: &str, depth: u32, decode: &[f64]) -> TaskRow {
         TaskRow {
+            long_ctx_trace: None,
             schema: crate::core::bench::store::SCHEMA_VERSION,
             run_id: run_id.into(),
             seq: 0,
@@ -268,6 +269,7 @@ mod tests {
     fn run(rows: Vec<TaskRow>) -> RunLog {
         RunLog {
             head: RunHead {
+                long_ctx_trace: None,
                 model: "ornith-1.5-35b-a3b".into(),
                 machine_brand: Some("Apple M3 Ultra".into()),
                 launch_args: vec!["-m".into(), "model.gguf".into()],

@@ -9,6 +9,7 @@ pub mod fixture;
 pub mod grade;
 pub mod judge;
 pub mod lifecycle;
+pub mod longctx;
 pub mod probes;
 pub mod probeset;
 pub mod runner;
