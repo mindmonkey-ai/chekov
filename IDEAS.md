@@ -365,9 +365,61 @@ uses `qwen3.5-9b`, `ornith-1.5-35b-a3b`, and `gpt-oss-120b`, selected for differ
 model sizes and families; their actual score spread is still unmeasured.
 The three-model dry-run correctly refuses because an existing Ornith server
 is running (pid 15573 at validation time). This work did not start or stop it.
-TODO: agree a server window, rerun the three-model dry-run, and obtain campaign
-approval before live measurement. Publish the per-category spread, including
-non-discriminating and unavailable results, before claiming live acceptance.
+The continuation request on 2026-09-10 authorizes the three-model campaign;
+the server-window prerequisite remains open. See the current receipt below.
+
+### Three-model campaign preflight (2026-09-11 UTC)
+
+Status: **AUTHORIZED; BLOCKED on another session's server; live acceptance
+PENDING.** Fetched origin and fast-forward checked `develop`: still `a196881`
+(PRs #84 and #85 merged), with a clean working tree. Built and used
+`target/debug/chekov`; the installed CLI was not used. The corpus SHA-256 is
+`e0d71495afd7b79b34a24ea972c020fc9dd4529bba6441c7e931be005dc1c389`.
+Its 39 tool cases, 30 forced-grammar checks, 40 instruction cases, and six
+tool-loop scenarios remain frozen; no cases or grading changed.
+
+All three registered weight files are present. The live capability scan reports
+an Apple M3 Ultra, 262144 MiB RAM, and a 228065 MiB engine-reported GPU budget.
+There is 72 GiB free on the checkout volume and 896 GiB on the external model
+volume. `capability explain` gives these configured footprints:
+
+| Candidate | Quant / revision prefix | Context | Weights + KV bytes |
+| --- | --- | ---: | ---: |
+| `qwen3.5-9b` | Q8_0 / `3885219b6810` | 131072 | 11809203424 |
+| `ornith-1.5-35b-a3b` | Q8_0 / `fbbaed45c2f0` | 262144 | 40654275840 |
+| `gpt-oss-120b` | F16 / `ff1a82da6ad4` | 98304 | 69219388800 |
+
+These are footprint estimates, excluding runtime overhead; they do not establish
+a free server window. Another terminal initially ran `chekov tune --apply` on
+Ornith BF16, then `chekov launch codex` (observed parent pid 91490) started
+llama-server pid 91540 on port 8080. That server remained alive after its parent
+exited. It belongs to the other session; this campaign did not stop it or send
+it inference requests. The three-model dry-run refused the running
+`ornith-1.5-35b-a3b-bf16` before producing a plan or wall-clock estimate.
+The earlier single-model 51-minute estimate is not a current campaign estimate.
+
+Examined all 43 stored `eval/*/stamp.json` files: none identifies
+`agentic-v0:e0d71495afd7`. No existing run can supply or resume this campaign.
+**Measurements: unavailable for all three models.** Aggregate and per-case
+scores, category spread, ceiling/floor effects, and recurring model failures
+remain unmeasured. The ownership refusal is an operational blocker, not a
+model failure or an all-fail category. No discrimination conclusion follows.
+
+Local raw preflight output is preserved in
+`logs/agentic-campaign-20260911-preflight.json`; validation output is in
+`logs/agentic-campaign-20260911-tests.log`, with the first sandbox attempt in
+`logs/agentic-campaign-20260911-tests-sandbox.log`. These gitignored receipts
+remain on the measurement machine. `make lint && make test` passes: 897 unit
+and 10 integration tests. The sandbox attempt failed two Codex launch tests
+because localhost binding was denied; both pass outside the sandbox.
+
+**Next item / TODO:** obtain the owner's released server window, rerun
+`target/debug/chekov capability bench --suite agentic --models qwen3.5-9b,ornith-1.5-35b-a3b,gpt-oss-120b --dry-run`,
+inspect its estimate, then run the same command with `--yes` instead of
+`--dry-run`. Preserve each run's stamp and JSONL and compare every category
+and case, reporting unavailable and non-discriminating results. Complete this
+campaign before selecting further corpus changes; the evidence does not yet
+justify a model ranking or release of the separate compiled-in fixture.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize

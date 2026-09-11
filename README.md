@@ -597,7 +597,11 @@ The corpus content hash changes for agentic and combined runs, so comparisons
 and resume across the old and expanded corpus refuse. Old records remain
 readable; throughput-only hashes are unchanged. Run `--dry-run` first: its
 estimate includes the agentic work for every selected model. Automated checks
-pass; a three-model campaign is still needed to assess discrimination.
+pass. The authorized three-model campaign is awaiting a server window: its
+2026-09-11 UTC preflight found all weights available but refused another
+session's running server. No expanded-corpus model scores have been measured.
+See the [campaign receipt](IDEAS.md#three-model-campaign-preflight-2026-09-11-utc)
+for resources, evidence, and the command to resume preparation.
 
 ### Long-context traces
 
