@@ -13,6 +13,35 @@ const CUSTOM_PREFIX: &str = "chekov_custom_";
 const NAMESPACE_PREFIX: &str = "chekov_ns_";
 static NEXT_RESPONSE: AtomicU64 = AtomicU64::new(1);
 
+/// Codex reads `ModelInfo` entries from a catalog separately from `/v1/models`.
+#[must_use]
+pub fn model_catalog(model: &str, ctx_size: u32) -> String {
+    json!({"models": [{
+        "slug": model,
+        "display_name": model,
+        "description": "Local model served by Chekov",
+        "supported_reasoning_levels": [],
+        "shell_type": "unified_exec",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 0,
+        "base_instructions": "You are a coding assistant running in Codex CLI against a local model. \
+            Complete the user's coding task in the shared workspace. Inspect relevant code before \
+            editing, respect repository instructions and configured permissions, preserve unrelated \
+            work, and verify changes with appropriate checks. Communicate progress and report \
+            results and any unresolved limitations clearly.",
+        "include_apps_usage_instructions": false,
+        "supports_reasoning_summary_parameter": false,
+        "default_reasoning_summary": "none",
+        "support_verbosity": false,
+        "truncation_policy": {"mode": "bytes", "limit": 10_000},
+        "context_window": ctx_size,
+        "max_context_window": ctx_size,
+        "experimental_supported_tools": [],
+        "input_modalities": ["text"]
+    }]}).to_string()
+}
+
 /// CLI overrides preserve Codex's existing home, MCP servers, skills and policies.
 #[must_use]
 pub fn launch_args(model: &str, ctx_size: u32, port: u16) -> Vec<String> {
