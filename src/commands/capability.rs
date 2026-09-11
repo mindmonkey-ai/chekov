@@ -4405,12 +4405,17 @@ mod tests {
         }
 
         fn writer(head: &RunHead) -> RunWriter {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
                 .as_nanos();
-            let root =
-                std::env::temp_dir().join(format!("chekov-longctx-{}-{nonce}", std::process::id()));
+            let root = std::env::temp_dir().join(format!(
+                "chekov-longctx-{}-{nonce}-{serial}",
+                std::process::id()
+            ));
             RunWriter::create(&root, "trace", head).expect("writer")
         }
 
