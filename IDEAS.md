@@ -231,9 +231,30 @@ changing the assertions. CLI help and the real four-length dry-run passed;
 the latter prints 32 crossings for the active Ornith model and ~334 minutes
 including its ordinary throughput suite, using the stated conservative rates.
 Zsh completions were regenerated; `shell/_chekov` is ignored by the repository.
-TODO: run live deep-context acceptance in an agreed server window; no model
-inference, launch, or settings change was performed during this implementation.
-Proposed 2026-09-10 — status: IMPLEMENTED 2026-09-10; live acceptance owed.
+
+Live acceptance passed 2026-09-10 after the user approved the server window.
+Ran `target/debug/chekov capability bench --long-ctx-trace 4096,16384,65536,131072 --yes`
+against `ornith-1.5-35b-a3b` (weights revision `fbbaed45c2f0`, engine
+`0f194b907`, context 262144, seed 42). The complete benchmark, including the
+ordinary throughput sweep, exited successfully in about 42 minutes. Its run
+is `eval/20260911T001849Z-ornith-1.5-35b-a3b` (the identifier uses UTC).
+
+| Requested prompt length | Observed prompt tokens | Buffered | Streamed |
+| --- | --- | --- | --- |
+| 4096 | 6472–6492 | 4/4 | 4/4 |
+| 16384 | 18735–18757 | 4/4 | 4/4 |
+| 65536 | 67875–67896 | 4/4 | 4/4 |
+| 131072 | 133425–133461 | 4/4 | 4/4 |
+
+All 32 rows have unique case/transport keys, exact answers, matching calibrated
+and response token counts, normal completion, and no truncation. No rows are
+missing, duplicated, unavailable, or unverified. The printed recommendation
+is `ctx_size = 133717`: the largest observed prompt plus the 256-token answer
+reserve, a tested lower bound for this synthetic task set rather than a model
+maximum. A read-only comparison of the saved run with itself reproduced the
+trace report. The owned server shut down and released its budget; `chekov status`
+reports `running no`. The registry context remains 262144.
+Proposed 2026-09-10 — status: IMPLEMENTED 2026-09-10; live acceptance passed.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
