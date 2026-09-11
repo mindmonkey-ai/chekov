@@ -73,6 +73,34 @@ struct Session {
     dir: PathBuf,
 }
 
+impl Session {
+    fn codex_catalog_path(&self) -> PathBuf {
+        // The listener owns this port until exit, keeping concurrent launches separate.
+        self.dir.join(format!("models-{}.json", self.port))
+    }
+
+    fn codex_args(&self) -> Vec<String> {
+        let mut args = codex::launch_args(&self.eff.name, self.eff.ctx_size, self.port);
+        args.extend([
+            "-c".to_owned(),
+            format!(
+                "model_catalog_json={}",
+                serde_json::json!(self.codex_catalog_path().to_string_lossy())
+            ),
+        ]);
+        args
+    }
+
+    fn write_codex_catalog(&self) -> Result<(), ChekovError> {
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| ChekovError::io(format!("creating {}", self.dir.display()), e))?;
+        write_private(
+            &self.codex_catalog_path(),
+            &codex::model_catalog(&self.eff.name, self.eff.ctx_size),
+        )
+    }
+}
+
 /// What a running proxy-only translator is bridging — banner inputs bundled
 /// to stay within the 3-argument limit (§3.4).
 pub struct Banner<'a> {
@@ -128,10 +156,10 @@ impl Command for LaunchCmd {
                 );
             }
             AgentKind::Codex => {
+                session.write_codex_catalog()?;
                 eprintln!("chekov launch: codex against '{}'", session.eff.name);
                 if self.print {
-                    let mut args =
-                        codex::launch_args(&session.eff.name, session.eff.ctx_size, session.port);
+                    let mut args = session.codex_args();
                     args.extend(self.args.iter().cloned());
                     eprintln!("{}", codex::shell_command(&args));
                 }
@@ -289,11 +317,7 @@ impl LaunchCmd {
                 command.env(self.agent.config_dir_var(), &session.dir);
             }
             AgentKind::Codex => {
-                command.args(codex::launch_args(
-                    &session.eff.name,
-                    session.eff.ctx_size,
-                    session.port,
-                ));
+                command.args(session.codex_args());
             }
         }
         command.args(&self.args);

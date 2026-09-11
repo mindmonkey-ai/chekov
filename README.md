@@ -706,12 +706,20 @@ through [Codex CLI configuration overrides](https://learn.chatgpt.com/docs/confi
 Your existing `CODEX_HOME`, configuration, MCP servers, skills, and permissions
 remain in use. Chekov does not edit `~/.codex/config.toml`; the upstream API key
 stays in the proxy. Hosted web search is disabled for this local session.
-Codex can warn that an unfamiliar local alias uses fallback model metadata;
-Chekov still sets its actual context window explicitly.
+Full launches also generate a session-specific model catalog under
+`$CHEKOV_HOME/agents/codex/` and pass it through `model_catalog_json`. The entry
+declares the selected alias and resolved context limit, text input, and a short
+local coding prompt. It does not advertise reasoning-effort controls, vision,
+or hosted tools. Codex can resolve local aliases without fallback metadata or
+its fallback context cap. Catalog write failures abort the launch.
 
-`--print` previews an invocation whose ephemeral proxy is not running.
+`--print` writes the catalog and previews an invocation whose ephemeral proxy is not running.
 Run without `--print` to start the session. For a persistent, manually wired
 client, keep `--proxy-only` running and use the Codex command it prints.
+Proxy-only mode generates no files; manually configured clients still need their
+own model catalog to avoid Codex's fallback metadata warning. A separate warning
+about shortened skill descriptions reflects Codex's skills budget; Chekov leaves
+your skills and plugins enabled.
 
 ### Claude Code (`chekov launch claude`)
 
