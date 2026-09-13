@@ -296,16 +296,13 @@ fn record_codebase_task(
     } = recorded;
     let parts = row_parts(outcome);
     let symbols_score = tier_five(task, &parts, &Scoring { symbols, arm });
-    let excluded = super::Excluded {
-        cross_file: cross_file_line(task, arm),
-        ..task.excluded.clone()
-    };
     sink.writer.append(store::Task {
         suite: "codebase".into(),
         task_id: arm.id.clone(),
         measure: parts.measure,
         grade: parts.grade,
         transport: store::Transport::Buffered,
+        reply: None,
         codebase: Some(store::CodebaseRow {
             tier: task.tier,
             file: task.file.clone(),
@@ -315,7 +312,10 @@ fn record_codebase_task(
             prediction: parts.prediction,
             prefix: task.prefix.clone(),
             suffix: task.suffix.clone(),
-            excluded,
+            excluded: super::Excluded {
+                cross_file: cross_file_line(task, arm),
+                ..task.excluded.clone()
+            },
             symbols_score,
             unsupported: parts.unsupported,
             arm: arm.label.map(str::to_owned),

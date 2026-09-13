@@ -69,6 +69,11 @@ pub struct TaskRow {
     pub measure: Measure,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade: Option<GradeRow>,
+    /// The crossing's stop reason, when the graded body carried one — what
+    /// separates a budget-starved empty answer from a withheld one. Rows
+    /// written before the field load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<ReplyStamp>,
     /// Present on `codebase` rows only: what the model saw, what it answered,
     /// and the gold. Tiers 1–4 are recomputed from these on read; tier 5
     /// needs the worktree and is scored at run time.
@@ -315,6 +320,40 @@ pub struct CodebaseRow {
     pub exec: Option<ExecRow>,
 }
 
+/// The crossing's stop reason — why a graded row's visible answer is what it is.
+///
+/// The engine's own `stop_reason` for the crossing, translated to the
+/// Anthropic spelling (`end_turn` / `max_tokens` / `tool_use` /
+/// `stop_sequence` / `error`). Present so an empty visible answer can be read
+/// as *budget-starved* (`max_tokens`) rather than *withheld* (`end_turn` with
+/// no text): the two look identical in `thinking_chars`/`answer_chars` alone.
+/// Absent on rows written before the field existed, and on any crossing whose
+/// graded body carried no `stop_reason`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyStamp {
+    pub stop_reason: Option<String>,
+}
+
+impl ReplyStamp {
+    /// The crossing's stop reason, read from the graded body's `stop_reason`
+    /// (the Anthropic spelling the translator already sets). `None` when the
+    /// body is unreadable or carried no reason — never an invented value.
+    #[must_use]
+    pub fn from_body(body: &str) -> Option<Self> {
+        let reason = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .as_ref()
+            .and_then(|v| v.get("stop_reason"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        // If the body carried no stop_reason at all, there is nothing to stamp;
+        // a stamp whose value is itself None would be noise.
+        reason.map(|stop_reason| Self {
+            stop_reason: Some(stop_reason),
+        })
+    }
+}
+
 /// One task to append: its identity plus what was measured.
 pub struct Task {
     pub suite: String,
@@ -322,6 +361,10 @@ pub struct Task {
     pub measure: Measure,
     pub grade: Option<GradeRow>,
     pub transport: Transport,
+    /// The graded body's stop reason, when it carried one — the signal that
+    /// separates a budget-starved empty answer from a withheld one. Present on
+    /// every graded agentic row and the final tool-loop row — see `TaskRow::reply`.
+    pub reply: Option<ReplyStamp>,
     /// Present on `codebase` rows only — see `TaskRow::codebase`.
     pub codebase: Option<CodebaseRow>,
     /// Present on `judge` rows only — see `TaskRow::judge`.
@@ -412,6 +455,7 @@ impl RunWriter {
             transport: task.transport,
             measure: task.measure,
             grade: task.grade,
+            reply: task.reply,
             codebase: task.codebase,
             judge: task.judge,
             tool_loop: task.tool_loop,
@@ -2075,6 +2119,7 @@ mod tests {
                         unavailable: false,
                     }),
                     transport: Transport::Buffered,
+                    reply: None,
                     codebase: None,
                     judge: None,
                     tool_loop: None,
@@ -2207,6 +2252,7 @@ mod tests {
             measure: measure(&[20.0, 20.0]),
             grade: Some(grade),
             transport: Transport::Buffered,
+            reply: None,
             codebase: None,
             judge: None,
             tool_loop: None,
@@ -2354,6 +2400,8 @@ mod tests {
             turns,
             tool_calls: turns,
             measure: crate::core::bench::codebase::run::empty_measure(),
+            // Red: the loop captures no reply yet.
+            reply: None,
         };
         let grade = match grade_tool_loop(&outcome) {
             Grade::Pass => GradeRow::pass(),
@@ -2537,6 +2585,7 @@ mod tests {
             measure: crate::core::bench::codebase::run::empty_measure(),
             grade: None,
             transport: Transport::Buffered,
+            reply: None,
             codebase: None,
             judge: Some(verdict),
             tool_loop: None,
@@ -2771,6 +2820,7 @@ mod tests {
             measure: measure(&[20.0, 20.0]),
             grade: None,
             transport: Transport::Buffered,
+            reply: None,
             codebase: Some(CodebaseRow {
                 tier: fixture.tier,
                 file: "src/a.rs".into(),
@@ -3245,6 +3295,7 @@ mod tests {
                 measure: warm,
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3266,6 +3317,7 @@ mod tests {
                     measure: measure(&[19.0, 21.0, 22.0 + bump]),
                     grade: None,
                     transport: Transport::Buffered,
+                    reply: None,
                     codebase: None,
                     judge: None,
                     tool_loop: None,
@@ -3291,6 +3343,7 @@ mod tests {
                 measure: measure(&[19.0, 21.0]),
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3307,6 +3360,7 @@ mod tests {
                 measure: measure(&[15.0, 16.0]),
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3345,6 +3399,7 @@ mod tests {
                 measure: measure(&[19.0, 21.0]),
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3369,6 +3424,7 @@ mod tests {
                 measure: measure(&[19.0, 21.0, 22.0, 22.4]),
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3383,6 +3439,7 @@ mod tests {
                     "missing expected substring \"hello\"".to_owned(),
                 )),
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3489,6 +3546,7 @@ mod tests {
                 measure,
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,

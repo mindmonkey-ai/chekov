@@ -13,7 +13,7 @@ use crate::core::bench::grade::{self, Grade, ToolUse};
 use crate::core::bench::probes;
 use crate::core::bench::probeset::{Goal, LoopCase, ToolDef, canned_text};
 use crate::core::bench::runner::Timings;
-use crate::core::bench::store::{LoopEnd, Measure};
+use crate::core::bench::store::{LoopEnd, Measure, ReplyStamp};
 use crate::core::proxy::http::HttpRequest;
 use crate::error::ChekovError;
 
@@ -252,6 +252,10 @@ pub struct LoopOutcome {
     pub turns: u32,
     pub tool_calls: u32,
     pub measure: Measure,
+    /// The loop's last-turn stop reason, when the final reply carried one —
+    /// the same budget/starvation signal `ReplyStamp` stamps on an agentic
+    /// probe row. Red until `drive` captures it.
+    pub reply: Option<ReplyStamp>,
 }
 
 /// Drive one case to a terminal state (tool-loop design §5): a reply with no
@@ -276,6 +280,10 @@ struct LoopState<'a> {
     messages: Vec<Value>,
     tool_calls: u32,
     measure: Measure,
+    /// The final reply's stop reason, when it carried one — read the same way
+    /// `ReplyStamp::from_body` reads a graded body, so a tool-loop row stamps
+    /// exactly the signal a probe row would.
+    reply: Option<ReplyStamp>,
 }
 
 impl<'a> LoopState<'a> {
@@ -285,6 +293,7 @@ impl<'a> LoopState<'a> {
             messages: vec![json!({"role": "user", "content": case.prompt})],
             tool_calls: 0,
             measure: empty_measure(),
+            reply: None,
         }
     }
 
@@ -333,6 +342,8 @@ impl<'a> LoopState<'a> {
             turns,
             tool_calls: self.tool_calls,
             measure: self.measure,
+            // Red: nothing has set self.reply yet, so the captured reply is None.
+            reply: self.reply,
         }
     }
 }
@@ -852,6 +863,21 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
         let script = Scripted::new(vec!["not json".to_owned()]);
         let err = drive(&mut script.door(), &run(&set, 8)).expect_err("chekov's fault");
         assert!(err.to_string().contains("loop reply unreadable"), "{err}");
+    }
+
+    #[test]
+    fn the_last_reply_stop_reason_is_captured_in_the_outcome() {
+        let set = unchanged_set();
+        let script = Scripted::new(vec![reply(
+            vec![text_block("no change needed")],
+            "end_turn",
+        )]);
+        let outcome = drive(&mut script.door(), &run(&set, 8)).expect("drove");
+        assert_eq!(
+            outcome.reply.map(|s| s.stop_reason),
+            Some(Some("end_turn".to_owned())),
+            "the loop's reply must carry the final reply's stop reason"
+        );
     }
 
     #[test]

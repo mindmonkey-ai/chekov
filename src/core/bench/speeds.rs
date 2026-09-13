@@ -248,6 +248,7 @@ mod tests {
             suite: "throughput".into(),
             task_id: format!("depth-{depth}"),
             transport: crate::core::bench::store::Transport::Buffered,
+            reply: None,
             measure: Measure {
                 prompt_n: u64::from(depth),
                 decode_samples: decode.to_vec(),

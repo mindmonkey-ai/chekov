@@ -1383,6 +1383,7 @@ mod tests {
                 suite: "throughput".into(),
                 task_id: "depth-1024".into(),
                 transport: crate::core::bench::store::Transport::Buffered,
+                reply: None,
                 measure: Measure {
                     prompt_n: 1000,
                     decode_samples: decode.to_vec(),
@@ -1426,6 +1427,7 @@ mod tests {
             suite: suite.into(),
             task_id: task_id.into(),
             transport: Transport::Buffered,
+            reply: None,
             measure: Measure {
                 thinking_chars: counts.0,
                 answer_chars: counts.1,
@@ -1958,6 +1960,7 @@ mod tests {
             suite: "throughput".into(),
             task_id: "depth-4096".into(),
             transport: crate::core::bench::store::Transport::Buffered,
+            reply: None,
             measure: Measure {
                 prompt_n: 4100,
                 decode_samples: vec![15.0, 16.0, 17.0],
@@ -2050,6 +2053,7 @@ mod tests {
             suite: case.suite.into(),
             task_id: case.task_id.into(),
             transport: Transport::Buffered,
+            reply: None,
             measure: empty_measure(),
             grade: Some(case.grade),
             codebase: None,
@@ -2100,6 +2104,7 @@ mod tests {
             suite: "codebase".into(),
             task_id: case.task_id,
             transport: Transport::Buffered,
+            reply: None,
             measure: empty_measure(),
             grade: Some(GradeRow::pass()),
             codebase: Some(CodebaseRow {
@@ -2608,6 +2613,7 @@ mod tests {
             suite: JUDGE_SUITE.into(),
             task_id: task_id.into(),
             transport: Transport::Buffered,
+            reply: None,
             measure: empty_measure(),
             grade: None,
             codebase: None,
