@@ -241,6 +241,49 @@ mod tests {
     }
 
     #[test]
+    fn instruction_and_tool_probes_carry_the_ruled_reply_caps() {
+        let set = crate::core::bench::probeset::agentic_v0().expect("valid");
+        let cap = |req: crate::core::proxy::http::HttpRequest| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).expect("json");
+            body["max_tokens"].as_u64()
+        };
+        assert_eq!(
+            cap(super::instruction_probe(&set.instruction[0])),
+            Some(4096),
+            "an instruction reply gets room to think and still answer"
+        );
+        assert_eq!(cap(super::tool_probe(&set.tool_emit[0])), Some(1024));
+        assert_eq!(
+            cap(super::forced_probe(&set.tool_emit[0])),
+            Some(256),
+            "the forced arm is grammar-bound and keeps its cap"
+        );
+    }
+
+    #[test]
+    fn a_run_under_the_reply_cap_ruling_never_compares_with_the_campaign() {
+        use crate::core::bench::lifecycle::Suite;
+        use crate::core::bench::sweep::SweepPlan;
+        // `ac1955773bbf` is the agentic prompt-set hash the 2026-09-11 campaign
+        // ran under (seed 42, eight turns), read from its stamp.json. The caps
+        // and the grader now ride in the hash, so that identity is retired.
+        let plan = SweepPlan {
+            depths: vec![1024],
+            repetitions: 5,
+            max_tokens: 128,
+        };
+        let campaign = super::HashPins {
+            seed: 42,
+            max_turns: 8,
+        };
+        assert_ne!(
+            super::suite_prompt_hash(Suite::Agentic, &plan, campaign),
+            "ac1955773bbf",
+            "a run graded under the ruling must refuse to compare with the campaign"
+        );
+    }
+
+    #[test]
     fn the_prompt_set_hash_pins_the_task_set() {
         use crate::core::bench::sweep::SweepPlan;
         let plan = SweepPlan {

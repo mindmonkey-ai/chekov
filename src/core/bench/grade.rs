@@ -393,6 +393,49 @@ mod probe_tests {
     }
 
     #[test]
+    fn a_silent_abstention_fails_the_tool_case() {
+        for silent in [
+            body_with_text(""),
+            body_with_text("  \n"),
+            serde_json::json!({"type": "message", "content": []}).to_string(),
+        ] {
+            match grade_tool_emit(&silent, &abstain_case()) {
+                Grade::Fail { reason } => {
+                    assert_eq!(reason, "abstained without answering", "{silent}");
+                }
+                Grade::Pass => panic!("an abstention must still answer: {silent}"),
+            }
+        }
+        assert!(matches!(
+            grade_tool_emit(&body_with_text("KV means key-value."), &abstain_case()),
+            Grade::Pass
+        ));
+    }
+
+    #[test]
+    fn an_empty_visible_answer_fails_every_instruction_check_strict_and_loose() {
+        let vacuous = InstructionCase {
+            id: "if-v".into(),
+            prompt: "p".into(),
+            checks: vec!["not_contains:process".into(), "max_lines:2".into()],
+        };
+        let failed_as_empty = |grade: Grade| match grade {
+            Grade::Fail { reason } => reason == "empty visible answer",
+            Grade::Pass => false,
+        };
+        for empty in [body_with_text(""), body_with_text(" \n\t")] {
+            let (strict, loose) = grade_instruction(&empty, &vacuous);
+            assert!(
+                failed_as_empty(strict),
+                "strict: an empty reply satisfies nothing: {empty}"
+            );
+            assert!(failed_as_empty(loose), "loose: {empty}");
+        }
+        let (strict, loose) = grade_instruction(&body_with_text("A lock file."), &vacuous);
+        assert!(matches!((strict, loose), (Grade::Pass, Grade::Pass)));
+    }
+
+    #[test]
     fn a_call_case_with_no_or_many_calls_fails() {
         assert!(matches!(
             grade_tool_emit(&body_with_text("I would grep for it."), &call_case()),
