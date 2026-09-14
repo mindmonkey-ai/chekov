@@ -686,6 +686,7 @@ fn suite_summaries(log: &RunLog) -> String {
         .map(agentic_fail_line)
         .collect();
     out.push_str(&failures);
+    out.push_str(&empty_answer_lines(log));
     out.extend(tool_emit_line(log, Transport::Buffered));
     out.extend(grammar_gap_line(log));
     out.extend(instruction_line(log, Transport::Buffered));
@@ -705,11 +706,42 @@ fn agentic_fail_line(row: &TaskRow) -> String {
         .and_then(|g| g.reason.as_deref())
         .unwrap_or("");
     format!(
-        "{} FAIL {}{}  {reason}\n",
+        "{} FAIL {}{}  {reason}{}\n",
         row.suite,
         row.task_id,
-        door_tag(row.transport)
+        door_tag(row.transport),
+        stop_suffix(row)
     )
+}
+
+/// Strict instruction passes that showed the reader nothing: thinking was
+/// spent, no visible answer came back, and the checks let it through. Listed
+/// so a pass cannot quietly hide an empty reply; the grade itself is unchanged.
+/// Only `instruction` qualifies — a tool call is a legitimately textless pass.
+fn empty_answer_lines(log: &RunLog) -> String {
+    rows_of(log, "instruction")
+        .filter(|row| row.grade.as_ref().is_some_and(|g| g.pass))
+        .filter(|row| row.measure.thinking_chars > 0 && row.measure.answer_chars == 0)
+        .map(empty_answer_line)
+        .collect()
+}
+
+fn empty_answer_line(row: &TaskRow) -> String {
+    format!(
+        "instruction PASS {}{}  empty visible answer{}\n",
+        row.task_id,
+        door_tag(row.transport),
+        stop_suffix(row)
+    )
+}
+
+/// The crossing's own stop reason, when the row was stamped with one.
+pub(crate) fn stop_reason_of(row: &TaskRow) -> Option<&str> {
+    row.reply.as_ref().and_then(|r| r.stop_reason.as_deref())
+}
+
+fn stop_suffix(row: &TaskRow) -> String {
+    stop_reason_of(row).map_or_else(String::new, |reason| format!(" (stop: {reason})"))
 }
 
 /// The buffered door is the unmarked one — every earlier run went through it.

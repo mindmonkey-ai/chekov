@@ -110,6 +110,10 @@ pub struct CaseDelta {
     pub b_pass: bool,
     pub a_reason: Option<String>,
     pub b_reason: Option<String>,
+    /// Each side's stamped stop reason — what tells a budget-starved failure
+    /// from a withheld one. `None` on rows written before the stamp.
+    pub a_stop: Option<String>,
+    pub b_stop: Option<String>,
 }
 
 /// A case one run graded and the other never did. `which` is `"a"` or `"b"`.
@@ -490,6 +494,8 @@ fn case_delta(pair: &AgenticPair) -> Option<CaseDelta> {
         b_pass,
         a_reason: reason_of(pair.a),
         b_reason: reason_of(pair.b),
+        a_stop: store::stop_reason_of(pair.a).map(str::to_owned),
+        b_stop: store::stop_reason_of(pair.b).map(str::to_owned),
     })
 }
 
@@ -1156,11 +1162,13 @@ fn disagreement_block(pair: &RunPair, cases: &[CaseDelta]) -> String {
 
 fn disagreement_line(pair: &RunPair, case: &CaseDelta, width: usize) -> String {
     let (name_a, name_b) = pair.names();
+    let tail_a = fail_tail(case.a_reason.as_deref(), case.a_stop.as_deref());
+    let tail_b = fail_tail(case.b_reason.as_deref(), case.b_stop.as_deref());
     format!(
         "    {:<width$}{}   |   {}\n",
         case_id(case),
-        case_side(&name_a, case.a_pass, case.a_reason.as_deref()),
-        case_side(&name_b, case.b_pass, case.b_reason.as_deref()),
+        case_side(&name_a, case.a_pass, &tail_a),
+        case_side(&name_b, case.b_pass, &tail_b),
     )
 }
 
@@ -1168,14 +1176,19 @@ fn case_id(case: &CaseDelta) -> String {
     format!("{}{}", case.task_id, door_tag(case.transport))
 }
 
-fn case_side(model: &str, pass: bool, reason: Option<&str>) -> String {
+fn case_side(model: &str, pass: bool, fail_tail: &str) -> String {
     if pass {
         return format!("{model} pass");
     }
-    reason.map_or_else(
-        || format!("{model} FAIL"),
-        |why| format!("{model} FAIL — {why}"),
-    )
+    format!("{model} FAIL{fail_tail}")
+}
+
+/// What follows `FAIL`: the grader's reason, then the stamped stop reason —
+/// so a starved reply reads `(stop: max_tokens)` beside what it failed.
+fn fail_tail(reason: Option<&str>, stop: Option<&str>) -> String {
+    let why = reason.map_or_else(String::new, |why| format!(" — {why}"));
+    let stopped = stop.map_or_else(String::new, |stop| format!(" (stop: {stop})"));
+    format!("{why}{stopped}")
 }
 
 fn only_in_block(pair: &RunPair, cases: &[OnlyIn]) -> String {
