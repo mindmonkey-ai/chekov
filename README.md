@@ -611,7 +611,11 @@ gap was mostly the 512-token reply cap starving long thinkers: with room to
 think, Qwen's strict score was 28/40, not 9/40. Under the 2026-09-13 ruling
 every graded row records its stop reason, instruction probes get 4096 tokens
 and tool probes 1024, an empty visible answer fails, and a run under the ruling
-refuses to compare with the campaign above. See
+refuses to compare with the campaign above. Re-measured under the ruling on
+2026-09-14, strict instruction scores were 27/40, 32/40, and 36/40; tools
+37/39, 36/39, and 35/39; loops 6/6, 6/6, and 3/5 (one GPT-OSS loop case was
+an engine-side parse error, excluded). 32 of 114 axis/case pairs distinguish
+the configured stacks, down from 45 of 115. See
 [the ruling](IDEAS.md#stop-reason-on-graded-agentic-rows-2026-09-13).
 
 ### Long-context traces
