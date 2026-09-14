@@ -228,7 +228,31 @@ mod tests {
         );
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert_eq!(body["messages"][1]["role"], "assistant");
-        assert_eq!(body["max_tokens"], 512);
+        // Ruling 2026-09-14: a loop turn gets the instruction cap, so a turn
+        // that thinks long is not cut in half mid tool call.
+        assert_eq!(body["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn a_run_under_the_loop_cap_ruling_never_compares_with_the_twelve_loop_run() {
+        use crate::core::bench::lifecycle::Suite;
+        use crate::core::bench::sweep::SweepPlan;
+        // `57c7585512ec` is the agentic hash the 2026-09-14 twelve-loop
+        // measurement ran under (seed 42, eight turns), read from its stamps.
+        let plan = SweepPlan {
+            depths: vec![1024],
+            repetitions: 5,
+            max_tokens: 128,
+        };
+        let twelve_loops = super::HashPins {
+            seed: 42,
+            max_turns: 8,
+        };
+        assert_ne!(
+            super::suite_prompt_hash(Suite::Agentic, &plan, twelve_loops),
+            "57c7585512ec",
+            "the loop turn cap rides in the identity"
+        );
     }
 
     #[test]
