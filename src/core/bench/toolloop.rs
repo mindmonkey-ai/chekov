@@ -147,12 +147,13 @@ impl<'a> ToolEnv<'a> {
             Goal::Edited {
                 file,
                 contains_any,
+                contains_all,
                 untouched,
                 ..
             } => {
                 self.files
                     .get(file)
-                    .is_some_and(|t| contains_any.iter().any(|w| t.contains(w.as_str())))
+                    .is_some_and(|t| carries(t, contains_any, contains_all))
                     && untouched.iter().all(|p| self.unchanged(p))
             }
             Goal::Unchanged { .. } => self.case.files.iter().all(|f| self.unchanged(&f.path)),
@@ -184,19 +185,39 @@ impl<'a> ToolEnv<'a> {
     fn wanted(&self) -> String {
         match &self.case.goal {
             Goal::Edited {
-                file, contains_any, ..
-            } => format!(
-                "{file} containing {}",
-                contains_any
-                    .iter()
-                    .map(|w| format!("{w:?}"))
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            ),
+                file,
+                contains_any,
+                contains_all,
+                ..
+            } => {
+                let (words, glue) = if contains_all.is_empty() {
+                    (contains_any, " or ")
+                } else {
+                    (contains_all, " and ")
+                };
+                format!(
+                    "{file} containing {}",
+                    words
+                        .iter()
+                        .map(|w| format!("{w:?}"))
+                        .collect::<Vec<_>>()
+                        .join(glue)
+                )
+            }
             Goal::Unchanged { reply_mentions } => {
                 format!("no file changed and a reply naming {reply_mentions}")
             }
         }
+    }
+}
+
+/// `contains_any` is alternatives — one spelling of one edit; `contains_all`
+/// is every edit of several. A goal carries exactly one (validated at load).
+fn carries(text: &str, any: &[String], all: &[String]) -> bool {
+    if all.is_empty() {
+        any.iter().any(|w| text.contains(w.as_str()))
+    } else {
+        all.iter().all(|w| text.contains(w.as_str()))
     }
 }
 
@@ -565,6 +586,242 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
             .expect("answered");
         assert_eq!(env.answer(&tests).expect("answered"), "ok. 1 passed");
         assert_eq!(env.finish("done"), LoopEnd::GoalMet);
+    }
+
+    /// Two constants in one file, both wrong; the goal wants both fixed.
+    fn all_of_set() -> ProbeSet {
+        parse(&format!(
+            "version = 0\nloop_system = \"s\"\ntool_emit = []\ninstruction = []\n\
+             [[tool_loop]]\nid = \"tl-all\"\nprompt = \"p\"\n\
+             [[tool_loop.files]]\npath = \"src/a.rs\"\ntext = \"const A: u32 = 3;\\nconst B: u32 = 3;\\n\"\n\
+             [tool_loop.goal]\nkind = \"edited\"\nfile = \"src/a.rs\"\n\
+             contains_all = [\"const A: u32 = 5;\", \"const B: u32 = 7;\"]\n\
+             tests_fail = \"test ab ... FAILED: A must be 5 and B must be 7\"\n{TOOLS}\
+             [[tool_loop.tools]]\nname = \"run_tests\"\ndescription = \"d\"\n\
+             input_schema = '{{\"type\":\"object\",\"properties\":{{\"filter\":{{\"type\":\"string\"}}}},\"required\":[\"filter\"]}}'\n"
+        ))
+        .expect("valid")
+    }
+
+    #[test]
+    fn a_contains_all_goal_is_met_only_when_every_string_landed() {
+        let set = all_of_set();
+        let mut env = ToolEnv::new(case(&set));
+        let tests = call("run_tests", json!({"filter": ""}));
+        env.answer(&edit("src/a.rs", "A: u32 = 3", "A: u32 = 5"))
+            .expect("answered");
+        assert_eq!(
+            env.answer(&tests).expect("answered"),
+            "test ab ... FAILED: A must be 5 and B must be 7",
+            "one of two edits is not done"
+        );
+        assert_eq!(
+            env.finish("done"),
+            LoopEnd::GoalUnmet {
+                wanted: "src/a.rs containing \"const A: u32 = 5;\" and \"const B: u32 = 7;\""
+                    .into()
+            }
+        );
+        env.answer(&edit("src/a.rs", "B: u32 = 3", "B: u32 = 7"))
+            .expect("answered");
+        assert_eq!(env.answer(&tests).expect("answered"), "ok. 1 passed");
+        assert_eq!(env.finish("done"), LoopEnd::GoalMet);
+    }
+
+    fn shipped(id: &str) -> LoopCase {
+        let set = crate::core::bench::probeset::agentic_v0().expect("valid");
+        set.tool_loop
+            .into_iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("no shipped loop case {id}"))
+    }
+
+    /// A competent agent's path through one case: the calls it makes, the
+    /// answers it must see along the way, and what it says at the end.
+    struct Path {
+        calls: Vec<(ToolUse, Option<&'static str>)>,
+        reply: &'static str,
+    }
+
+    fn walk(id: &str, path: &Path) {
+        let case = shipped(id);
+        let mut env = ToolEnv::new(&case);
+        assert!(
+            path.calls.len() <= 6,
+            "{id}: a competent agent closes in six turns"
+        );
+        for (turn, (call, expect)) in path.calls.iter().enumerate() {
+            let answer = env
+                .answer(call)
+                .unwrap_or_else(|end| panic!("{id} turn {turn}: loop ended {end:?}"));
+            if let Some(want) = expect {
+                assert_eq!(answer, *want, "{id} turn {turn}");
+            }
+        }
+        assert_eq!(env.finish(path.reply), LoopEnd::GoalMet, "{id}");
+    }
+
+    #[test]
+    fn a_decoy_grep_hit_precedes_the_definition_and_the_definition_is_the_goal() {
+        walk(
+            "tl-007",
+            &Path {
+                calls: vec![
+                    (
+                        call(
+                            "grep",
+                            json!({"pattern": "DEFAULT_BACKOFF_MS", "path": "src"}),
+                        ),
+                        None,
+                    ),
+                    (call("read_file", json!({"path": "src/limits.rs"})), None),
+                    (
+                        edit("src/limits.rs", "u64 = 100;", "u64 = 250;"),
+                        Some("edited src/limits.rs"),
+                    ),
+                ],
+                reply: "done",
+            },
+        );
+        let case = shipped("tl-007");
+        let mut env = ToolEnv::new(&case);
+        let hits = env
+            .answer(&call(
+                "grep",
+                json!({"pattern": "DEFAULT_BACKOFF_MS", "path": "src"}),
+            ))
+            .expect("answered");
+        assert!(
+            hits.starts_with("src/app.rs:"),
+            "the call site sorts before the definition: {hits}"
+        );
+    }
+
+    #[test]
+    fn a_non_unique_old_text_forces_a_wider_edit() {
+        walk(
+            "tl-008",
+            &Path {
+                calls: vec![
+                    (call("read_file", json!({"path": "src/pool.rs"})), None),
+                    (
+                        edit("src/pool.rs", "32", "64"),
+                        Some("old text occurs 2 times in src/pool.rs; make it unique"),
+                    ),
+                    (
+                        edit("src/pool.rs", "usize = 32;", "usize = 64;"),
+                        Some("edited src/pool.rs"),
+                    ),
+                ],
+                reply: "done",
+            },
+        );
+    }
+
+    #[test]
+    fn the_test_result_names_a_different_file_than_the_prompt_blames() {
+        walk(
+            "tl-009",
+            &Path {
+                calls: vec![
+                    (
+                        call("run_tests", json!({"filter": ""})),
+                        Some(
+                            "test parse_accepts_a_64_byte_line ... FAILED: src/limits.rs \
+                             MAX_LEN must be 64, got 32",
+                        ),
+                    ),
+                    (call("read_file", json!({"path": "src/limits.rs"})), None),
+                    (
+                        edit("src/limits.rs", "usize = 32;", "usize = 64;"),
+                        Some("edited src/limits.rs"),
+                    ),
+                    (
+                        call("run_tests", json!({"filter": ""})),
+                        Some("ok. 1 passed"),
+                    ),
+                ],
+                reply: "done",
+            },
+        );
+    }
+
+    #[test]
+    fn an_already_done_change_is_reported_not_made() {
+        walk(
+            "tl-010",
+            &Path {
+                calls: vec![(call("read_file", json!({"path": "src/config.rs"})), None)],
+                reply: "LOG_LEVEL is already \"warn\"; nothing to change.",
+            },
+        );
+        let case = shipped("tl-010");
+        let env = ToolEnv::new(&case);
+        assert!(
+            matches!(env.finish("Changed it to warn."), LoopEnd::GoalUnmet { .. }),
+            "claiming a change it did not make is unmet"
+        );
+    }
+
+    #[test]
+    fn a_three_file_chain_ends_at_the_constant() {
+        walk(
+            "tl-011",
+            &Path {
+                calls: vec![
+                    (call("list_dir", json!({"path": "src"})), None),
+                    (call("read_file", json!({"path": "src/api.rs"})), None),
+                    (call("read_file", json!({"path": "src/policy.rs"})), None),
+                    (call("read_file", json!({"path": "src/limits.rs"})), None),
+                    (
+                        edit("src/limits.rs", "65_536", "1_048_576"),
+                        Some("edited src/limits.rs"),
+                    ),
+                ],
+                reply: "done",
+            },
+        );
+    }
+
+    #[test]
+    fn two_edits_sit_behind_one_test_gate() {
+        walk(
+            "tl-012",
+            &Path {
+                calls: vec![
+                    (call("run_tests", json!({"filter": ""})), None),
+                    (call("read_file", json!({"path": "src/config.rs"})), None),
+                    (
+                        edit(
+                            "src/config.rs",
+                            "CONNECT_TIMEOUT_MS: u64 = 100;",
+                            "CONNECT_TIMEOUT_MS: u64 = 500;",
+                        ),
+                        Some("edited src/config.rs"),
+                    ),
+                    (
+                        call("run_tests", json!({"filter": ""})),
+                        Some(
+                            "test timeouts_match_the_sla ... FAILED: CONNECT_TIMEOUT_MS must be \
+                             500 and READ_TIMEOUT_MS must be 900",
+                        ),
+                    ),
+                    (
+                        edit(
+                            "src/config.rs",
+                            "READ_TIMEOUT_MS: u64 = 200;",
+                            "READ_TIMEOUT_MS: u64 = 900;",
+                        ),
+                        Some("edited src/config.rs"),
+                    ),
+                    (
+                        call("run_tests", json!({"filter": ""})),
+                        Some("ok. 1 passed"),
+                    ),
+                ],
+                reply: "done",
+            },
+        );
     }
 
     #[test]
