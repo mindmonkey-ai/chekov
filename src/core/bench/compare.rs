@@ -1314,8 +1314,8 @@ mod tests {
     use crate::core::bench::codebase::{Excluded, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
     use crate::core::bench::store::{
-        CodebaseRow, DecidedBy, GradeRow, JUDGE_SUITE, JudgeRow, Measure, RunHead, RunLog, TaskRow,
-        Transport,
+        CodebaseRow, DecidedBy, GradeRow, JUDGE_SUITE, JudgeRow, Measure, ReplyStamp, RunHead,
+        RunLog, TaskRow, Transport,
     };
     use crate::core::stats::Comparison;
     use crate::error::ChekovError;
@@ -2002,6 +2002,7 @@ mod tests {
         suite: &'static str,
         task_id: &'static str,
         grade: GradeRow,
+        reply: Option<ReplyStamp>,
     }
 
     impl Case {
@@ -2010,6 +2011,7 @@ mod tests {
                 suite,
                 task_id,
                 grade: GradeRow::pass(),
+                reply: None,
             }
         }
 
@@ -2018,6 +2020,7 @@ mod tests {
                 suite,
                 task_id,
                 grade: GradeRow::fail(why.to_owned()),
+                reply: None,
             }
         }
 
@@ -2026,7 +2029,15 @@ mod tests {
                 suite,
                 task_id,
                 grade: GradeRow::unavailable("the engine refused".to_owned()),
+                reply: None,
             }
+        }
+
+        fn stopped(mut self, reason: &str) -> Self {
+            self.reply = Some(ReplyStamp {
+                stop_reason: Some(reason.to_owned()),
+            });
+            self
         }
     }
 
@@ -2053,7 +2064,7 @@ mod tests {
             suite: case.suite.into(),
             task_id: case.task_id.into(),
             transport: Transport::Buffered,
-            reply: None,
+            reply: case.reply,
             measure: empty_measure(),
             grade: Some(case.grade),
             codebase: None,
@@ -2441,6 +2452,40 @@ mod tests {
         assert!(
             !rendered.contains("te-021"),
             "a case both runs pass separates nothing: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_failing_side_names_its_stop_reason_and_an_unstamped_one_does_not() {
+        let a = agentic_run(
+            "m1",
+            vec![
+                Case::fail("instruction", "if-012", "failed 'max_lines:8'").stopped("max_tokens"),
+                Case::fail("instruction", "if-013", "failed 'must_contain:dry-run'"),
+                Case::pass("tool_emit", "te-021").stopped("end_turn"),
+            ],
+        );
+        let b = agentic_run(
+            "m2",
+            vec![
+                Case::pass("instruction", "if-012").stopped("end_turn"),
+                Case::pass("instruction", "if-013"),
+                Case::fail("tool_emit", "te-021", "no call emitted"),
+            ],
+        );
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        let rendered = render_comparison(&RunPair { a: &a, b: &b }, &compared);
+        assert!(
+            rendered.contains("m1 FAIL — failed 'max_lines:8' (stop: max_tokens)   |   m2 pass"),
+            "a stamped failing side names its stop reason: {rendered}"
+        );
+        assert!(
+            rendered.contains("m1 FAIL — failed 'must_contain:dry-run'   |   m2 pass"),
+            "an unstamped failing side carries no suffix: {rendered}"
+        );
+        assert!(
+            rendered.contains("m1 pass   |   m2 FAIL — no call emitted"),
+            "a passing side never prints its stop reason: {rendered}"
         );
     }
 

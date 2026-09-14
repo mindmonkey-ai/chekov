@@ -1964,7 +1964,8 @@ mod tests {
 
     use super::{
         AGENTIC, CodebaseRow, DecidedBy, GradeRow, JudgeRow, LoopEnd, LoopRow, Measure, PAIRED,
-        RunHead, RunLog, RunWriter, Task, TaskKey, TaskRow, Transport, render_codebase, render_run,
+        ReplyStamp, RunHead, RunLog, RunWriter, Task, TaskKey, TaskRow, Transport, render_codebase,
+        render_run,
     };
     use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
@@ -2269,6 +2270,57 @@ mod tests {
 
     const fn spent(thinking: u64, answer: u64) -> ReplyChars {
         ReplyChars { thinking, answer }
+    }
+
+    fn stopped(mut task: Task, reason: &str) -> Task {
+        task.reply = Some(ReplyStamp {
+            stop_reason: Some(reason.to_owned()),
+        });
+        task
+    }
+
+    #[test]
+    fn a_fail_line_names_its_stop_reason_and_an_empty_strict_pass_is_listed() {
+        let eval = scratch("stop-reasons");
+        let mut writer = RunWriter::create(&eval, "r7-model", &head()).expect("create");
+        let starved = graded(
+            "instruction",
+            "if-002",
+            GradeRow::fail("failed 'fenced_rust_only'; loose:pass".to_owned()),
+        );
+        let empty = thought("instruction", "if-006", spent(900, 0));
+        let rows = [
+            stopped(starved, "max_tokens"),
+            stopped(empty, "end_turn"),
+            thought("instruction", "if-001", spent(100, 50)),
+            graded(
+                "tool_emit",
+                "te-002",
+                GradeRow::fail("called 'read_file'".to_owned()),
+            ),
+        ];
+        for task in rows {
+            writer.append(task).expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains(
+                "instruction FAIL if-002  failed 'fenced_rust_only'; loose:pass (stop: max_tokens)"
+            ),
+            "a stamped failure names its stop reason: {rendered}"
+        );
+        assert!(
+            rendered.contains("instruction PASS if-006  empty visible answer (stop: end_turn)"),
+            "a strict pass with thinking but no answer is listed: {rendered}"
+        );
+        assert!(
+            rendered.contains("tool_emit FAIL te-002  called 'read_file'\n"),
+            "an unstamped failure carries no stop suffix: {rendered}"
+        );
+        assert!(
+            !rendered.contains("PASS if-001"),
+            "a pass with a visible answer is not listed: {rendered}"
+        );
     }
 
     #[test]
