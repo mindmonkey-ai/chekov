@@ -621,7 +621,10 @@ The loop axis was saturated, so six harder loop cases were added on
 2026-09-14 (twelve in all, the seed six frozen) and the three stacks were
 re-measured: loops 12/12, 10/12, and 7/11, with five of twelve loop cases
 separating the stacks against two of six before; every single-turn verdict
-reproduced exactly. See
+reproduced exactly. Loop turns then got the same 4096-token cap as
+instruction probes, and a final re-measurement changed exactly one verdict
+of 636: loops are 12/12, 11/12, and 7/11, with four loop cases separating
+the stacks. See
 [the loop expansion](IDEAS.md#harder-tool-loop-scenarios-loop-corpus-expansion-decision-2026-09-14).
 
 ### Long-context traces

@@ -752,6 +752,24 @@ Nemotron measurement, so a loop failure means the model, not the budget.
 rides in the agentic identity hash; then one three-model run under the new
 identity before the Muse / Nemotron measurement.
 
+**Measured 2026-09-14 (MDT, 12:56–14:48).** Same three models, agentic
+prompt-set hash `7882af966fae`; runs `20260914T185606Z-qwen3.5-9b`,
+`20260914T201544Z-ornith-1.5-35b-a3b`, `20260914T203110Z-gpt-oss-120b`, 636
+rows, every row stamped. Raw evidence with a SHA-256 manifest:
+[docs/agentic-campaign-20260914-loopcap.tar.gz](docs/agentic-campaign-20260914-loopcap.tar.gz).
+Against the twelve-loop run, exactly one verdict changed across all 636
+rows: Ornith `tl-011` now closes on both doors (11/12 loops, from 10/12), and
+no loop turn on any model stops on `max_tokens` any more. Every other row —
+188 single-turn cases and the other eleven loops, per model — reproduced its
+previous verdict, so the cap change did precisely what it was ruled to do and
+nothing else. Loops: Qwen 12/12, Ornith 11/12, GPT-OSS 7/11 (+1 unavailable,
+the same `tl-004` engine-side parse error). Four of twelve loop cases
+separate the stacks (`tl-002`, `tl-005`, `tl-007`, `tl-010`); of 120 axis/case
+pairs, 34 distinguish and 85 pass everywhere. Ornith's one loop failure and
+both of GPT's non-exhaustion failures are the decoy grep hit (`tl-007`), now
+the sharpest loop case in the set. Wall clock: Qwen 79 min, Ornith 16 min,
+GPT 17 min. The Muse / Nemotron measurement can run on this identity.
+
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
 samplers") by this engine for `ornith-1.5-35b-a3b`, so the §7.2 grammar_gap
