@@ -872,3 +872,186 @@ checks = ["fenced_rust_only", "max_lines:3", "brace_balanced", "contains:fn safe
 id = "if-040"
 prompt = "Provide a Rust function named limit using .min(10), with no unsafe code. Reply with exactly one fenced rust block, no prose, and at most three total lines including fences."
 checks = ["fenced_rust_only", "max_lines:3", "brace_balanced", "contains:fn limit", "contains:.min(10)", "not_contains:unsafe"]
+
+# ---- Loop expansion 2026-09-14 (approved in IDEAS.md): six anti-saturation
+# devices the seed six lack. `contains_all` is the one schema addition.
+
+# Decoy hit: grep finds the call site (src/app.rs sorts first) before the
+# definition. Editing the first hit changes the wrong file.
+
+[[tool_loop]]
+id = "tl-007"
+prompt = "The retry delay DEFAULT_BACKOFF_MS must be 250, not 100. Find where it is defined and fix it there."
+[[tool_loop.files]]
+path = "src/app.rs"
+text = "use crate::limits::DEFAULT_BACKOFF_MS;\n\npub fn backoff() -> u64 {\n    let backoff = DEFAULT_BACKOFF_MS; // 100 ms today\n    backoff\n}\n"
+[[tool_loop.files]]
+path = "src/limits.rs"
+text = "/// Delay before the first retry.\npub const DEFAULT_BACKOFF_MS: u64 = 100;\n"
+[[tool_loop.files]]
+path = "src/lib.rs"
+text = "pub mod app;\npub mod limits;\n"
+[tool_loop.goal]
+kind = "edited"
+file = "src/limits.rs"
+contains_any = ["pub const DEFAULT_BACKOFF_MS: u64 = 250;"]
+untouched = ["src/app.rs", "src/lib.rs"]
+[[tool_loop.tools]]
+name = "grep"
+description = "Search files under a path for a pattern; returns matching lines."
+input_schema = '{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern","path"]}'
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+
+# The edit_file uniqueness contract: the wrong literal is also in a doc
+# comment, so `old = "32"` is refused and the agent must widen it.
+
+[[tool_loop]]
+id = "tl-008"
+prompt = "In src/pool.rs the pool size MAX_CONNECTIONS must be 64, not 32. Fix it."
+[[tool_loop.files]]
+path = "src/pool.rs"
+text = "/// The pool never grows past MAX_CONNECTIONS (currently 32).\npub const MAX_CONNECTIONS: usize = 32;\n\npub fn capacity() -> usize {\n    MAX_CONNECTIONS\n}\n"
+[tool_loop.goal]
+kind = "edited"
+file = "src/pool.rs"
+contains_any = ["pub const MAX_CONNECTIONS: usize = 64;"]
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+
+# The tool result contradicts the prompt: the user blames parse.rs, the
+# failing test names limits.rs. Trust the evidence.
+
+[[tool_loop]]
+id = "tl-009"
+prompt = "The parser test fails; I think src/parse.rs is wrong. Make the tests pass."
+[[tool_loop.files]]
+path = "src/parse.rs"
+text = "use crate::limits::MAX_LEN;\n\npub fn parse(input: &str) -> Option<&str> {\n    (input.len() <= MAX_LEN).then_some(input)\n}\n"
+[[tool_loop.files]]
+path = "src/limits.rs"
+text = "pub const MAX_LEN: usize = 32;\n"
+[[tool_loop.files]]
+path = "src/lib.rs"
+text = "pub mod limits;\npub mod parse;\n"
+[tool_loop.goal]
+kind = "edited"
+file = "src/limits.rs"
+contains_any = ["pub const MAX_LEN: usize = 64;"]
+untouched = ["src/parse.rs", "src/lib.rs"]
+tests_fail = "test parse_accepts_a_64_byte_line ... FAILED: src/limits.rs MAX_LEN must be 64, got 32"
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+[[tool_loop.tools]]
+name = "run_tests"
+description = "Run the test suite, optionally filtered to test names containing a string."
+input_schema = '{"type":"object","properties":{"filter":{"type":"string"}},"required":["filter"]}'
+
+# Already done: the requested value is in place. The honest end is no edit
+# and a reply that says so.
+
+[[tool_loop]]
+id = "tl-010"
+prompt = "Set LOG_LEVEL in src/config.rs to \"warn\" so production stops logging at info."
+[[tool_loop.files]]
+path = "src/config.rs"
+text = "pub const LOG_LEVEL: &str = \"warn\";\n"
+[[tool_loop.files]]
+path = "src/lib.rs"
+text = "pub mod config;\n"
+[tool_loop.goal]
+kind = "unchanged"
+reply_mentions = "already"
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+
+# Three-file chain: the API's doc points at policy, policy points at limits,
+# limits holds the wrong number.
+
+[[tool_loop]]
+id = "tl-011"
+prompt = "The public API must accept request bodies up to the size our policy promises. Fix the constant that is wrong; change nothing else."
+[[tool_loop.files]]
+path = "src/api.rs"
+text = "//! Request bodies are accepted up to the size promised by `crate::policy`.\n\npub fn accepts(body_len: usize) -> bool {\n    body_len <= crate::policy::max_body_bytes()\n}\n"
+[[tool_loop.files]]
+path = "src/policy.rs"
+text = "/// The documented promise is 1 MiB. The number itself lives in `crate::limits`.\npub fn max_body_bytes() -> usize {\n    crate::limits::MAX_BODY_BYTES\n}\n"
+[[tool_loop.files]]
+path = "src/limits.rs"
+text = "pub const MAX_BODY_BYTES: usize = 65_536;\n"
+[[tool_loop.files]]
+path = "src/lib.rs"
+text = "pub mod api;\npub mod limits;\npub mod policy;\n"
+[tool_loop.goal]
+kind = "edited"
+file = "src/limits.rs"
+contains_any = ["MAX_BODY_BYTES: usize = 1_048_576;", "MAX_BODY_BYTES: usize = 1048576;", "MAX_BODY_BYTES: usize = 1024 * 1024;"]
+untouched = ["src/api.rs", "src/policy.rs", "src/lib.rs"]
+[[tool_loop.tools]]
+name = "list_dir"
+description = "List the entries of a repository directory."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+
+# Two edits behind one test gate: the failure names both constants and stays
+# red until both are fixed.
+
+[[tool_loop]]
+id = "tl-012"
+prompt = "The config tests fail. Fix src/config.rs so they pass."
+[[tool_loop.files]]
+path = "src/config.rs"
+text = "pub const CONNECT_TIMEOUT_MS: u64 = 100;\npub const READ_TIMEOUT_MS: u64 = 200;\n"
+[[tool_loop.files]]
+path = "src/lib.rs"
+text = "pub mod config;\n"
+[tool_loop.goal]
+kind = "edited"
+file = "src/config.rs"
+contains_all = ["CONNECT_TIMEOUT_MS: u64 = 500;", "READ_TIMEOUT_MS: u64 = 900;"]
+untouched = ["src/lib.rs"]
+tests_fail = "test timeouts_match_the_sla ... FAILED: CONNECT_TIMEOUT_MS must be 500 and READ_TIMEOUT_MS must be 900"
+[[tool_loop.tools]]
+name = "read_file"
+description = "Read a file from the repository and return its contents."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}'
+[[tool_loop.tools]]
+name = "edit_file"
+description = "Replace one exact text occurrence in a file."
+input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}'
+[[tool_loop.tools]]
+name = "run_tests"
+description = "Run the test suite, optionally filtered to test names containing a string."
+input_schema = '{"type":"object","properties":{"filter":{"type":"string"}},"required":["filter"]}'

@@ -147,12 +147,13 @@ impl<'a> ToolEnv<'a> {
             Goal::Edited {
                 file,
                 contains_any,
+                contains_all,
                 untouched,
                 ..
             } => {
                 self.files
                     .get(file)
-                    .is_some_and(|t| contains_any.iter().any(|w| t.contains(w.as_str())))
+                    .is_some_and(|t| carries(t, contains_any, contains_all))
                     && untouched.iter().all(|p| self.unchanged(p))
             }
             Goal::Unchanged { .. } => self.case.files.iter().all(|f| self.unchanged(&f.path)),
@@ -184,19 +185,39 @@ impl<'a> ToolEnv<'a> {
     fn wanted(&self) -> String {
         match &self.case.goal {
             Goal::Edited {
-                file, contains_any, ..
-            } => format!(
-                "{file} containing {}",
-                contains_any
-                    .iter()
-                    .map(|w| format!("{w:?}"))
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            ),
+                file,
+                contains_any,
+                contains_all,
+                ..
+            } => {
+                let (words, glue) = if contains_all.is_empty() {
+                    (contains_any, " or ")
+                } else {
+                    (contains_all, " and ")
+                };
+                format!(
+                    "{file} containing {}",
+                    words
+                        .iter()
+                        .map(|w| format!("{w:?}"))
+                        .collect::<Vec<_>>()
+                        .join(glue)
+                )
+            }
             Goal::Unchanged { reply_mentions } => {
                 format!("no file changed and a reply naming {reply_mentions}")
             }
         }
+    }
+}
+
+/// `contains_any` is alternatives — one spelling of one edit; `contains_all`
+/// is every edit of several. A goal carries exactly one (validated at load).
+fn carries(text: &str, any: &[String], all: &[String]) -> bool {
+    if all.is_empty() {
+        any.iter().any(|w| text.contains(w.as_str()))
+    } else {
+        all.iter().all(|w| text.contains(w.as_str()))
     }
 }
 

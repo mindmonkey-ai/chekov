@@ -85,15 +85,20 @@ pub struct CannedFile {
 /// What "done" means for a loop case.
 ///
 /// `Edited`: the named file carries one of `contains_any` (alternatives,
-/// because two correct spellings of one edit must both pass) and every
-/// `untouched` file is byte-identical to its canned copy. `Unchanged`: no
-/// file differs and the final reply names `reply_mentions`.
+/// because two correct spellings of one edit must both pass) — or every one
+/// of `contains_all` (several edits behind one goal; ruling 2026-09-14) — and
+/// every `untouched` file is byte-identical to its canned copy. A goal sets
+/// exactly one of the two lists. `Unchanged`: no file differs and the final
+/// reply names `reply_mentions`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Goal {
     Edited {
         file: String,
+        #[serde(default)]
         contains_any: Vec<String>,
+        #[serde(default)]
+        contains_all: Vec<String>,
         #[serde(default)]
         untouched: Vec<String>,
         /// What `run_tests` answers before the goal is met. Its presence is
@@ -241,10 +246,12 @@ fn validate_goal(case: &LoopCase) -> Result<(), ChekovError> {
         Goal::Edited {
             file,
             contains_any,
+            contains_all,
             untouched,
             tests_fail,
         } => {
-            validate_edit_target(case, file, contains_any)?;
+            let wanted = wanted_strings(case, contains_any, contains_all)?;
+            validate_edit_target(case, file, wanted)?;
             if let Some(missing) = untouched.iter().find(|p| canned_text(case, p).is_none()) {
                 return Err(invalid(format!(
                     "{}: untouched file '{missing}' is not in the case's files",
@@ -276,7 +283,28 @@ fn validate_goal(case: &LoopCase) -> Result<(), ChekovError> {
     Ok(())
 }
 
-/// The goal file exists in the case and does not already carry the answer.
+/// Exactly one of the two lists says what the goal wants; the other is empty.
+fn wanted_strings<'a>(
+    case: &LoopCase,
+    contains_any: &'a [String],
+    contains_all: &'a [String],
+) -> Result<&'a [String], ChekovError> {
+    match (contains_any.is_empty(), contains_all.is_empty()) {
+        (true, true) => Err(invalid(format!(
+            "{}: an edited goal wants contains_any or contains_all",
+            case.id
+        ))),
+        (false, false) => Err(invalid(format!(
+            "{}: contains_any or contains_all, not both",
+            case.id
+        ))),
+        (false, true) => Ok(contains_any),
+        (true, false) => Ok(contains_all),
+    }
+}
+
+/// The goal file exists in the case and does not already carry the answer —
+/// for `contains_all`, any one string present makes part of the goal free.
 fn validate_edit_target(case: &LoopCase, file: &str, wanted: &[String]) -> Result<(), ChekovError> {
     let text = canned_text(case, file).ok_or_else(|| {
         invalid(format!(
@@ -284,9 +312,6 @@ fn validate_edit_target(case: &LoopCase, file: &str, wanted: &[String]) -> Resul
             case.id
         ))
     })?;
-    if wanted.is_empty() {
-        return Err(invalid(format!("{}: contains_any is empty", case.id)));
-    }
     if let Some(present) = wanted.iter().find(|w| text.contains(w.as_str())) {
         return Err(invalid(format!(
             "{}: goal text {present:?} is already in '{file}'",
