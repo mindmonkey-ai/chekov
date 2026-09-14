@@ -607,6 +607,46 @@ recommendation, in priority order:
    in the same hash. Both land in one committed-red cycle; the 2026-09-11
    campaign stays untouched.
 
+**Re-measurement under the ruling (2026-09-14 MDT, 22:42–01:03).** One
+`bench --suite agentic --models qwen3.5-9b,ornith-1.5-35b-a3b,gpt-oss-120b`
+run from the ruling's binary, agentic prompt-set hash `ab4cd9b077d2`; runs
+`20260914T044245Z-qwen3.5-9b`, `20260914T062919Z-ornith-1.5-35b-a3b`,
+`20260914T064636Z-gpt-oss-120b`, 600 rows, every row stamped. `capability
+compare` refuses the old Qwen run against the new one naming
+`prompt_set_hash` (`ac1955773bbf` vs `ab4cd9b077d2`), as ruled. Buffered,
+old → new:
+
+| Axis | Qwen 3.5 9B | Ornith 1.5 35B A3B | GPT-OSS 120B |
+| --- | --- | --- | --- |
+| instruction strict | 9/40 → 27/40 | 29/40 → 32/40 | 39/40 → 36/40 |
+| tool_emit | 36/39 → 37/39 | 35/39 → 36/39 | 35/39 → 35/39 |
+| grammar_gap | 29/30 → 29/30 | 29/30 → 29/30 | 27/30 → 28/30 |
+| tool_loop | 6/6 → 6/6 | 6/6 → 6/6 | 5/6 → 3/5 |
+
+Pass/fail agreed across transports on every case but one (GPT `tl-002`:
+buffered exhausted its 8 turns, streamed reached the goal). Qwen recovered 19
+instruction cases and lost `if-006`, its one vacuous pass, to `empty visible
+answer`; 24 of its rows still stop on `max_tokens` and every one of those is a
+runaway thinker graded as a failure with the reason attached. Ornith recovered
+`if-019`, `if-021`, `if-033` and `te-015`. GPT lost `if-003`, `if-021`, and
+`if-022`, all `end_turn` with text (`if-021` wrote 9,864 answer characters and
+tripped `not_contains:bypass`): the wider cap lets a verbose model talk its way
+into a forbidden substring, and at temperature 1.0 single crossings move —
+neither is a grading artifact. GPT `tl-004` buffered is unavailable: the engine
+answered HTTP 500 ("output does not match the expected peg-native format"),
+an engine-side harmony parse, not a model failure. No strict pass on any model
+has an empty answer. Of 114 axis/case pairs graded on all three, 32
+distinguish the configured stacks and 81 pass everywhere (campaign: 45 of 115
+and 70; the old figures reproduce exactly from the archive). The instruction
+axis carries 21 of the 32, down from 32 of 45. The same caveat holds as before:
+contexts, quantization, MTP and reasoning settings differ, so this ranks
+configured stacks, not models. Wall clock: Qwen ~1 h 47 min (runaway cases burn
+4096 tokens per door), Ornith and GPT ~17 min each. Raw evidence: the three
+`stamp.json` / `results.jsonl` pairs, the run log, and a SHA-256 manifest are
+in [docs/agentic-campaign-20260914.tar.gz](docs/agentic-campaign-20260914.tar.gz).
+Not a controlled timing measurement: no other load ran, but the bench binary
+was a debug build.
+
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
 samplers") by this engine for `ornith-1.5-35b-a3b`, so the §7.2 grammar_gap
