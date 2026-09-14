@@ -699,7 +699,10 @@ Nemotron measurement runs once, on an axis that can separate.
 **Not proposed:** per-case turn budgets, scoring the path, a real
 filesystem, or non-Rust repositories (loop design §11 keeps them out).
 
-Proposed 2026-09-14 — status: OPEN, awaiting ruling.
+Proposed 2026-09-14 — status: **APPROVED 2026-09-14 (human approval in chat:
+"I approve")** as proposed: six cases `tl-007`–`tl-012`, the optional
+`contains_all` goal field, schema version unchanged, then one three-model
+campaign under the new identity before the Muse / Nemotron measurement.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
