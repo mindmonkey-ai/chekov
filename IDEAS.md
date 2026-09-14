@@ -535,6 +535,24 @@ here before implementation and use committed-red TDD for fixes. Preserve this
 campaign unchanged and give any changed grading/budget a distinct comparison
 identity. The separate compiled-in fixture remains deferred.
 
+## Stop reason on graded agentic rows (2026-09-13)
+
+First slice of the observability follow-up recommended by the campaign above.
+Every graded agentic row — `tool_emit`, `instruction`, `grammar_gap`, fixture
+probes, and `tool_loop` — records the crossing's own `stop_reason` as
+`reply.stop_reason`, read from the same body the grader reads; the loop captures
+the final reply's reason as it lands. Rows written before the field load as
+`None`, and a failed crossing carries no stamp. This retains termination
+evidence so a zero-answer pass or a low score can later be attributed to budget
+exhaustion (`max_tokens`) rather than a withheld answer (`end_turn`). No grade,
+case, checker, or comparison identity changes; the 2026-09-11 campaign stays
+untouched. Still open from the TODO: rejecting empty visible answers on
+answer-required instruction checks, reproducing the empty passes, and surfacing
+the stamp in the comparison report.
+Proposed 2026-09-13 — status: IMPLEMENTED in PR #86 (red `ddf8f44`, green
+`783a138`); the scope ruling the TODO asked for before implementation is not yet
+recorded here.
+
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
 samplers") by this engine for `ornith-1.5-35b-a3b`, so the §7.2 grammar_gap
