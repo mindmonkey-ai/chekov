@@ -523,7 +523,6 @@ mod tests {
             turns: 4,
             tool_calls: 6,
             measure: empty_measure(),
-            // Red: the loop captures no reply yet.
             reply: None,
         };
         assert_eq!(

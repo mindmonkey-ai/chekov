@@ -297,8 +297,14 @@ impl<'a> LoopState<'a> {
         }
     }
 
-    /// One reply applied. `None` means the loop goes on.
+    /// One reply applied. `None` means the loop goes on. The final reply's
+    /// stop reason is captured as it lands, so it survives into the outcome.
     fn step(&mut self, reply: &Reply) -> Option<LoopEnd> {
+        if let Some(reason) = reply.stop_reason.as_deref() {
+            self.reply = Some(ReplyStamp {
+                stop_reason: Some(reason.to_owned()),
+            });
+        }
         if reply.tool_uses.is_empty() {
             return Some(if reply.stop_reason.as_deref() == Some("max_tokens") {
                 LoopEnd::Truncated
@@ -342,7 +348,6 @@ impl<'a> LoopState<'a> {
             turns,
             tool_calls: self.tool_calls,
             measure: self.measure,
-            // Red: nothing has set self.reply yet, so the captured reply is None.
             reply: self.reply,
         }
     }
