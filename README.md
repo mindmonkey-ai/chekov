@@ -606,7 +606,13 @@ comparison of configured stacks. Empty visible answers and near-ceiling axes
 limit interpretation; cases and grades were kept frozen.
 See the [campaign receipt](IDEAS.md#three-model-campaign-preflight-2026-09-11-utc)
 for per-case results, raw evidence, configuration caveats, and the recommended
-follow-up on answer/budget observability.
+follow-up on answer/budget observability. That follow-up found the instruction
+gap was mostly the 512-token reply cap starving long thinkers: with room to
+think, Qwen's strict score was 28/40, not 9/40. Under the 2026-09-13 ruling
+every graded row records its stop reason, instruction probes get 4096 tokens
+and tool probes 1024, an empty visible answer fails, and a run under the ruling
+refuses to compare with the campaign above. See
+[the ruling](IDEAS.md#stop-reason-on-graded-agentic-rows-2026-09-13).
 
 ### Long-context traces
 
