@@ -6,6 +6,13 @@ use serde_json::Value;
 
 use super::fixture::FixtureProbe;
 
+/// Bumped whenever a verdict can change for the same reply.
+///
+/// It rides in the agentic prompt-set hash, so runs graded differently never
+/// compare as the same workload. 1: empty visible answers and silent
+/// abstentions fail (ruling 2026-09-13).
+pub const GRADER_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Grade {
     Pass,
@@ -120,9 +127,21 @@ pub fn grade_tool_emit(anthropic_body: &str, case: &ToolCase) -> Grade {
             Some((name, _)) => Grade::Fail {
                 reason: format!("fabricated a call to '{name}' — no tool should fire"),
             },
-            None => Grade::Pass,
+            None => abstention(anthropic_body),
         },
         Expect::Call => grade_call(&calls, case),
+    }
+}
+
+/// A no-call reply still has to answer the question: a model that says
+/// nothing has not abstained, it has stalled (typically out of budget).
+fn abstention(anthropic_body: &str) -> Grade {
+    match artifact_text(anthropic_body) {
+        Ok(text) if text.trim().is_empty() => Grade::Fail {
+            reason: "abstained without answering".to_owned(),
+        },
+        Ok(_) => Grade::Pass,
+        Err(fail) => fail,
     }
 }
 
@@ -182,6 +201,14 @@ pub fn grade_instruction(anthropic_body: &str, case: &InstructionCase) -> (Grade
         Ok(text) => text,
         Err(fail) => return (fail.clone(), fail),
     };
+    // Every instruction asks for an answer; a reply nobody can read satisfies
+    // no check, however vacuously the checks would let it through.
+    if raw.trim().is_empty() {
+        let fail = Grade::Fail {
+            reason: "empty visible answer".to_owned(),
+        };
+        return (fail.clone(), fail);
+    }
     let (code, fenced) = extract_code(&raw);
     let reply = Reply {
         raw: &raw,

@@ -36,6 +36,15 @@ pub fn prompt_set_hash(plan: &crate::core::bench::sweep::SweepPlan, seed: u32) -
     crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
 }
 
+/// Reply room for the single-turn agentic probes (ruling 2026-09-13).
+///
+/// Thinking counts against `max_tokens`, and the earlier 512 starved every
+/// long thinker before it could answer: a measured 9/40 that was 28/40 with
+/// room. Tool replies are short; the forced arm is grammar-bound and keeps
+/// its own cap.
+pub const INSTRUCTION_MAX_TOKENS: u32 = 4096;
+pub const TOOL_MAX_TOKENS: u32 = 1024;
+
 /// What pins the agentic task set beyond its content: the sampling seed and
 /// the loop's turn budget (tool-loop design §8). Two runs judged under
 /// different budgets measured different tasks.
@@ -55,15 +64,25 @@ pub fn suite_prompt_hash(
 ) -> String {
     use crate::core::bench::lifecycle::Suite;
     let throughput = prompt_set_hash(plan, pins.seed);
-    let agentic = crate::core::bench::probeset::content_hash();
-    let (seed, turns) = (pins.seed, pins.max_turns);
+    let agentic = agentic_identity(pins);
     match suite {
         Suite::Throughput => throughput,
-        Suite::Agentic => hash12(&format!("agentic|{agentic}|turns={turns}|seed={seed}")),
-        Suite::All => hash12(&format!(
-            "all|{throughput}|{agentic}|turns={turns}|seed={seed}"
-        )),
+        Suite::Agentic => hash12(&format!("agentic|{agentic}")),
+        Suite::All => hash12(&format!("all|{throughput}|{agentic}")),
     }
+}
+
+/// Everything that decides an agentic verdict besides the model: the case
+/// text, the turn budget, the seed, the reply caps, and the grader. Change
+/// any one and old runs refuse to compare or resume.
+fn agentic_identity(pins: HashPins) -> String {
+    format!(
+        "{}|turns={}|seed={}|caps={INSTRUCTION_MAX_TOKENS}/{TOOL_MAX_TOKENS}|grader={}",
+        crate::core::bench::probeset::content_hash(),
+        pins.max_turns,
+        pins.seed,
+        crate::core::bench::grade::GRADER_VERSION
+    )
 }
 
 fn hash12(canonical: &str) -> String {
@@ -90,7 +109,7 @@ fn palette(tools: &[crate::core::bench::probeset::ToolDef]) -> Vec<serde_json::V
 pub fn tool_probe(case: &crate::core::bench::probeset::ToolCase) -> HttpRequest {
     anthropic_post(&serde_json::json!({
         "model": "claude-sonnet-4",
-        "max_tokens": 256,
+        "max_tokens": TOOL_MAX_TOKENS,
         "tools": palette(&case.tools),
         "messages": [{"role": "user", "content": case.prompt}],
     }))
@@ -147,7 +166,7 @@ pub fn forced_probe(case: &crate::core::bench::probeset::ToolCase) -> HttpReques
 pub fn instruction_probe(case: &crate::core::bench::probeset::InstructionCase) -> HttpRequest {
     anthropic_post(&serde_json::json!({
         "model": "claude-sonnet-4",
-        "max_tokens": 512,
+        "max_tokens": INSTRUCTION_MAX_TOKENS,
         "messages": [{"role": "user", "content": case.prompt}],
     }))
 }
