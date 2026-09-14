@@ -329,3 +329,27 @@ the design.
 - The palette is validated against the environment's five canned tools at
   load (`CANNED_TOOLS`): a case offering a tool the environment cannot answer
   is refused, never answered wrong.
+
+## 14. Loop expansion (2026-09-14, approved in IDEAS.md)
+
+Six cases `tl-007`–`tl-012` join the six of §3, which stay byte-identical
+(the legacy-region hash test holds). Each exercises one device the seed set
+lacked: a decoy `grep` hit that sorts before the definition (`tl-007`); the
+`edit_file` uniqueness contract, where the wrong literal also sits in a doc
+comment (`tl-008`); a `run_tests` failure naming a different file than the
+prompt blames (`tl-009`); a change already in place, whose honest end is
+`unchanged` with a reply mentioning `already` (`tl-010`); a three-file chain
+from an API doc comment through a policy function to the constant
+(`tl-011`); and two constants behind one test gate (`tl-012`).
+
+One schema addition: `Goal::Edited` gains an optional `contains_all`
+beside `contains_any`. A goal sets exactly one; `contains_all` is met only
+when every string is present, `run_tests` stays red until then, and load
+refuses a goal with both lists, neither, or any string already in the file.
+The TOML version stays 0 — the field is optional with a default.
+
+Solvability is a unit test, not a hope: a scripted competent agent walks each
+added case through the environment and reaches `GoalMet` in six calls or
+fewer, seeing the exact intermediate answers the device relies on ("old text
+occurs 2 times", the contradicting test line, the still-red gate after one
+of two edits). The eight-turn budget is unchanged.
