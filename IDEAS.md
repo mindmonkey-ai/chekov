@@ -704,6 +704,49 @@ Proposed 2026-09-14 — status: **APPROVED 2026-09-14 (human approval in chat:
 `contains_all` goal field, schema version unchanged, then one three-model
 campaign under the new identity before the Muse / Nemotron measurement.
 
+**Measured 2026-09-14 (MDT, 10:03–12:06).** One `bench --suite agentic
+--models qwen3.5-9b,ornith-1.5-35b-a3b,gpt-oss-120b` run on the twelve-loop
+set, agentic prompt-set hash `57c7585512ec`; runs `20260914T160304Z-qwen3.5-9b`,
+`20260914T173233Z-ornith-1.5-35b-a3b`, `20260914T174834Z-gpt-oss-120b`, 636
+rows, every row stamped. Raw evidence with a SHA-256 manifest:
+[docs/agentic-campaign-20260914-loops.tar.gz](docs/agentic-campaign-20260914-loops.tar.gz).
+
+| Axis (buffered) | Qwen 3.5 9B | Ornith 1.5 35B A3B | GPT-OSS 120B |
+| --- | --- | --- | --- |
+| tool_loop | 12/12 | 10/12 | 7/11 (+1 unavailable) |
+| instruction strict | 27/40 | 32/40 | 36/40 |
+| tool_emit | 37/39 | 36/39 | 35/39 |
+| grammar_gap | 29/30 | 29/30 | 28/30 |
+
+The loop axis discriminates now: five of twelve loop cases separate the
+stacks (`tl-002`, `tl-005`, `tl-007`, `tl-010`, `tl-011`), against two of six
+before. Three of the added devices did the separating: the decoy grep hit
+(`tl-007`: Ornith and GPT both edited the call site and stopped with the
+constant unchanged), the already-done change (`tl-010`: GPT called tools for
+all eight turns instead of reporting), and the three-file chain (`tl-011`:
+Ornith's sixth turn hit the loop's 512-token cap mid-call and ended as
+`'edit_file' called without path`). The uniqueness contract, the
+contradicting test, and the two-edit gate (`tl-008`, `tl-009`, `tl-012`) passed
+on every stack. Qwen, the weakest instruction follower, is the strongest
+looper: every case closed, median four turns. Pass/fail agreed across
+transports on every case measured both ways. Of 120 axis/case pairs graded on
+all three stacks, 35 distinguish and 84 pass everywhere (ruling run: 32 of
+114 and 81); the loop axis contributes 5 of the 35.
+
+Every single-turn axis reproduced the ruling run's verdicts exactly — zero
+flips across 188 cases per model — so the seeded sampling is reproducible
+run to run and the loop numbers stand on the same footing. GPT `tl-004`
+buffered was unavailable again with the same engine-side HTTP 500 (the
+Harmony `peg-native` parse, see the ruling entry); with seeded sampling it
+reproduces, so a retry would not have recovered it. Wall clock: Qwen 89 min,
+Ornith 16 min, GPT 18 min.
+
+**Follow-up (proposed, not a ruling):** `loop_probe` still sends
+`max_tokens: 512` per turn, the cap the 2026-09-13 ruling raised everywhere
+else; Ornith's `tl-011` failure is that cap cutting a tool call in half. Raise
+the loop turn cap in the same way (one constant in the hash) before the Muse /
+Nemotron measurement, so a loop failure means the model, not the budget.
+
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
 samplers") by this engine for `ornith-1.5-35b-a3b`, so the §7.2 grammar_gap
