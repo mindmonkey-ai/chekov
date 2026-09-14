@@ -573,8 +573,39 @@ Still open from the TODO: the ruling on rejecting empty visible answers for
 answer-required instruction checks (now with the count and cause on hand), and
 reproducing the campaign's empty passes on the three campaign models.
 Proposed 2026-09-13 — status: IMPLEMENTED in PR #86 (rows: red `ddf8f44`, green
-`783a138`; reports: red `771d3c0`, green `d434aac`); the scope ruling the TODO
-asked for before implementation is not yet recorded here.
+`783a138`; reports: red `771d3c0`, green `d434aac`).
+
+**Research for the ruling (2026-09-13, MDT).** The campaign archive shows the
+instruction gap is mostly a harness artifact: instruction probes cap
+`max_tokens` at 512 and tool probes at 256, thinking counts against that cap,
+and Qwen3.5-9B's 32 empty buffered instruction rows all carry 1448–2267
+thinking characters, right at the ceiling, while its 8 answered rows all
+thought less. A scratch binary with instruction at 4096 and tools at 1024 (not
+committed; run `20260914T033943Z-qwen3.5-9b`, buffered half complete) moved
+Qwen's strict instruction score from 9/40 to 28/40 and its empty answers from
+32 to 11; the 11 still empty burned the whole 4096 on thinking and stay real
+failures. Of the 29 answered rows only 20 fit under 2048 tokens and 27 under
+3072, so the cap must be 4096. Tool probes never touched 1024 (longest reply
+1450 chars). Cost: a runaway case burns the full cap at ~30 tok/s, so the
+buffered half took ~50 min against ~8 for Ornith-9B. The streamed half was
+lost to a manual `chekov stop` at 22:33 and is not needed for the decision;
+its 15 measured cases agree with buffered. Vacuous passes are rare: `if-006`
+is the only instruction case whose checks an empty reply satisfies, and
+`te-008` the only silent abstention in the campaign. Sources consulted agree
+on treating `max_tokens` with an empty answer as failure and on giving
+reasoning models room above the visible answer.
+
+**Ruling APPROVED 2026-09-13 (human approval in chat: "I approve"),** on this
+recommendation, in priority order:
+1. **Budget.** Instruction probes at 4096 and tool probes at 1024
+   `max_tokens`, folded into the agentic hash so a run under the ruling never
+   compares with, or resumes, a run before it. Then one three-model campaign
+   under the new identity.
+2. **Grading.** An empty visible answer fails every instruction case, strict
+   and loose (`empty visible answer`), and an abstention case that emits no
+   visible text fails (`abstained without answering`). A grader version rides
+   in the same hash. Both land in one committed-red cycle; the 2026-09-11
+   campaign stays untouched.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
