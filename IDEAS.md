@@ -546,12 +546,35 @@ the final reply's reason as it lands. Rows written before the field load as
 evidence so a zero-answer pass or a low score can later be attributed to budget
 exhaustion (`max_tokens`) rather than a withheld answer (`end_turn`). No grade,
 case, checker, or comparison identity changes; the 2026-09-11 campaign stays
-untouched. Still open from the TODO: rejecting empty visible answers on
-answer-required instruction checks, reproducing the empty passes, and surfacing
-the stamp in the comparison report.
-Proposed 2026-09-13 — status: IMPLEMENTED in PR #86 (red `ddf8f44`, green
-`783a138`); the scope ruling the TODO asked for before implementation is not yet
-recorded here.
+untouched.
+
+**Reports (second slice, 2026-09-13).** The run report appends
+`(stop: <reason>)` to every stamped agentic FAIL line and lists strict
+`instruction` passes that spent thinking but returned no visible answer as
+`instruction PASS <id>  empty visible answer`; the comparison's disagreement
+lines carry the same suffix on a failing side. Only `instruction` is screened
+for empty passes — a tool call is a legitimately textless pass, and telling an
+abstention case from a call case needs the case's `expect`, which rows do not
+record. Grades, counts, and comparison identity are unchanged.
+
+**Live acceptance 2026-09-13 (MDT).** `bench --suite agentic --models
+ornith-1.5-9b` (run `20260914T030415Z-ornith-1.5-9b`, 200 rows, ~8 min): every
+row carries `reply.stop_reason` — `tool_use` 68, `end_turn` 116, `max_tokens`
+16. The stamp already answers the campaign's question for this model: of its
+six buffered instruction failures, four (`if-003`, `if-019`, `if-033`, `if-037`)
+stopped on `max_tokens`, and the two with zero visible answer characters are
+both budget-starved rather than withheld. Two instruction passes (`if-013`,
+`if-021`) and two tool passes (`te-034`, `te-035`) also hit `max_tokens` with
+text already emitted. No strict pass on this model had an empty answer. Not a
+campaign measurement: `cargo test` builds ran on the same machine during the
+crossings, so its timings are not evidence.
+
+Still open from the TODO: the ruling on rejecting empty visible answers for
+answer-required instruction checks (now with the count and cause on hand), and
+reproducing the campaign's empty passes on the three campaign models.
+Proposed 2026-09-13 — status: IMPLEMENTED in PR #86 (rows: red `ddf8f44`, green
+`783a138`; reports: red `771d3c0`, green `d434aac`); the scope ruling the TODO
+asked for before implementation is not yet recorded here.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
