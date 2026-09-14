@@ -452,12 +452,42 @@ mod tests {
     #[test]
     fn the_shipped_loop_cases_parse_with_the_seed_count() {
         let set = agentic_v0().expect("valid");
-        assert_eq!(set.tool_loop.len(), 6);
+        assert_eq!(
+            set.tool_loop.len(),
+            12,
+            "six seed cases plus the 2026-09-14 six"
+        );
         assert!(
             !set.loop_system.is_empty(),
             "the system text rides in the set"
         );
-        assert!(set.tool_loop.iter().all(|c| c.id.starts_with("tl-")));
+        let ids: Vec<&str> = set.tool_loop.iter().map(|c| c.id.as_str()).collect();
+        let expected: Vec<String> = (1..=12).map(|n| format!("tl-{n:03}")).collect();
+        assert_eq!(ids, expected, "ids run tl-001 through tl-012 in order");
+    }
+
+    #[test]
+    fn a_loop_goal_may_require_every_string_with_contains_all() {
+        let all = "kind = \"edited\"\nfile = \"src/a.rs\"\n\
+                   contains_all = [\"const A: u32 = 5;\", \"const B: u32 = 7;\"]";
+        loop_set(all, &["read_file", "edit_file"]).expect("contains_all alone is a goal");
+        let err = loop_set(
+            "kind = \"edited\"\nfile = \"src/a.rs\"",
+            &["read_file", "edit_file"],
+        )
+        .expect_err("a goal must want something");
+        assert!(
+            err.to_string().contains("contains_any or contains_all"),
+            "{err}"
+        );
+        let both = format!("{EDITED}\ncontains_all = [\"const B: u32 = 7;\"]");
+        let err = loop_set(&both, &["read_file", "edit_file"]).expect_err("one or the other");
+        assert!(err.to_string().contains("not both"), "{err}");
+        let met = "kind = \"edited\"\nfile = \"src/a.rs\"\n\
+                   contains_all = [\"const A: u32 = 3;\", \"const B: u32 = 7;\"]";
+        let err = loop_set(met, &["read_file", "edit_file"])
+            .expect_err("a string already present makes half the goal free");
+        assert!(err.to_string().contains("already in 'src/a.rs'"), "{err}");
     }
 
     #[test]

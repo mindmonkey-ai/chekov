@@ -4313,9 +4313,10 @@ mod tests {
     #[test]
     fn expanded_agentic_estimate_covers_188_single_turn_crossings_and_all_loop_turns() {
         use crate::core::bench::lifecycle::Suite;
+        // Twelve loop cases, each up to eight turns through both doors.
         assert_eq!(
             super::agentic_estimate_secs(Some(Suite::Agentic), 8).expect("estimate"),
-            (188 + 12 * 8) * 8
+            (188 + 24 * 8) * 8
         );
     }
 
