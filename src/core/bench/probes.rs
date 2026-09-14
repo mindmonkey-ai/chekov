@@ -41,9 +41,11 @@ pub fn prompt_set_hash(plan: &crate::core::bench::sweep::SweepPlan, seed: u32) -
 /// Thinking counts against `max_tokens`, and the earlier 512 starved every
 /// long thinker before it could answer: a measured 9/40 that was 28/40 with
 /// room. Tool replies are short; the forced arm is grammar-bound and keeps
-/// its own cap.
+/// its own cap. A loop turn gets the instruction cap (ruling 2026-09-14):
+/// at 512 a long-thinking turn was cut mid tool call and graded malformed.
 pub const INSTRUCTION_MAX_TOKENS: u32 = 4096;
 pub const TOOL_MAX_TOKENS: u32 = 1024;
+pub const LOOP_MAX_TOKENS: u32 = INSTRUCTION_MAX_TOKENS;
 
 /// What pins the agentic task set beyond its content: the sampling seed and
 /// the loop's turn budget (tool-loop design §8). Two runs judged under
@@ -77,7 +79,7 @@ pub fn suite_prompt_hash(
 /// any one and old runs refuse to compare or resume.
 fn agentic_identity(pins: HashPins) -> String {
     format!(
-        "{}|turns={}|seed={}|caps={INSTRUCTION_MAX_TOKENS}/{TOOL_MAX_TOKENS}|grader={}",
+        "{}|turns={}|seed={}|caps={INSTRUCTION_MAX_TOKENS}/{TOOL_MAX_TOKENS}/{LOOP_MAX_TOKENS}|grader={}",
         crate::core::bench::probeset::content_hash(),
         pins.max_turns,
         pins.seed,
@@ -125,7 +127,7 @@ pub fn loop_probe(
 ) -> HttpRequest {
     anthropic_post(&serde_json::json!({
         "model": "claude-sonnet-4",
-        "max_tokens": 512,
+        "max_tokens": LOOP_MAX_TOKENS,
         "system": system,
         "tools": palette(&case.tools),
         "messages": messages,
@@ -228,7 +230,31 @@ mod tests {
         );
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert_eq!(body["messages"][1]["role"], "assistant");
-        assert_eq!(body["max_tokens"], 512);
+        // Ruling 2026-09-14: a loop turn gets the instruction cap, so a turn
+        // that thinks long is not cut in half mid tool call.
+        assert_eq!(body["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn a_run_under_the_loop_cap_ruling_never_compares_with_the_twelve_loop_run() {
+        use crate::core::bench::lifecycle::Suite;
+        use crate::core::bench::sweep::SweepPlan;
+        // `57c7585512ec` is the agentic hash the 2026-09-14 twelve-loop
+        // measurement ran under (seed 42, eight turns), read from its stamps.
+        let plan = SweepPlan {
+            depths: vec![1024],
+            repetitions: 5,
+            max_tokens: 128,
+        };
+        let twelve_loops = super::HashPins {
+            seed: 42,
+            max_turns: 8,
+        };
+        assert_ne!(
+            super::suite_prompt_hash(Suite::Agentic, &plan, twelve_loops),
+            "57c7585512ec",
+            "the loop turn cap rides in the identity"
+        );
     }
 
     #[test]

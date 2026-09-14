@@ -747,6 +747,11 @@ else; Ornith's `tl-011` failure is that cap cutting a tool call in half. Raise
 the loop turn cap in the same way (one constant in the hash) before the Muse /
 Nemotron measurement, so a loop failure means the model, not the budget.
 
+**Ruling APPROVED 2026-09-14 (human approval in chat: "approve"):** raise
+`loop_probe` to 4096 tokens per turn, the instruction cap, as a constant that
+rides in the agentic identity hash; then one three-model run under the new
+identity before the Muse / Nemotron measurement.
+
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
 samplers") by this engine for `ornith-1.5-35b-a3b`, so the §7.2 grammar_gap
