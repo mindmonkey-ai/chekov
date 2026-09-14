@@ -597,7 +597,22 @@ The corpus content hash changes for agentic and combined runs, so comparisons
 and resume across the old and expanded corpus refuse. Old records remain
 readable; throughput-only hashes are unchanged. Run `--dry-run` first: its
 estimate includes the agentic work for every selected model. Automated checks
-pass; a three-model campaign is still needed to assess discrimination.
+pass. The 2026-09-11 UTC campaign completed 200 crossings each on Qwen 3.5 9B,
+Ornith 1.5 35B A3B, and GPT-OSS 120B without interrupting another session's
+server. Strict instruction scores were 9/40, 29/40, and 39/40; tools were
+36/39, 35/39, and 35/39, and loops 6/6, 6/6, and 5/6. Pass/fail agreed on both
+transports. Different registered contexts and flags make this a descriptive
+comparison of configured stacks. Empty visible answers and near-ceiling axes
+limit interpretation; cases and grades were kept frozen.
+See the [campaign receipt](IDEAS.md#three-model-campaign-preflight-2026-09-11-utc)
+for per-case results, raw evidence, configuration caveats, and the recommended
+follow-up on answer/budget observability. That follow-up found the instruction
+gap was mostly the 512-token reply cap starving long thinkers: with room to
+think, Qwen's strict score was 28/40, not 9/40. Under the 2026-09-13 ruling
+every graded row records its stop reason, instruction probes get 4096 tokens
+and tool probes 1024, an empty visible answer fails, and a run under the ruling
+refuses to compare with the campaign above. See
+[the ruling](IDEAS.md#stop-reason-on-graded-agentic-rows-2026-09-13).
 
 ### Long-context traces
 

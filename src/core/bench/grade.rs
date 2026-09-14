@@ -6,6 +6,13 @@ use serde_json::Value;
 
 use super::fixture::FixtureProbe;
 
+/// Bumped whenever a verdict can change for the same reply.
+///
+/// It rides in the agentic prompt-set hash, so runs graded differently never
+/// compare as the same workload. 1: empty visible answers and silent
+/// abstentions fail (ruling 2026-09-13).
+pub const GRADER_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Grade {
     Pass,
@@ -120,9 +127,21 @@ pub fn grade_tool_emit(anthropic_body: &str, case: &ToolCase) -> Grade {
             Some((name, _)) => Grade::Fail {
                 reason: format!("fabricated a call to '{name}' — no tool should fire"),
             },
-            None => Grade::Pass,
+            None => abstention(anthropic_body),
         },
         Expect::Call => grade_call(&calls, case),
+    }
+}
+
+/// A no-call reply still has to answer the question: a model that says
+/// nothing has not abstained, it has stalled (typically out of budget).
+fn abstention(anthropic_body: &str) -> Grade {
+    match artifact_text(anthropic_body) {
+        Ok(text) if text.trim().is_empty() => Grade::Fail {
+            reason: "abstained without answering".to_owned(),
+        },
+        Ok(_) => Grade::Pass,
+        Err(fail) => fail,
     }
 }
 
@@ -182,6 +201,14 @@ pub fn grade_instruction(anthropic_body: &str, case: &InstructionCase) -> (Grade
         Ok(text) => text,
         Err(fail) => return (fail.clone(), fail),
     };
+    // Every instruction asks for an answer; a reply nobody can read satisfies
+    // no check, however vacuously the checks would let it through.
+    if raw.trim().is_empty() {
+        let fail = Grade::Fail {
+            reason: "empty visible answer".to_owned(),
+        };
+        return (fail.clone(), fail);
+    }
     let (code, fenced) = extract_code(&raw);
     let reply = Reply {
         raw: &raw,
@@ -393,6 +420,49 @@ mod probe_tests {
     }
 
     #[test]
+    fn a_silent_abstention_fails_the_tool_case() {
+        for silent in [
+            body_with_text(""),
+            body_with_text("  \n"),
+            serde_json::json!({"type": "message", "content": []}).to_string(),
+        ] {
+            match grade_tool_emit(&silent, &abstain_case()) {
+                Grade::Fail { reason } => {
+                    assert_eq!(reason, "abstained without answering", "{silent}");
+                }
+                Grade::Pass => panic!("an abstention must still answer: {silent}"),
+            }
+        }
+        assert!(matches!(
+            grade_tool_emit(&body_with_text("KV means key-value."), &abstain_case()),
+            Grade::Pass
+        ));
+    }
+
+    #[test]
+    fn an_empty_visible_answer_fails_every_instruction_check_strict_and_loose() {
+        let vacuous = InstructionCase {
+            id: "if-v".into(),
+            prompt: "p".into(),
+            checks: vec!["not_contains:process".into(), "max_lines:2".into()],
+        };
+        let failed_as_empty = |grade: Grade| match grade {
+            Grade::Fail { reason } => reason == "empty visible answer",
+            Grade::Pass => false,
+        };
+        for empty in [body_with_text(""), body_with_text(" \n\t")] {
+            let (strict, loose) = grade_instruction(&empty, &vacuous);
+            assert!(
+                failed_as_empty(strict),
+                "strict: an empty reply satisfies nothing: {empty}"
+            );
+            assert!(failed_as_empty(loose), "loose: {empty}");
+        }
+        let (strict, loose) = grade_instruction(&body_with_text("A lock file."), &vacuous);
+        assert!(matches!((strict, loose), (Grade::Pass, Grade::Pass)));
+    }
+
+    #[test]
     fn a_call_case_with_no_or_many_calls_fails() {
         assert!(matches!(
             grade_tool_emit(&body_with_text("I would grep for it."), &call_case()),
@@ -523,6 +593,7 @@ mod tests {
             turns: 4,
             tool_calls: 6,
             measure: empty_measure(),
+            reply: None,
         };
         assert_eq!(
             super::grade_tool_loop(&outcome(LoopEnd::GoalMet)),

@@ -1653,6 +1653,7 @@ fn judge_run(
             measure: crate::core::bench::codebase::run::empty_measure(),
             grade: None,
             transport: store::Transport::Buffered,
+            reply: None,
             codebase: None,
             judge: Some(judge_row),
             tool_loop: None,
@@ -1965,7 +1966,7 @@ fn run_tool_case(
     pass: &mut AgenticPass,
     case: &crate::core::bench::probeset::ToolCase,
 ) -> Result<(), ChekovError> {
-    use crate::core::bench::store::{TaskKey, Transport};
+    use crate::core::bench::store::{ReplyStamp, TaskKey, Transport};
     use crate::core::bench::{grade, probes, probeset};
     let key = TaskKey {
         suite: "tool_emit",
@@ -1973,9 +1974,24 @@ fn run_tool_case(
         transport: pass.transport,
     };
     if !sink.is_done(&key) {
-        let outcome = agentic_cross(pass, &probes::tool_probe(case))
+        let crossed = agentic_cross(pass, &probes::tool_probe(case));
+        // Read the body's stop reason into the row's reply stamp before the
+        // body is moved into the grade below — `from_body` and the grader read
+        // the same body, so the stamp is exactly the body's own reason.
+        let stamp = crossed
+            .as_ref()
+            .ok()
+            .and_then(|(_, body)| ReplyStamp::from_body(body));
+        let outcome = crossed
             .map(|(timings, body)| (timings, grade_row(grade::grade_tool_emit(&body, case))));
-        append_probe(sink, key, row_outcome(outcome, pass.suite.runtime))?;
+        append_probe(
+            sink,
+            ProbeRow {
+                key,
+                outcome: row_outcome(outcome, pass.suite.runtime),
+                reply: stamp,
+            },
+        )?;
     }
     if case.expect != probeset::Expect::Call || pass.transport != Transport::Buffered {
         return Ok(());
@@ -1988,7 +2004,7 @@ fn run_instruction_case(
     pass: &AgenticPass,
     case: &crate::core::bench::probeset::InstructionCase,
 ) -> Result<(), ChekovError> {
-    use crate::core::bench::store::TaskKey;
+    use crate::core::bench::store::{ReplyStamp, TaskKey};
     use crate::core::bench::{grade, probes};
     let key = TaskKey {
         suite: "instruction",
@@ -1998,11 +2014,23 @@ fn run_instruction_case(
     if sink.is_done(&key) {
         return Ok(());
     }
-    let outcome = agentic_cross(pass, &probes::instruction_probe(case)).map(|(timings, body)| {
+    let crossed = agentic_cross(pass, &probes::instruction_probe(case));
+    let stamp = crossed
+        .as_ref()
+        .ok()
+        .and_then(|(_, body)| ReplyStamp::from_body(body));
+    let outcome = crossed.map(|(timings, body)| {
         let (strict, loose) = grade::grade_instruction(&body, case);
         (timings, instruction_row(strict, &loose))
     });
-    append_probe(sink, key, row_outcome(outcome, pass.suite.runtime))
+    append_probe(
+        sink,
+        ProbeRow {
+            key,
+            outcome: row_outcome(outcome, pass.suite.runtime),
+            reply: stamp,
+        },
+    )
 }
 
 /// One loop case through this door. The driver rides `agentic_cross`, so a
@@ -2038,7 +2066,7 @@ fn append_loop(
     outcome: Result<crate::core::bench::toolloop::LoopOutcome, ChekovError>,
 ) -> Result<(), ChekovError> {
     use crate::core::bench::{grade, store};
-    let (measure, verdict, tool_loop) = match outcome {
+    let (measure, verdict, tool_loop, reply) = match outcome {
         Ok(done) => {
             let verdict = grade_row(grade::grade_tool_loop(&done));
             let row = store::LoopRow {
@@ -2046,11 +2074,11 @@ fn append_loop(
                 tool_calls: done.tool_calls,
                 end: done.end,
             };
-            (done.measure, verdict, Some(row))
+            (done.measure, verdict, Some(row), done.reply)
         }
         Err(e) => {
             let (measure, verdict) = failed_probe(&e);
-            (measure, verdict, None)
+            (measure, verdict, None, None)
         }
     };
     sink.writer.append(store::Task {
@@ -2059,6 +2087,7 @@ fn append_loop(
         measure,
         grade: Some(verdict),
         transport: key.transport,
+        reply,
         codebase: None,
         judge: None,
         tool_loop,
@@ -2098,7 +2127,7 @@ fn run_forced_case(
     forced: &mut AgenticPass,
     case: &crate::core::bench::probeset::ToolCase,
 ) -> Result<(), ChekovError> {
-    use crate::core::bench::store::TaskKey;
+    use crate::core::bench::store::{ReplyStamp, TaskKey};
     use crate::core::bench::{grade, probes, probeset};
     let forced_id = format!("gg-{}", case.id);
     if sink.is_done(&TaskKey::buffered("grammar_gap", &forced_id)) {
@@ -2112,10 +2141,14 @@ fn run_forced_case(
     match row_outcome(crossed, forced.suite.runtime) {
         Ok((timings, body)) => {
             let verdict = grade_row(grade::grade_forced(&body, case));
+            let stamp = ReplyStamp::from_body(&body);
             append_probe(
                 sink,
-                TaskKey::buffered("grammar_gap", &forced_id),
-                Ok((timings, verdict)),
+                ProbeRow {
+                    key: TaskKey::buffered("grammar_gap", &forced_id),
+                    outcome: Ok((timings, verdict)),
+                    reply: stamp,
+                },
             )
         }
         Err(e) => {
@@ -2152,6 +2185,7 @@ fn append_unavailable(
         measure: crate::core::bench::codebase::run::empty_measure(),
         grade: Some(store::GradeRow::unavailable(reason)),
         transport: store::Transport::Buffered,
+        reply: None,
         codebase: None,
         judge: None,
         tool_loop: None,
@@ -2202,11 +2236,11 @@ fn outcome_row(
     }
 }
 
-/// Append one graded probe row; a crossing failure records a FAIL with its
-/// reason and no invented measurement.
-fn append_probe(
-    sink: &mut TaskSink,
-    key: crate::core::bench::store::TaskKey,
+/// One graded probe row, ready to append — the row identity, the crossed and
+/// recasted outcome, and the body's stop reason. Bundled so `append_probe`
+/// takes two arguments rather than four, keeping the row's parts together.
+struct ProbeRow<'a> {
+    key: crate::core::bench::store::TaskKey<'a>,
     outcome: Result<
         (
             Option<crate::core::bench::runner::Timings>,
@@ -2214,15 +2248,21 @@ fn append_probe(
         ),
         ChekovError,
     >,
-) -> Result<(), ChekovError> {
+    reply: Option<crate::core::bench::store::ReplyStamp>,
+}
+
+/// Append one graded probe row; a crossing failure records a FAIL with its
+/// reason and no invented measurement.
+fn append_probe(sink: &mut TaskSink, row: ProbeRow) -> Result<(), ChekovError> {
     use crate::core::bench::store;
-    let (measure, verdict) = outcome_row(outcome);
+    let (measure, verdict) = outcome_row(row.outcome);
     sink.writer.append(store::Task {
-        suite: key.suite.into(),
-        task_id: key.task_id.into(),
+        suite: row.key.suite.into(),
+        task_id: row.key.task_id.into(),
         measure,
         grade: Some(verdict),
-        transport: key.transport,
+        transport: row.key.transport,
+        reply: row.reply,
         codebase: None,
         judge: None,
         tool_loop: None,
@@ -2315,6 +2355,7 @@ fn run_throughput(
             },
             grade: None,
             transport,
+            reply: None,
             codebase: None,
             judge: None,
             tool_loop: None,
@@ -2333,6 +2374,7 @@ fn run_fixture(
     pass: &SuitePass,
     path: &std::path::Path,
 ) -> Result<(), ChekovError> {
+    use crate::core::bench::store::ReplyStamp;
     use crate::core::bench::store::TaskKey;
     use crate::core::bench::{fixture, grade, probes};
     let loaded = fixture::load(path)?;
@@ -2350,16 +2392,29 @@ fn run_fixture(
             );
             continue;
         }
-        let outcome = pass
-            .clock
-            .cross(pass.wire, &probes::fixture_probe(probe))
-            .map(|artifact| {
-                (
-                    Some(artifact.timings),
-                    grade_row(grade::grade(&artifact.anthropic_body, probe)),
-                )
-            });
-        append_probe(sink, key, row_outcome(outcome, pass.runtime))?;
+        let result = pass.clock.cross(pass.wire, &probes::fixture_probe(probe));
+        // `ReplyStamp::from_body` reads the same body the grader does, so the
+        // stamp is exactly the body's own stop reason when the grader can read
+        // it — and absent otherwise. Capture it once, off the body before it is
+        // moved into the outcome.
+        let stamp = result
+            .as_ref()
+            .ok()
+            .and_then(|a| ReplyStamp::from_body(&a.anthropic_body));
+        let outcome = result.map(|artifact| {
+            (
+                Some(artifact.timings),
+                grade_row(grade::grade(&artifact.anthropic_body, probe)),
+            )
+        });
+        append_probe(
+            sink,
+            ProbeRow {
+                key,
+                outcome: row_outcome(outcome, pass.runtime),
+                reply: stamp,
+            },
+        )?;
     }
     Ok(())
 }
@@ -3874,6 +3929,7 @@ mod tests {
             measure: crate::core::bench::codebase::run::empty_measure(),
             grade: None,
             transport: crate::core::bench::store::Transport::Buffered,
+            reply: None,
             codebase: Some(crossing_row(tier)),
             judge: None,
             tool_loop: None,
@@ -3924,6 +3980,7 @@ mod tests {
                     measure: crate::core::bench::codebase::run::empty_measure(),
                     grade: None,
                     transport: Transport::Buffered,
+                    reply: None,
                     codebase: None,
                     judge: Some(JudgeRow {
                         equivalent: Some(true),

@@ -69,6 +69,11 @@ pub struct TaskRow {
     pub measure: Measure,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grade: Option<GradeRow>,
+    /// The crossing's stop reason, when the graded body carried one — what
+    /// separates a budget-starved empty answer from a withheld one. Rows
+    /// written before the field load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<ReplyStamp>,
     /// Present on `codebase` rows only: what the model saw, what it answered,
     /// and the gold. Tiers 1–4 are recomputed from these on read; tier 5
     /// needs the worktree and is scored at run time.
@@ -315,6 +320,40 @@ pub struct CodebaseRow {
     pub exec: Option<ExecRow>,
 }
 
+/// The crossing's stop reason — why a graded row's visible answer is what it is.
+///
+/// The engine's own `stop_reason` for the crossing, translated to the
+/// Anthropic spelling (`end_turn` / `max_tokens` / `tool_use` /
+/// `stop_sequence` / `error`). Present so an empty visible answer can be read
+/// as *budget-starved* (`max_tokens`) rather than *withheld* (`end_turn` with
+/// no text): the two look identical in `thinking_chars`/`answer_chars` alone.
+/// Absent on rows written before the field existed, and on any crossing whose
+/// graded body carried no `stop_reason`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyStamp {
+    pub stop_reason: Option<String>,
+}
+
+impl ReplyStamp {
+    /// The crossing's stop reason, read from the graded body's `stop_reason`
+    /// (the Anthropic spelling the translator already sets). `None` when the
+    /// body is unreadable or carried no reason — never an invented value.
+    #[must_use]
+    pub fn from_body(body: &str) -> Option<Self> {
+        let reason = serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .as_ref()
+            .and_then(|v| v.get("stop_reason"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        // If the body carried no stop_reason at all, there is nothing to stamp;
+        // a stamp whose value is itself None would be noise.
+        reason.map(|stop_reason| Self {
+            stop_reason: Some(stop_reason),
+        })
+    }
+}
+
 /// One task to append: its identity plus what was measured.
 pub struct Task {
     pub suite: String,
@@ -322,6 +361,10 @@ pub struct Task {
     pub measure: Measure,
     pub grade: Option<GradeRow>,
     pub transport: Transport,
+    /// The graded body's stop reason, when it carried one — the signal that
+    /// separates a budget-starved empty answer from a withheld one. Present on
+    /// every graded agentic row and the final tool-loop row — see `TaskRow::reply`.
+    pub reply: Option<ReplyStamp>,
     /// Present on `codebase` rows only — see `TaskRow::codebase`.
     pub codebase: Option<CodebaseRow>,
     /// Present on `judge` rows only — see `TaskRow::judge`.
@@ -412,6 +455,7 @@ impl RunWriter {
             transport: task.transport,
             measure: task.measure,
             grade: task.grade,
+            reply: task.reply,
             codebase: task.codebase,
             judge: task.judge,
             tool_loop: task.tool_loop,
@@ -642,6 +686,7 @@ fn suite_summaries(log: &RunLog) -> String {
         .map(agentic_fail_line)
         .collect();
     out.push_str(&failures);
+    out.push_str(&empty_answer_lines(log));
     out.extend(tool_emit_line(log, Transport::Buffered));
     out.extend(grammar_gap_line(log));
     out.extend(instruction_line(log, Transport::Buffered));
@@ -661,11 +706,42 @@ fn agentic_fail_line(row: &TaskRow) -> String {
         .and_then(|g| g.reason.as_deref())
         .unwrap_or("");
     format!(
-        "{} FAIL {}{}  {reason}\n",
+        "{} FAIL {}{}  {reason}{}\n",
         row.suite,
         row.task_id,
-        door_tag(row.transport)
+        door_tag(row.transport),
+        stop_suffix(row)
     )
+}
+
+/// Strict instruction passes that showed the reader nothing: thinking was
+/// spent, no visible answer came back, and the checks let it through. Listed
+/// so a pass cannot quietly hide an empty reply; the grade itself is unchanged.
+/// Only `instruction` qualifies — a tool call is a legitimately textless pass.
+fn empty_answer_lines(log: &RunLog) -> String {
+    rows_of(log, "instruction")
+        .filter(|row| row.grade.as_ref().is_some_and(|g| g.pass))
+        .filter(|row| row.measure.thinking_chars > 0 && row.measure.answer_chars == 0)
+        .map(empty_answer_line)
+        .collect()
+}
+
+fn empty_answer_line(row: &TaskRow) -> String {
+    format!(
+        "instruction PASS {}{}  empty visible answer{}\n",
+        row.task_id,
+        door_tag(row.transport),
+        stop_suffix(row)
+    )
+}
+
+/// The crossing's own stop reason, when the row was stamped with one.
+pub(crate) fn stop_reason_of(row: &TaskRow) -> Option<&str> {
+    row.reply.as_ref().and_then(|r| r.stop_reason.as_deref())
+}
+
+fn stop_suffix(row: &TaskRow) -> String {
+    stop_reason_of(row).map_or_else(String::new, |reason| format!(" (stop: {reason})"))
 }
 
 /// The buffered door is the unmarked one — every earlier run went through it.
@@ -1920,7 +1996,8 @@ mod tests {
 
     use super::{
         AGENTIC, CodebaseRow, DecidedBy, GradeRow, JudgeRow, LoopEnd, LoopRow, Measure, PAIRED,
-        RunHead, RunLog, RunWriter, Task, TaskKey, TaskRow, Transport, render_codebase, render_run,
+        ReplyStamp, RunHead, RunLog, RunWriter, Task, TaskKey, TaskRow, Transport, render_codebase,
+        render_run,
     };
     use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
@@ -2075,6 +2152,7 @@ mod tests {
                         unavailable: false,
                     }),
                     transport: Transport::Buffered,
+                    reply: None,
                     codebase: None,
                     judge: None,
                     tool_loop: None,
@@ -2207,6 +2285,7 @@ mod tests {
             measure: measure(&[20.0, 20.0]),
             grade: Some(grade),
             transport: Transport::Buffered,
+            reply: None,
             codebase: None,
             judge: None,
             tool_loop: None,
@@ -2223,6 +2302,57 @@ mod tests {
 
     const fn spent(thinking: u64, answer: u64) -> ReplyChars {
         ReplyChars { thinking, answer }
+    }
+
+    fn stopped(mut task: Task, reason: &str) -> Task {
+        task.reply = Some(ReplyStamp {
+            stop_reason: Some(reason.to_owned()),
+        });
+        task
+    }
+
+    #[test]
+    fn a_fail_line_names_its_stop_reason_and_an_empty_strict_pass_is_listed() {
+        let eval = scratch("stop-reasons");
+        let mut writer = RunWriter::create(&eval, "r7-model", &head()).expect("create");
+        let starved = graded(
+            "instruction",
+            "if-002",
+            GradeRow::fail("failed 'fenced_rust_only'; loose:pass".to_owned()),
+        );
+        let empty = thought("instruction", "if-006", spent(900, 0));
+        let rows = [
+            stopped(starved, "max_tokens"),
+            stopped(empty, "end_turn"),
+            thought("instruction", "if-001", spent(100, 50)),
+            graded(
+                "tool_emit",
+                "te-002",
+                GradeRow::fail("called 'read_file'".to_owned()),
+            ),
+        ];
+        for task in rows {
+            writer.append(task).expect("append");
+        }
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains(
+                "instruction FAIL if-002  failed 'fenced_rust_only'; loose:pass (stop: max_tokens)"
+            ),
+            "a stamped failure names its stop reason: {rendered}"
+        );
+        assert!(
+            rendered.contains("instruction PASS if-006  empty visible answer (stop: end_turn)"),
+            "a strict pass with thinking but no answer is listed: {rendered}"
+        );
+        assert!(
+            rendered.contains("tool_emit FAIL te-002  called 'read_file'\n"),
+            "an unstamped failure carries no stop suffix: {rendered}"
+        );
+        assert!(
+            !rendered.contains("PASS if-001"),
+            "a pass with a visible answer is not listed: {rendered}"
+        );
     }
 
     #[test]
@@ -2354,6 +2484,8 @@ mod tests {
             turns,
             tool_calls: turns,
             measure: crate::core::bench::codebase::run::empty_measure(),
+            // Red: the loop captures no reply yet.
+            reply: None,
         };
         let grade = match grade_tool_loop(&outcome) {
             Grade::Pass => GradeRow::pass(),
@@ -2537,6 +2669,7 @@ mod tests {
             measure: crate::core::bench::codebase::run::empty_measure(),
             grade: None,
             transport: Transport::Buffered,
+            reply: None,
             codebase: None,
             judge: Some(verdict),
             tool_loop: None,
@@ -2771,6 +2904,7 @@ mod tests {
             measure: measure(&[20.0, 20.0]),
             grade: None,
             transport: Transport::Buffered,
+            reply: None,
             codebase: Some(CodebaseRow {
                 tier: fixture.tier,
                 file: "src/a.rs".into(),
@@ -3245,6 +3379,7 @@ mod tests {
                 measure: warm,
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3266,6 +3401,7 @@ mod tests {
                     measure: measure(&[19.0, 21.0, 22.0 + bump]),
                     grade: None,
                     transport: Transport::Buffered,
+                    reply: None,
                     codebase: None,
                     judge: None,
                     tool_loop: None,
@@ -3291,6 +3427,7 @@ mod tests {
                 measure: measure(&[19.0, 21.0]),
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3307,6 +3444,7 @@ mod tests {
                 measure: measure(&[15.0, 16.0]),
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3345,6 +3483,7 @@ mod tests {
                 measure: measure(&[19.0, 21.0]),
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3369,6 +3508,7 @@ mod tests {
                 measure: measure(&[19.0, 21.0, 22.0, 22.4]),
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3383,6 +3523,7 @@ mod tests {
                     "missing expected substring \"hello\"".to_owned(),
                 )),
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,
@@ -3489,6 +3630,7 @@ mod tests {
                 measure,
                 grade: None,
                 transport: Transport::Buffered,
+                reply: None,
                 codebase: None,
                 judge: None,
                 tool_loop: None,

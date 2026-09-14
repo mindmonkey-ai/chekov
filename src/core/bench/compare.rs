@@ -110,6 +110,10 @@ pub struct CaseDelta {
     pub b_pass: bool,
     pub a_reason: Option<String>,
     pub b_reason: Option<String>,
+    /// Each side's stamped stop reason — what tells a budget-starved failure
+    /// from a withheld one. `None` on rows written before the stamp.
+    pub a_stop: Option<String>,
+    pub b_stop: Option<String>,
 }
 
 /// A case one run graded and the other never did. `which` is `"a"` or `"b"`.
@@ -490,6 +494,8 @@ fn case_delta(pair: &AgenticPair) -> Option<CaseDelta> {
         b_pass,
         a_reason: reason_of(pair.a),
         b_reason: reason_of(pair.b),
+        a_stop: store::stop_reason_of(pair.a).map(str::to_owned),
+        b_stop: store::stop_reason_of(pair.b).map(str::to_owned),
     })
 }
 
@@ -1156,11 +1162,13 @@ fn disagreement_block(pair: &RunPair, cases: &[CaseDelta]) -> String {
 
 fn disagreement_line(pair: &RunPair, case: &CaseDelta, width: usize) -> String {
     let (name_a, name_b) = pair.names();
+    let tail_a = fail_tail(case.a_reason.as_deref(), case.a_stop.as_deref());
+    let tail_b = fail_tail(case.b_reason.as_deref(), case.b_stop.as_deref());
     format!(
         "    {:<width$}{}   |   {}\n",
         case_id(case),
-        case_side(&name_a, case.a_pass, case.a_reason.as_deref()),
-        case_side(&name_b, case.b_pass, case.b_reason.as_deref()),
+        case_side(&name_a, case.a_pass, &tail_a),
+        case_side(&name_b, case.b_pass, &tail_b),
     )
 }
 
@@ -1168,14 +1176,19 @@ fn case_id(case: &CaseDelta) -> String {
     format!("{}{}", case.task_id, door_tag(case.transport))
 }
 
-fn case_side(model: &str, pass: bool, reason: Option<&str>) -> String {
+fn case_side(model: &str, pass: bool, fail_tail: &str) -> String {
     if pass {
         return format!("{model} pass");
     }
-    reason.map_or_else(
-        || format!("{model} FAIL"),
-        |why| format!("{model} FAIL — {why}"),
-    )
+    format!("{model} FAIL{fail_tail}")
+}
+
+/// What follows `FAIL`: the grader's reason, then the stamped stop reason —
+/// so a starved reply reads `(stop: max_tokens)` beside what it failed.
+fn fail_tail(reason: Option<&str>, stop: Option<&str>) -> String {
+    let why = reason.map_or_else(String::new, |why| format!(" — {why}"));
+    let stopped = stop.map_or_else(String::new, |stop| format!(" (stop: {stop})"));
+    format!("{why}{stopped}")
 }
 
 fn only_in_block(pair: &RunPair, cases: &[OnlyIn]) -> String {
@@ -1314,8 +1327,8 @@ mod tests {
     use crate::core::bench::codebase::{Excluded, TaskTier};
     use crate::core::bench::stamp::{JudgeStamp, Stamp};
     use crate::core::bench::store::{
-        CodebaseRow, DecidedBy, GradeRow, JUDGE_SUITE, JudgeRow, Measure, RunHead, RunLog, TaskRow,
-        Transport,
+        CodebaseRow, DecidedBy, GradeRow, JUDGE_SUITE, JudgeRow, Measure, ReplyStamp, RunHead,
+        RunLog, TaskRow, Transport,
     };
     use crate::core::stats::Comparison;
     use crate::error::ChekovError;
@@ -1383,6 +1396,7 @@ mod tests {
                 suite: "throughput".into(),
                 task_id: "depth-1024".into(),
                 transport: crate::core::bench::store::Transport::Buffered,
+                reply: None,
                 measure: Measure {
                     prompt_n: 1000,
                     decode_samples: decode.to_vec(),
@@ -1426,6 +1440,7 @@ mod tests {
             suite: suite.into(),
             task_id: task_id.into(),
             transport: Transport::Buffered,
+            reply: None,
             measure: Measure {
                 thinking_chars: counts.0,
                 answer_chars: counts.1,
@@ -1958,6 +1973,7 @@ mod tests {
             suite: "throughput".into(),
             task_id: "depth-4096".into(),
             transport: crate::core::bench::store::Transport::Buffered,
+            reply: None,
             measure: Measure {
                 prompt_n: 4100,
                 decode_samples: vec![15.0, 16.0, 17.0],
@@ -1999,6 +2015,7 @@ mod tests {
         suite: &'static str,
         task_id: &'static str,
         grade: GradeRow,
+        reply: Option<ReplyStamp>,
     }
 
     impl Case {
@@ -2007,6 +2024,7 @@ mod tests {
                 suite,
                 task_id,
                 grade: GradeRow::pass(),
+                reply: None,
             }
         }
 
@@ -2015,6 +2033,7 @@ mod tests {
                 suite,
                 task_id,
                 grade: GradeRow::fail(why.to_owned()),
+                reply: None,
             }
         }
 
@@ -2023,7 +2042,15 @@ mod tests {
                 suite,
                 task_id,
                 grade: GradeRow::unavailable("the engine refused".to_owned()),
+                reply: None,
             }
+        }
+
+        fn stopped(mut self, reason: &str) -> Self {
+            self.reply = Some(ReplyStamp {
+                stop_reason: Some(reason.to_owned()),
+            });
+            self
         }
     }
 
@@ -2050,6 +2077,7 @@ mod tests {
             suite: case.suite.into(),
             task_id: case.task_id.into(),
             transport: Transport::Buffered,
+            reply: case.reply,
             measure: empty_measure(),
             grade: Some(case.grade),
             codebase: None,
@@ -2100,6 +2128,7 @@ mod tests {
             suite: "codebase".into(),
             task_id: case.task_id,
             transport: Transport::Buffered,
+            reply: None,
             measure: empty_measure(),
             grade: Some(GradeRow::pass()),
             codebase: Some(CodebaseRow {
@@ -2440,6 +2469,40 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_side_names_its_stop_reason_and_an_unstamped_one_does_not() {
+        let a = agentic_run(
+            "m1",
+            vec![
+                Case::fail("instruction", "if-012", "failed 'max_lines:8'").stopped("max_tokens"),
+                Case::fail("instruction", "if-013", "failed 'must_contain:dry-run'"),
+                Case::pass("tool_emit", "te-021").stopped("end_turn"),
+            ],
+        );
+        let b = agentic_run(
+            "m2",
+            vec![
+                Case::pass("instruction", "if-012").stopped("end_turn"),
+                Case::pass("instruction", "if-013"),
+                Case::fail("tool_emit", "te-021", "no call emitted"),
+            ],
+        );
+        let compared = compare_runs(&a, &b, &opts(5.0)).expect("same environment");
+        let rendered = render_comparison(&RunPair { a: &a, b: &b }, &compared);
+        assert!(
+            rendered.contains("m1 FAIL — failed 'max_lines:8' (stop: max_tokens)   |   m2 pass"),
+            "a stamped failing side names its stop reason: {rendered}"
+        );
+        assert!(
+            rendered.contains("m1 FAIL — failed 'must_contain:dry-run'   |   m2 pass"),
+            "an unstamped failing side carries no suffix: {rendered}"
+        );
+        assert!(
+            rendered.contains("m1 pass   |   m2 FAIL — no call emitted"),
+            "a passing side never prints its stop reason: {rendered}"
+        );
+    }
+
+    #[test]
     fn a_case_graded_in_one_run_only_is_named_never_dropped() {
         let a = agentic_run(
             "m1",
@@ -2608,6 +2671,7 @@ mod tests {
             suite: JUDGE_SUITE.into(),
             task_id: task_id.into(),
             transport: Transport::Buffered,
+            reply: None,
             measure: empty_measure(),
             grade: None,
             codebase: None,

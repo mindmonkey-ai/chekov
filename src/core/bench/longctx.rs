@@ -371,6 +371,7 @@ fn record(writer: &mut RunWriter, pass: &Pass, key: &Key) -> Result<(), ChekovEr
         measure,
         grade: Some(grade),
         transport: pass.transport,
+        reply: None,
         codebase: None,
         judge: None,
         tool_loop: None,

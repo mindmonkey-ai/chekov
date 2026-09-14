@@ -365,9 +365,247 @@ uses `qwen3.5-9b`, `ornith-1.5-35b-a3b`, and `gpt-oss-120b`, selected for differ
 model sizes and families; their actual score spread is still unmeasured.
 The three-model dry-run correctly refuses because an existing Ornith server
 is running (pid 15573 at validation time). This work did not start or stop it.
-TODO: agree a server window, rerun the three-model dry-run, and obtain campaign
-approval before live measurement. Publish the per-category spread, including
-non-discriminating and unavailable results, before claiming live acceptance.
+The continuation request on 2026-09-10 authorizes the three-model campaign;
+it subsequently completed using isolated server state. See the receipt below.
+
+### Three-model campaign preflight (2026-09-11 UTC)
+
+Status: **COMPLETE — 600/600 crossings measured; configured stacks discriminate.**
+The heading retains the preflight anchor used by existing links. Fetched origin
+and fast-forward checked `develop`: still `a196881`
+(PRs #84 and #85 merged), with a clean working tree. Built and used
+`target/debug/chekov`; the installed CLI was not used. The corpus SHA-256 is
+`e0d71495afd7b79b34a24ea972c020fc9dd4529bba6441c7e931be005dc1c389`.
+Its 39 tool cases, 30 forced-grammar checks, 40 instruction cases, and six
+tool-loop scenarios remain frozen; no cases or grading changed.
+
+All three registered weight files are present. The live capability scan reports
+an Apple M3 Ultra, 262144 MiB RAM, and a 228065 MiB engine-reported GPU budget.
+There is 72 GiB free on the checkout volume and 896 GiB on the external model
+volume. `capability explain` gives these configured footprints:
+
+| Candidate | Quant / revision prefix | Context | Weights + KV bytes |
+| --- | --- | ---: | ---: |
+| `qwen3.5-9b` | Q8_0 / `3885219b6810` | 131072 | 11809203424 |
+| `ornith-1.5-35b-a3b` | Q8_0 / `fbbaed45c2f0` | 262144 | 40654275840 |
+| `gpt-oss-120b` | F16 / `ff1a82da6ad4` | 98304 | 69219388800 |
+
+These are footprint estimates, excluding runtime overhead. Another terminal
+initially ran `chekov tune --apply` on
+Ornith BF16, then `chekov launch codex` (observed parent pid 91490) started
+llama-server pid 91540 on port 8080. That server remained alive after its parent
+exited. It belongs to the other session; this campaign did not stop it or send
+it inference requests. The three-model dry-run refused the running
+`ornith-1.5-35b-a3b-bf16` before producing a plan or wall-clock estimate.
+That initial refusal is retained as operational evidence, not a model failure.
+
+The campaign then used the supported `CHEKOV_HOME` override with isolated
+config, PID state, and logs under `/tmp/chekov-agentic-campaign-dnx6jfgm`, on
+port 18080. The copied configuration differed only in `server.port`; the
+model registry was copied byte-for-byte, with symlinks to the same weights,
+engine, and `eval` directory. The three-model dry-run passed and estimated
+158 minutes; the remaining two-model plan estimated 108 minutes, and the final
+GPT-only recovery plan 55 minutes. Resource gates remained enabled. Campaign
+servers were started sequentially and only campaign-owned servers were stopped.
+The foreign server, pid 91540, remained running afterward. Sampled VM counters
+showed no swap-ins, swap-outs, or page-outs; this was still a shared GPU run.
+
+Examined all 43 stored `eval/*/stamp.json` files: none identifies
+`agentic-v0:e0d71495afd7` before this campaign. Qwen was interrupted after 192
+stored crossings and resumed in the same run. Ornith completed in the remaining
+two-model campaign. Its supervisor and the first GPT loader subsequently
+disappeared without an exit receipt or GPT stamp; the cause is unknown. A fresh
+GPT-only run completed successfully. Completed measurements were reused, and
+no failed case was rerun to select a better score.
+
+All three final runs contain exactly 200 unique expected crossings: 78 tool,
+30 forced grammar, 80 instruction, and 12 loop rows. There are no missing,
+duplicate, partial, ungraded, or unavailable rows. The engine is `0f194b907`,
+machine stamp `c057455fb3a1`, prompt-set hash `ac1955773bbf`, seed 42, and request
+temperature 0. No production code, cases, grading, or model configuration changed.
+
+| Candidate | Run ID | Tools | Forced / paired unconstrained | Instruction strict / loose | Loops |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Qwen | `20260911T034515Z-qwen3.5-9b` | 36/39 | 29/30 / 27/30 | 9/40 / 9/40 | 6/6 |
+| Ornith | `20260911T041044Z-ornith-1.5-35b-a3b` | 35/39 | 29/30 / 27/30 | 29/40 / 30/40 | 6/6 |
+| GPT-OSS | `20260911T043659Z-gpt-oss-120b` | 35/39 | 27/30 / 27/30 | 39/40 / 39/40 | 5/6 |
+
+Tools, instructions, and loop pass/fail agree on both transports for every
+case; table values apply separately to each transport. Forced grammar is
+buffered only and uses the recorded `deepseek` reasoning extraction. The
+strict totals are 131, 169, and 185 of 200 crossings, respectively; these totals
+weight paired transports twice and should not replace the individual axes.
+
+Normal `capability compare` refuses every pair because contexts differ. The
+preserved descriptive comparisons explicitly use `--cross-runtime --cross-flags`.
+Besides context and quantization, Ornith enables MTP draft length 1, and GPT
+uses engine-default reasoning formatting while Qwen/Ornith request `none`.
+These are comparisons of registered model stacks, not a controlled model-only
+ranking. Shared GPU activity also prevents an isolated speed comparison. One
+seed and paired transports do not establish statistical robustness.
+
+| Category (per transport) | Qwen | Ornith | GPT-OSS |
+| --- | ---: | ---: | ---: |
+| Legacy tool calls | 7/7 | 6/7 | 6/7 |
+| Legacy abstentions | 3/3 | 2/3 | 3/3 |
+| Overlapping tools | 8/8 | 7/8 | 7/8 |
+| Nested / typed arguments | 6/8 | 7/8 | 8/8 |
+| Exact strings / escaping | 6/7 | 7/7 | 6/7 |
+| Unavailable capabilities | 3/3 | 3/3 | 2/3 |
+| Missing required information | 3/3 | 3/3 | 3/3 |
+| Legacy instructions | 6/12 | 11/12 | 12/12 |
+| Required / forbidden content | 1/10 | 4/10 | 10/10 |
+| Line / content constraints | 2/10 | 7/10 | 9/10 |
+| Fenced Rust / combined constraints | 0/8 | 7/8 | 8/8 |
+
+**Discrimination and saturation.** Of 115 distinct axis/case pairs, 45 have
+mixed pass/fail outcomes and 70 pass on all three stacks; none fails on all
+three. Counting transports yields 86 mixed and 114 all-pass crossings. The
+expansion contributes 34 mixed pairs among its 80 added axis/case pairs,
+including 25 of 28 added instruction cases. Instruction scores distinguish
+all three stacks; tools are near ceiling and tie Ornith/GPT in aggregate while
+their failures differ. Forced grammar is also near ceiling, with 26/30 common
+passes. Missing-information abstentions saturate at 3/3, and five of six loops
+pass everywhere. Qwen has a model-specific floor on the eight added fenced
+Rust cases; there is no shared all-model floor. GPT has a ceiling on required /
+forbidden content and fenced Rust, and near ceiling on instructions overall.
+
+**Per-case failures.** Tool failures on both transports are Qwen `te-021`,
+`te-022`, `te-032`; Ornith `te-003`, `te-010`, `te-015`, `te-022`; and GPT
+`te-003`, `te-017`, `te-032`, `te-036`. Recurring failures include reading
+instead of editing (`te-003`, Ornith/GPT), preserving a JSON null cursor
+(`te-022`, Qwen/Ornith), and exact JSON text plus a newline (`te-032`, Qwen/GPT).
+Ornith fabricates `grep` for the deletion abstention (`te-010`); GPT calls
+`stat_file` when asked to change permissions with inspection-only tools
+(`te-036`). Qwen emits no call for typed zero/false/empty values (`te-021`).
+Ornith's edit preview (`te-015`) and GPT's definition lookup (`te-017`) have
+argument mismatches. The retained rows do not contain the actual arguments.
+
+Forced failures are Qwen `gg-te-013` (`walk_tree` instead of `list_dir`),
+Ornith `gg-te-003` (read instead of edit), and GPT `gg-te-003`, `gg-te-022`
+(null-cursor arguments), `gg-te-029` (forced reply not JSON for exact newline /
+tab content). The aggregate grammar gains of 2, 2, and 0 cases hide regressions:
+Qwen regresses on `te-013`; GPT regresses on `te-022` and `te-029` while fixing
+`te-017` and `te-032`. GPT alone exhausts eight turns with eight calls on
+`tl-005`, the legacy off-by-one repair, on both transports. Reached-loop turn
+min/median/max are Qwen 3/4/6, Ornith 4/6/7, GPT 4/5/6 buffered and 4/5/5 streamed.
+
+All 31 Qwen instruction failures per transport have zero visible-answer
+characters and nonzero thinking characters. The fixed instruction budget is
+512 tokens (`src/core/bench/probes.rs:144`); engine-log tasks 9749 and 10263
+confirm 512-token generations for buffered `if-002` and `if-003`. Budget
+starvation is a supported explanation for those rows, and a hypothesis for
+the other empty failures, not proof of an inability to write Rust. Ornith's
+11 instruction failures are `if-009`, `if-014`, `if-018`–`if-022`, `if-024`,
+`if-026`, `if-030`, and `if-033`; only `if-026` passes loose grading, and only
+`if-019` / `if-033` have empty visible answers. Several failures retain forbidden
+substrings (`failed`, `acct-482`, `override`, `error:`). GPT's sole instruction
+failure is `if-028`, missing the exact substring `dry-run`. It has no observed
+zero-answer crossing with nonzero thinking.
+
+**Measurement blind spot.** Qwen `if-006` passes on both transports despite
+zero answer characters: its checks only forbid `process` and cap line count,
+which an empty answer satisfies. Qwen `te-008` similarly passes the no-tool
+contract without a visible answer to the requested definition. These are
+retained as original passes, not rescored. The JSONL records grades, character
+counts, timing, and loop summaries, but not full response bodies or turn
+transcripts. Exact mismatched arguments, the malformed forced response, and
+the sequence of GPT's repeated calls therefore cannot be reconstructed here.
+
+**Evidence and validation.** The portable
+[raw evidence archive](docs/agentic-campaign-20260911.tar.gz) contains all three
+`eval/<run>/stamp.json` and `results.jsonl` pairs, the 200-row three-model outcome
+matrix in `logs/agentic-campaign-20260911-analysis.json`, all pairwise comparison
+and refusal logs, engine output, preflight/isolation/recovery receipts, and
+validation logs. Its `manifest.json` gives SHA-256 hashes for every member.
+Original gitignored artifacts remain on the measurement machine. `make lint &&
+make test` passes: 897 unit and 10 integration tests. Earlier sandbox failures
+denied localhost binding; unrestricted runs pass. No product fix was made, so
+there is no new committed-red cycle in this documentation/evidence change.
+
+**Recommended next item / TODO (proposed, not a ruling):** resolve visible-answer
+and generation-budget observability before expanding the corpus again. A
+successful check can currently conceal no answer, while a low score can reflect
+the fixed thinking budget. The resolution paths are: rule now that answer-required
+instruction checks must reject empty output; research first (recommended) to
+reproduce empty passes, retain termination/response evidence, and distinguish
+budget exhaustion from parsing or model behavior; or a one-session `spike/`
+branch to trial diagnostics, never merged. File the resulting scope/decision
+here before implementation and use committed-red TDD for fixes. Preserve this
+campaign unchanged and give any changed grading/budget a distinct comparison
+identity. The separate compiled-in fixture remains deferred.
+
+## Stop reason on graded agentic rows (2026-09-13)
+
+First slice of the observability follow-up recommended by the campaign above.
+Every graded agentic row — `tool_emit`, `instruction`, `grammar_gap`, fixture
+probes, and `tool_loop` — records the crossing's own `stop_reason` as
+`reply.stop_reason`, read from the same body the grader reads; the loop captures
+the final reply's reason as it lands. Rows written before the field load as
+`None`, and a failed crossing carries no stamp. This retains termination
+evidence so a zero-answer pass or a low score can later be attributed to budget
+exhaustion (`max_tokens`) rather than a withheld answer (`end_turn`). No grade,
+case, checker, or comparison identity changes; the 2026-09-11 campaign stays
+untouched.
+
+**Reports (second slice, 2026-09-13).** The run report appends
+`(stop: <reason>)` to every stamped agentic FAIL line and lists strict
+`instruction` passes that spent thinking but returned no visible answer as
+`instruction PASS <id>  empty visible answer`; the comparison's disagreement
+lines carry the same suffix on a failing side. Only `instruction` is screened
+for empty passes — a tool call is a legitimately textless pass, and telling an
+abstention case from a call case needs the case's `expect`, which rows do not
+record. Grades, counts, and comparison identity are unchanged.
+
+**Live acceptance 2026-09-13 (MDT).** `bench --suite agentic --models
+ornith-1.5-9b` (run `20260914T030415Z-ornith-1.5-9b`, 200 rows, ~8 min): every
+row carries `reply.stop_reason` — `tool_use` 68, `end_turn` 116, `max_tokens`
+16. The stamp already answers the campaign's question for this model: of its
+six buffered instruction failures, four (`if-003`, `if-019`, `if-033`, `if-037`)
+stopped on `max_tokens`, and the two with zero visible answer characters are
+both budget-starved rather than withheld. Two instruction passes (`if-013`,
+`if-021`) and two tool passes (`te-034`, `te-035`) also hit `max_tokens` with
+text already emitted. No strict pass on this model had an empty answer. Not a
+campaign measurement: `cargo test` builds ran on the same machine during the
+crossings, so its timings are not evidence.
+
+Still open from the TODO: the ruling on rejecting empty visible answers for
+answer-required instruction checks (now with the count and cause on hand), and
+reproducing the campaign's empty passes on the three campaign models.
+Proposed 2026-09-13 — status: IMPLEMENTED in PR #86 (rows: red `ddf8f44`, green
+`783a138`; reports: red `771d3c0`, green `d434aac`).
+
+**Research for the ruling (2026-09-13, MDT).** The campaign archive shows the
+instruction gap is mostly a harness artifact: instruction probes cap
+`max_tokens` at 512 and tool probes at 256, thinking counts against that cap,
+and Qwen3.5-9B's 32 empty buffered instruction rows all carry 1448–2267
+thinking characters, right at the ceiling, while its 8 answered rows all
+thought less. A scratch binary with instruction at 4096 and tools at 1024 (not
+committed; run `20260914T033943Z-qwen3.5-9b`, buffered half complete) moved
+Qwen's strict instruction score from 9/40 to 28/40 and its empty answers from
+32 to 11; the 11 still empty burned the whole 4096 on thinking and stay real
+failures. Of the 29 answered rows only 20 fit under 2048 tokens and 27 under
+3072, so the cap must be 4096. Tool probes never touched 1024 (longest reply
+1450 chars). Cost: a runaway case burns the full cap at ~30 tok/s, so the
+buffered half took ~50 min against ~8 for Ornith-9B. The streamed half was
+lost to a manual `chekov stop` at 22:33 and is not needed for the decision;
+its 15 measured cases agree with buffered. Vacuous passes are rare: `if-006`
+is the only instruction case whose checks an empty reply satisfies, and
+`te-008` the only silent abstention in the campaign. Sources consulted agree
+on treating `max_tokens` with an empty answer as failure and on giving
+reasoning models room above the visible answer.
+
+**Ruling APPROVED 2026-09-13 (human approval in chat: "I approve"),** on this
+recommendation, in priority order:
+1. **Budget.** Instruction probes at 4096 and tool probes at 1024
+   `max_tokens`, folded into the agentic hash so a run under the ruling never
+   compares with, or resumes, a run before it. Then one three-model campaign
+   under the new identity.
+2. **Grading.** An empty visible answer fails every instruction case, strict
+   and loose (`empty visible answer`), and an abstention case that emits no
+   visible text fails (`abstained without answering`). A grader version rides
+   in the same hash. Both land in one committed-red cycle; the 2026-09-11
+   campaign stays untouched.
 
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
