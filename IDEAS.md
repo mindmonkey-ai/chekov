@@ -647,6 +647,63 @@ in [docs/agentic-campaign-20260914.tar.gz](docs/agentic-campaign-20260914.tar.gz
 Not a controlled timing measurement: no other load ran, but the bench binary
 was a debug build.
 
+## Harder tool-loop scenarios: loop corpus expansion decision (2026-09-14)
+
+**Question:** Should the six `tool_loop` cases grow now, accepting one more
+comparability break, before any new model is measured on the tool-use axis?
+
+**Why now.** Under the 2026-09-13 ruling the instruction axis discriminates
+(21 of the 32 separating pairs) but the loop axis is blind: Qwen and Ornith
+score 6/6, five of six loops passed on every campaign stack, and GPT-OSS's
+only loop failure mode is turn exhaustion. The report already prints
+"saturated: rank across candidates" on that line. The approved 2026-09-09
+measurement of new tool-use candidates (Muse Spark 1.3, Nemotron 3.5
+Lightning) was justified as "hold the tool-use verdict for `tool_loop`", so
+running it on a saturated axis would have to be redone.
+
+**Recommendation:** grow to twelve loop cases, keeping `tl-001`–`tl-006`
+byte-for-byte, with each addition exercising one anti-saturation device the
+current set lacks. Same five tools, same eight-turn budget, each new case
+solvable in six turns or fewer by a competent agent, each with one
+unambiguous terminal state and a distinct failure target.
+
+| id | device | shape | what a failing model does |
+| --- | --- | --- | --- |
+| `tl-007` | find before edit, with a decoy hit | The prompt names a symbol. `grep` hits two files: the call site in `src/main.rs` and the definition in `src/limits.rs`. Goal: definition edited, `src/main.rs` untouched. | Edits the first grep hit. |
+| `tl-008` | the `edit_file` uniqueness contract | The wrong literal occurs twice in the target file (a doc comment and the code). `edit_file` answers "old text occurs 2 times; make it unique". Goal: the code line changed, the comment line still present. | Retries the same `old`, or edits the comment. |
+| `tl-009` | the tool result contradicts the prompt | The prompt blames `src/parse.rs`; `run_tests` fails naming `src/limits.rs` and the expected value. Goal: `src/limits.rs` edited, `src/parse.rs` untouched, tests green. | Edits the file the prompt named and stops. |
+| `tl-010` | already done | The requested change is already in place. Goal: `unchanged`, final reply mentions `already`. | Makes a no-op or spurious edit, or reports a change it did not make. |
+| `tl-011` | three-file chain | `src/api.rs` documents a limit "per `crate::policy`"; `src/policy.rs` says the value comes from `src/limits.rs`; the wrong constant is in `src/limits.rs`. Goal: `src/limits.rs` edited, the other two untouched. | Edits `policy.rs` or `api.rs`, or stops after one hop. |
+| `tl-012` | two edits behind one test gate | Two constants in `src/config.rs` are wrong; `run_tests` fails naming both until both are fixed. Goal: both present. | Fixes one, sees "ok"-shaped progress in its own head, stops. |
+
+**Schema.** `tl-007`–`tl-011` fit `Goal::Edited { file, contains_any,
+untouched, tests_fail }` and `Goal::Unchanged { reply_mentions }` as they
+stand. `tl-012` needs one addition: `contains_all: Vec<String>` beside
+`contains_any` on `Edited` (every string must be present; `run_tests` reports
+`ok` only when all are). Load-time validation extends to it: none of the
+strings may be present before the first turn, and a goal may carry
+`contains_any` or `contains_all`, not both. TOML schema version stays 0 if the
+field is optional with a default; bump it only if the reviewer wants old
+readers to refuse the file.
+
+**Compatibility.** The TOML text is what `content_hash` hashes, so this
+changes the agentic prompt-set hash again; old agentic runs refuse to compare
+or resume by construction, throughput hashes are unchanged, and the
+2026-09-11 and 2026-09-14 campaigns stay readable. Dry-run estimates pick up
+the new loop count automatically.
+
+**Cost.** Cases and validation ~1 session; one three-model campaign under the
+new identity (~2.5 h, Qwen's runaway thinkers dominate). Then the Muse /
+Nemotron measurement runs once, on an axis that can separate.
+
+**Not proposed:** per-case turn budgets, scoring the path, a real
+filesystem, or non-Rust repositories (loop design §11 keeps them out).
+
+Proposed 2026-09-14 — status: **APPROVED 2026-09-14 (human approval in chat:
+"I approve")** as proposed: six cases `tl-007`–`tl-012`, the optional
+`contains_all` goal field, schema version unchanged, then one three-model
+campaign under the new identity before the Muse / Nemotron measurement.
+
 ## A forcing mechanism for `grammar_gap` on thinking-prefill templates (2026-08-28)
 `response_format` json_schema is refused (HTTP 400, "Failed to initialize
 samplers") by this engine for `ornith-1.5-35b-a3b`, so the §7.2 grammar_gap
