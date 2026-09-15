@@ -1622,7 +1622,7 @@ single-turn emission 32–34/39 to 36/39, and win only the instruction axis.
 The `all` + `--codebase` + `--judge` stage from the approval is not run: the
 loop verdict the survey said to hold for is in, and it is against.
 
-**Follow-ups — APPROVED 2026-09-15 (human approval in chat: "I approve"), shipped 2026-09-15 as `FORCED_MAX_TOKENS` in the identity hash, `calls` on the loop row and its failure line, and `[pull] stall_timeout_secs` (default 180) over a watched copy; the re-measurement under the new identity is pending:**
+**Follow-ups — APPROVED 2026-09-15 (human approval in chat: "I approve"), shipped 2026-09-15 as `FORCED_MAX_TOKENS` in the identity hash, `calls` on the loop row and its failure line, and `[pull] stall_timeout_secs` (default 180) over a watched copy; re-measured the same night (below):**
 1. Give the forced arm a named cap that rides in the agentic identity hash
    beside the other three (`caps=4096/1024/4096` today lists only those),
    and raise it to the tool cap; the grammar axis is blind on any thinker
@@ -1632,6 +1632,53 @@ loop verdict the survey said to hold for is in, and it is against.
    launch to learn what the row could have said.
 3. The downloader has no read timeout (caveat e): a stalled connection
    should fail in minutes, not sit for hours.
+
+**Measured 2026-09-15 (MDT, 23:02–01:47).** One `bench --suite agentic`
+run over all five stacks under the new identity `e4cdb862d9e6`; runs
+`20260915T050243Z-nemotron-3.5-lightning-30b-a3b`,
+`20260915T052917Z-ornith-1.5-35b-a3b`, `20260915T054351Z-gpt-oss-120b`,
+`20260915T055520Z-qwen3.5-9b`, `20260915T065124Z-muse-glimmer-30b`; 1060
+rows, every row stamped, every loop row carrying its call trace. Raw
+evidence with a SHA-256 manifest:
+[docs/agentic-campaign-20260915-forcedcap.tar.gz](docs/agentic-campaign-20260915-forcedcap.tar.gz).
+
+| Axis (buffered) | Muse Glimmer | Nemotron 3.5 L | Ornith 1.5 | GPT-OSS 120B | Qwen 3.5 9B |
+| --- | --- | --- | --- | --- | --- |
+| tool_loop | 8/12 | 8/12 | 11/12 | 7/11 (+1 unavailable) | 12/12 |
+| instruction strict | 40/40 | 37/40 | 32/40 | 36/40 | 27/40 |
+| tool_emit | 33/39 | 34/39 | 36/39 | 35/39 | 37/39 |
+| grammar_gap | N/A (29 unavailable) | 25/30 | 29/30 | 28/30 | 29/30 |
+
+Against the loop-cap identity, 25 verdicts changed across 1060 rows.
+Twenty-three are Nemotron's grammar cases: 2/30 became 25/30, the ruling's
+whole target; the four forced replies that still stop on `max_tokens` at
+1024 think ~1250 characters under the grammar, and the fifth failure named
+a tool outside the palette. Ornith, GPT-OSS and Qwen reproduced all 212
+verdicts each, GPT's `tl-004` engine-side parse error included. The other
+two are Muse's: `te-029` and `if-028`, its two transport asymmetries of the
+previous run, now pass buffered as they did streamed — on requests the cap
+change does not touch. Muse at temperature 1.0 is therefore the first stack
+whose seeded sampling does not reproduce run to run; its scores here are a
+sample, not a fixed point, and a Muse comparison needs more than one run.
+Of 92 pairs graded on Muse, Nemotron and Ornith, 23 distinguish and 67 pass
+everywhere; the same five loop cases separate.
+
+The call traces say why the four shared loop failures happen, and they are
+two habits, not one. Nemotron reads once or twice and then calls
+`run_tests` six times in a row without ever calling `edit_file`
+(`tl-003`: read, read, then six test runs; `tl-009`: test, read, then six
+test runs), and lists directories seven times on the missing file. Muse
+re-reads the same file six or seven times, runs the tests once, and never
+replies in text (`tl-012`: five reads, a test run, a read, and its only
+`edit_file` on turn eight). Neither trace shows progress toward the goal
+being cut off by the budget, so the eight-turn cap is not the cause. For
+the reference stacks: Ornith's decoy-hit failure is grep, read, edit, read,
+edit, read — two edits of the call site — and GPT-OSS reads the same file
+eight times on the already-done case and greps five times after one edit
+on `tl-002`. Wall clock: Nemotron 26 min, Ornith 13, GPT 11, Qwen 55, Muse
+56.
+
+The verdict stands: neither candidate takes the tool-use lane from Ornith.
 
 ## Upstream engine work to watch, not build (2026-09-06)
 Recorded so the next round does not re-research it. (a) Speculative prefill
