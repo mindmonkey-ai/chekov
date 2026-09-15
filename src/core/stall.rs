@@ -7,6 +7,102 @@
 //! and the copy waits on its chunks with a deadline, so silence for longer
 //! than the stall window is an error — with what landed already written.
 
+use std::io::{ErrorKind, Read, Write};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::time::{Duration, Instant};
+
+const CHUNK: usize = 64 * 1024;
+/// Progress is reported at most this often, and always at the end.
+const TICK: Duration = Duration::from_secs(1);
+/// How far the reader may run ahead of the writer — bounded so a slow disk
+/// never buffers a shard in memory.
+const AHEAD: usize = 16;
+
+/// How long silence may last, and who hears the running total.
+pub struct Watch<F> {
+    pub stall: Duration,
+    /// Called with the bytes copied so far: at most once a second, and once
+    /// at the end with the final total.
+    pub on_progress: F,
+}
+
+enum Delivery {
+    Bytes(Vec<u8>),
+    Done,
+    Failed(std::io::Error),
+}
+
+/// Copy `reader` into `out`, failing as `TimedOut` once no bytes have
+/// arrived for `watch.stall`. Everything that arrived is written first.
+///
+/// The reader runs on a helper thread. After a stall that thread stays
+/// blocked in `read` until the connection finally answers or the process
+/// ends — the price of a reader with no timeout of its own; it never writes,
+/// so a resumed transfer cannot race it.
+pub fn copy_watched<R, W, F>(reader: R, out: &mut W, mut watch: Watch<F>) -> std::io::Result<u64>
+where
+    R: Read + Send + 'static,
+    W: Write,
+    F: FnMut(u64),
+{
+    let (tx, rx) = mpsc::sync_channel(AHEAD);
+    std::thread::spawn(move || feed(reader, &tx));
+    let mut copied = 0u64;
+    let mut last_tick = Instant::now();
+    loop {
+        match rx.recv_timeout(watch.stall) {
+            Ok(Delivery::Bytes(chunk)) => {
+                out.write_all(&chunk)?;
+                copied = copied.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+                if last_tick.elapsed() >= TICK {
+                    last_tick = Instant::now();
+                    (watch.on_progress)(copied);
+                }
+            }
+            Ok(Delivery::Done) => {
+                (watch.on_progress)(copied);
+                return Ok(copied);
+            }
+            Ok(Delivery::Failed(error)) => return Err(error),
+            Err(RecvTimeoutError::Timeout) => return Err(stalled(watch.stall, copied)),
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "the reader ended without reaching EOF",
+                ));
+            }
+        }
+    }
+}
+
+/// Read chunks until EOF, an error, or nobody listening any more.
+fn feed<R: Read>(mut reader: R, tx: &SyncSender<Delivery>) {
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let delivery = match reader.read(&mut buf) {
+            Ok(0) => Delivery::Done,
+            Ok(n) => Delivery::Bytes(buf[..n].to_vec()),
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => Delivery::Failed(e),
+        };
+        let finished = !matches!(delivery, Delivery::Bytes(_));
+        if tx.send(delivery).is_err() || finished {
+            return;
+        }
+    }
+}
+
+fn stalled(window: Duration, copied: u64) -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::TimedOut,
+        format!(
+            "no bytes arrived for {}s ({copied} bytes landed and are kept) — \
+             rerun `chekov pull` to resume",
+            window.as_secs()
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read};
