@@ -31,6 +31,10 @@ replacement_char_max_pct = 5
                                # of the day (fast-forward pull). Weights are revision-
                                # pinned; without this the binary that runs them is not.
 
+[pull]                         # `chekov pull`
+stall_timeout_secs = 180       # give up a shard delivering nothing for this long; its
+                               # .part is kept and the next run resumes it (0 is refused)
+
 [bench]                        # `chekov capability bench` sweep
 depths = [1024, 4096, 16384]   # prompt depths (approx tokens)
 repetitions = 5                # per depth; the first is dropped as warmup

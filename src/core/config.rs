@@ -18,6 +18,40 @@ pub struct FileConfig {
     pub bench: BenchSection,
     pub engine: EngineSection,
     pub tune: TuneSection,
+    pub pull: PullSection,
+}
+
+/// `chekov pull` tunables.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PullSection {
+    /// A shard whose connection delivers nothing for this long is given up
+    /// (its `.part` kept for the next run to resume) instead of waiting on a
+    /// dead socket for hours (ruling 2026-09-15). Three minutes outlasts any
+    /// pause the hub has shown while catching a stall inside the download.
+    pub stall_timeout_secs: u64,
+}
+
+impl Default for PullSection {
+    fn default() -> Self {
+        Self {
+            stall_timeout_secs: 180,
+        }
+    }
+}
+
+impl PullSection {
+    /// A zero window would fail every pull on its first read.
+    fn validate(&self, path: &Path) -> Result<(), ChekovError> {
+        if self.stall_timeout_secs > 0 {
+            return Ok(());
+        }
+        Err(ChekovError::ConfigInvalid {
+            path: path.to_path_buf(),
+            reason: "[pull] stall_timeout_secs is 0 — every pull would fail on its first read; remove the key for the default"
+                .to_owned(),
+        })
+    }
 }
 
 /// Which llama.cpp the engine is built from.
@@ -288,6 +322,7 @@ impl Config {
             FileConfig::default()
         };
         file.engine.validate(&path)?;
+        file.pull.validate(&path)?;
         Ok(Self {
             root: root.to_path_buf(),
             file,
@@ -539,6 +574,24 @@ mod tests {
         let cfg: super::FileConfig =
             toml::from_str("[bench]\ntool_loop_max_turns = 3\n").expect("overrides parse");
         assert_eq!(cfg.bench.tool_loop_max_turns, 3);
+    }
+
+    #[test]
+    fn pull_stall_timeout_defaults_to_three_minutes_and_overrides() {
+        // Ruling 2026-09-15: a pull that stops receiving bytes fails after
+        // this long instead of sitting on a dead connection for hours.
+        assert_eq!(super::PullSection::default().stall_timeout_secs, 180);
+        let cfg: super::FileConfig =
+            toml::from_str("[pull]\nstall_timeout_secs = 30\n").expect("overrides parse");
+        assert_eq!(cfg.pull.stall_timeout_secs, 30);
+        let root = scratch("cfg-pull-stall-zero");
+        std::fs::write(root.join("config.toml"), "[pull]\nstall_timeout_secs = 0\n")
+            .expect("write");
+        let err = Config::load(&root).expect_err("zero would fail every pull on its first read");
+        assert!(
+            err.to_string().contains("[pull] stall_timeout_secs"),
+            "refused at load, naming the key: {err}"
+        );
     }
 
     #[test]

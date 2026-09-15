@@ -264,6 +264,11 @@ pub enum LoopEnd {
 pub struct LoopRow {
     pub turns: u32,
     pub tool_calls: u32,
+    /// The tool names called, in order (ruling 2026-09-15) — names only,
+    /// never arguments, and never scored. Rows written before the field
+    /// load with none, and print as they always did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<String>,
     pub end: LoopEnd,
 }
 
@@ -706,12 +711,21 @@ fn agentic_fail_line(row: &TaskRow) -> String {
         .and_then(|g| g.reason.as_deref())
         .unwrap_or("");
     format!(
-        "{} FAIL {}{}  {reason}{}\n",
+        "{} FAIL {}{}  {reason}{}{}\n",
         row.suite,
         row.task_id,
         door_tag(row.transport),
-        stop_suffix(row)
+        stop_suffix(row),
+        calls_suffix(row)
     )
+}
+
+/// The loop's call sequence, when the row recorded one.
+fn calls_suffix(row: &TaskRow) -> String {
+    row.tool_loop
+        .as_ref()
+        .filter(|l| !l.calls.is_empty())
+        .map_or_else(String::new, |l| format!(" (calls: {})", l.calls.join(", ")))
 }
 
 /// Strict instruction passes that showed the reader nothing: thinking was
@@ -2483,6 +2497,7 @@ mod tests {
             end: end.clone(),
             turns,
             tool_calls: turns,
+            calls: Vec::new(),
             measure: crate::core::bench::codebase::run::empty_measure(),
             // Red: the loop captures no reply yet.
             reply: None,
@@ -2495,10 +2510,41 @@ mod tests {
             tool_loop: Some(LoopRow {
                 turns,
                 tool_calls: turns,
+                calls: Vec::new(),
                 end,
             }),
             ..graded("tool_loop", id, grade)
         }
+    }
+
+    /// Ruling 2026-09-15: a loop row carries the tool names it called, in
+    /// order, and the failure line prints them — an exhausted loop is
+    /// readable without a replay. A row written before the field loads with
+    /// no calls and prints as before.
+    #[test]
+    fn a_loop_failure_line_names_the_calls_in_order_and_an_old_row_prints_as_before() {
+        let eval = scratch("loop-calls");
+        let mut writer = RunWriter::create(&eval, "r-calls", &head()).expect("create");
+        let mut traced = looped("tl-009", 3, LoopEnd::TurnsExhausted);
+        if let Some(row) = traced.tool_loop.as_mut() {
+            row.calls = vec!["read_file".into(), "run_tests".into(), "run_tests".into()];
+        }
+        writer.append(traced).expect("append");
+        writer
+            .append(looped("tl-010", 2, LoopEnd::TurnsExhausted))
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains(
+                "tool_loop FAIL tl-009  no terminal state in 3 turns (3 tool calls) (calls: read_file, run_tests, run_tests)\n"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .contains("tool_loop FAIL tl-010  no terminal state in 2 turns (2 tool calls)\n"),
+            "a row without a trace prints no empty suffix: {rendered}"
+        );
     }
 
     /// Three reached (2, 3, 6 turns), one stopped unmet, and tl-001 truncated
@@ -2687,15 +2733,21 @@ mod tests {
         let json = serde_json::to_string(&LoopRow {
             turns: 2,
             tool_calls: 3,
+            calls: vec!["grep".into(), "rm".into()],
             end: end.clone(),
         })
         .expect("ser");
         assert_eq!(
             json,
-            r#"{"turns":2,"tool_calls":3,"end":{"kind":"fabricated_tool","name":"rm"}}"#
+            r#"{"turns":2,"tool_calls":3,"calls":["grep","rm"],"end":{"kind":"fabricated_tool","name":"rm"}}"#
         );
         let back: LoopRow = serde_json::from_str(&json).expect("de");
         assert_eq!(back.end, end);
+        assert_eq!(back.calls, ["grep", "rm"]);
+        let untraced: LoopRow =
+            serde_json::from_str(r#"{"turns":2,"tool_calls":3,"end":{"kind":"turns_exhausted"}}"#)
+                .expect("a row written before the field loads");
+        assert!(untraced.calls.is_empty());
         assert_eq!(
             serde_json::to_string(&LoopEnd::GoalMet).expect("ser"),
             r#"{"kind":"goal_met"}"#

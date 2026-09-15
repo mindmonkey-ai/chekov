@@ -1622,7 +1622,7 @@ single-turn emission 32–34/39 to 36/39, and win only the instruction axis.
 The `all` + `--codebase` + `--judge` stage from the approval is not run: the
 loop verdict the survey said to hold for is in, and it is against.
 
-**Follow-ups (proposed, not rulings):**
+**Follow-ups — APPROVED 2026-09-15 (human approval in chat: "I approve"), shipped 2026-09-15 as `FORCED_MAX_TOKENS` in the identity hash, `calls` on the loop row and its failure line, and `[pull] stall_timeout_secs` (default 180) over a watched copy; the re-measurement under the new identity is pending:**
 1. Give the forced arm a named cap that rides in the agentic identity hash
    beside the other three (`caps=4096/1024/4096` today lists only those),
    and raise it to the tool cap; the grammar axis is blind on any thinker

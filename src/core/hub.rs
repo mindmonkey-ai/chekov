@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 
-use crate::core::progress::{CountingReader, Progress, Shard, Sink, format_size};
+use crate::core::progress::{Progress, Shard, Sink, format_size};
 use crate::core::pullspec::RepoId;
 use crate::error::ChekovError;
 
@@ -525,6 +525,9 @@ pub struct DownloadSpec<'a> {
     pub dest: &'a std::path::Path,
     /// `--model-loc` root to adopt pre-downloaded files from (hard links).
     pub adopt_from: Option<&'a std::path::Path>,
+    /// How long a shard's connection may deliver nothing before the transfer
+    /// is given up with its `.part` kept (`[pull] stall_timeout_secs`).
+    pub stall: std::time::Duration,
 }
 
 /// Where a pre-downloaded copy of `rfilename` may live under a `--model-loc`
@@ -698,14 +701,21 @@ fn decide(
     resume_action(&answer).map_err(refused)
 }
 
+/// One shard's transfer: its progress line, and how long the connection may
+/// deliver nothing before the shard is given up with its `.part` kept.
+struct Transfer<'a> {
+    progress: &'a mut Progress,
+    stall: std::time::Duration,
+}
+
 /// Copy the body into the `.part` — appending when the shard resumed —
 /// reporting bytes on stderr as they land. Returns the part's new length.
 fn stream(
     part: &std::path::Path,
     res: ureq::http::Response<ureq::Body>,
-    progress: &mut Progress,
+    transfer: &mut Transfer<'_>,
 ) -> Result<u64, ChekovError> {
-    let from = progress.resumed_from();
+    let from = transfer.progress.resumed_from();
     let mut out = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -714,12 +724,16 @@ fn stream(
         .open(part)
         .map_err(|e| ChekovError::io(format!("opening {}", part.display()), e))?;
     let mut screen = std::io::stderr();
-    let mut reader = CountingReader::new(res.into_body().into_reader(), from, |done| {
-        drop(progress.emit(&mut screen, done));
-    });
-    let copied = std::io::copy(&mut reader, &mut out)
-        .map_err(|e| ChekovError::io(format!("writing {}", part.display()), e))?;
-    drop(reader);
+    let progress = &mut *transfer.progress;
+    let copied = crate::core::stall::copy_watched(
+        res.into_body().into_reader(),
+        &mut out,
+        crate::core::stall::Watch {
+            stall: transfer.stall,
+            on_progress: |done| drop(progress.emit(&mut screen, from + done)),
+        },
+    )
+    .map_err(|e| ChekovError::io(format!("writing {}", part.display()), e))?;
     drop(progress.finish(&mut screen, from + copied));
     out.sync_all()
         .map_err(|e| ChekovError::io(format!("flushing {}", part.display()), e))?;
@@ -730,24 +744,32 @@ fn stream(
 /// never leaves a short file that `file_matches` would have to catch later.
 ///
 /// Network path — exercised only by real pulls, never by tests (prompt §2.4).
-fn fetch_to(url: &str, dest: &std::path::Path, progress: &mut Progress) -> Result<(), ChekovError> {
+fn fetch_to(
+    url: &str,
+    dest: &std::path::Path,
+    transfer: &mut Transfer<'_>,
+) -> Result<(), ChekovError> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| ChekovError::io(format!("creating {}", parent.display()), e))?;
     }
     let part = dest.with_extension("part");
-    let res = send(url, progress.resumed_from())?;
-    if decide(&res, url, progress)? == ResumeAction::Restart && progress.resumed_from() > 0 {
+    let res = send(url, transfer.progress.resumed_from())?;
+    if decide(&res, url, transfer.progress)? == ResumeAction::Restart
+        && transfer.progress.resumed_from() > 0
+    {
         eprintln!(
             "server ignored Range — restarting {} from zero",
-            progress.label()
+            transfer.progress.label()
         );
-        progress.restart();
+        transfer.progress.restart();
     }
-    let written = stream(&part, res, progress)?;
-    verify_length(written, progress.total()).map_err(|reason| ChekovError::HubRequestFailed {
-        url: url.to_owned(),
-        reason,
+    let written = stream(&part, res, transfer)?;
+    verify_length(written, transfer.progress.total()).map_err(|reason| {
+        ChekovError::HubRequestFailed {
+            url: url.to_owned(),
+            reason,
+        }
     })?;
     finalize(&part, dest)
 }
@@ -816,7 +838,15 @@ fn download_shard(spec: &DownloadSpec<'_>, shard: Shard, sink: Sink) -> Result<(
         println!("downloading {} …", shard.label);
     }
     let url = resolve_url(spec.repo, spec.revision, &shard.label);
-    fetch_to(&url, &target, &mut Progress::new(shard, resume_at, sink))
+    let mut progress = Progress::new(shard, resume_at, sink);
+    fetch_to(
+        &url,
+        &target,
+        &mut Transfer {
+            progress: &mut progress,
+            stall: spec.stall,
+        },
+    )
 }
 
 /// The revision-pinned download URL for one file.

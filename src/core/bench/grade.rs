@@ -541,6 +541,8 @@ mod probe_tests {
 mod tests {
     use super::{Grade, grade};
     use crate::core::bench::fixture::FixtureProbe;
+    use crate::core::bench::store::LoopEnd;
+    use crate::core::bench::toolloop::LoopOutcome;
 
     fn probe(expect: &[&str]) -> FixtureProbe {
         FixtureProbe {
@@ -583,18 +585,20 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn the_loop_grade_is_the_end_state_with_the_turns_in_the_reason_only() {
-        use crate::core::bench::codebase::run::empty_measure;
-        use crate::core::bench::store::LoopEnd;
-        use crate::core::bench::toolloop::LoopOutcome;
-        let outcome = |end: LoopEnd| LoopOutcome {
+    fn loop_outcome(end: LoopEnd) -> LoopOutcome {
+        LoopOutcome {
             end,
             turns: 4,
             tool_calls: 6,
-            measure: empty_measure(),
+            calls: Vec::new(),
+            measure: crate::core::bench::codebase::run::empty_measure(),
             reply: None,
-        };
+        }
+    }
+
+    #[test]
+    fn the_loop_grade_is_the_end_state_with_the_turns_in_the_reason_only() {
+        let outcome = loop_outcome;
         assert_eq!(
             super::grade_tool_loop(&outcome(LoopEnd::GoalMet)),
             super::Grade::Pass
