@@ -40,12 +40,16 @@ pub fn prompt_set_hash(plan: &crate::core::bench::sweep::SweepPlan, seed: u32) -
 ///
 /// Thinking counts against `max_tokens`, and the earlier 512 starved every
 /// long thinker before it could answer: a measured 9/40 that was 28/40 with
-/// room. Tool replies are short; the forced arm is grammar-bound and keeps
-/// its own cap. A loop turn gets the instruction cap (ruling 2026-09-14):
-/// at 512 a long-thinking turn was cut mid tool call and graded malformed.
+/// room. Tool replies are short. A loop turn gets the instruction cap
+/// (ruling 2026-09-14): at 512 a long-thinking turn was cut mid tool call
+/// and graded malformed. The forced arm gets the tool cap (ruling
+/// 2026-09-15): the grammar binds the answer, not the thinking before it,
+/// and at 256 a model that thinks under the grammar stopped on `max_tokens`
+/// with no answer on 28 of 30 cases.
 pub const INSTRUCTION_MAX_TOKENS: u32 = 4096;
 pub const TOOL_MAX_TOKENS: u32 = 1024;
 pub const LOOP_MAX_TOKENS: u32 = INSTRUCTION_MAX_TOKENS;
+pub const FORCED_MAX_TOKENS: u32 = TOOL_MAX_TOKENS;
 
 /// What pins the agentic task set beyond its content: the sampling seed and
 /// the loop's turn budget (tool-loop design §8). Two runs judged under
@@ -79,7 +83,7 @@ pub fn suite_prompt_hash(
 /// any one and old runs refuse to compare or resume.
 fn agentic_identity(pins: HashPins) -> String {
     format!(
-        "{}|turns={}|seed={}|caps={INSTRUCTION_MAX_TOKENS}/{TOOL_MAX_TOKENS}/{LOOP_MAX_TOKENS}|grader={}",
+        "{}|turns={}|seed={}|caps={INSTRUCTION_MAX_TOKENS}/{TOOL_MAX_TOKENS}/{LOOP_MAX_TOKENS}/{FORCED_MAX_TOKENS}|grader={}",
         crate::core::bench::probeset::content_hash(),
         pins.max_turns,
         pins.seed,
@@ -157,7 +161,7 @@ pub fn forced_probe(case: &crate::core::bench::probeset::ToolCase) -> HttpReques
     );
     anthropic_post(&serde_json::json!({
         "model": "claude-sonnet-4",
-        "max_tokens": 256,
+        "max_tokens": FORCED_MAX_TOKENS,
         "system": system,
         "messages": [{"role": "user", "content": case.prompt}],
     }))
