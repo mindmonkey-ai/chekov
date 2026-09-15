@@ -592,6 +592,7 @@ mod tests {
             end,
             turns: 4,
             tool_calls: 6,
+            calls: Vec::new(),
             measure: empty_measure(),
             reply: None,
         };
