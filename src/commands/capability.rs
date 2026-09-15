@@ -2072,6 +2072,7 @@ fn append_loop(
             let row = store::LoopRow {
                 turns: done.turns,
                 tool_calls: done.tool_calls,
+                calls: done.calls,
                 end: done.end,
             };
             (done.measure, verdict, Some(row), done.reply)
