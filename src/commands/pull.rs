@@ -114,6 +114,7 @@ pub(crate) fn materialize(
             revision: &model.sha,
             dest: &dir,
             adopt_from: model.location.as_deref(),
+            stall: std::time::Duration::from_secs(ctx.config.file.pull.stall_timeout_secs),
         },
         plan,
     )?;
