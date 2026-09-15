@@ -2483,6 +2483,7 @@ mod tests {
             end: end.clone(),
             turns,
             tool_calls: turns,
+            calls: Vec::new(),
             measure: crate::core::bench::codebase::run::empty_measure(),
             // Red: the loop captures no reply yet.
             reply: None,
@@ -2495,10 +2496,41 @@ mod tests {
             tool_loop: Some(LoopRow {
                 turns,
                 tool_calls: turns,
+                calls: Vec::new(),
                 end,
             }),
             ..graded("tool_loop", id, grade)
         }
+    }
+
+    /// Ruling 2026-09-15: a loop row carries the tool names it called, in
+    /// order, and the failure line prints them — an exhausted loop is
+    /// readable without a replay. A row written before the field loads with
+    /// no calls and prints as before.
+    #[test]
+    fn a_loop_failure_line_names_the_calls_in_order_and_an_old_row_prints_as_before() {
+        let eval = scratch("loop-calls");
+        let mut writer = RunWriter::create(&eval, "r-calls", &head()).expect("create");
+        let mut traced = looped("tl-009", 3, LoopEnd::TurnsExhausted);
+        if let Some(row) = traced.tool_loop.as_mut() {
+            row.calls = vec!["read_file".into(), "run_tests".into(), "run_tests".into()];
+        }
+        writer.append(traced).expect("append");
+        writer
+            .append(looped("tl-010", 2, LoopEnd::TurnsExhausted))
+            .expect("append");
+        let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
+        assert!(
+            rendered.contains(
+                "tool_loop FAIL tl-009  no terminal state in 3 turns (3 tool calls) (calls: read_file, run_tests, run_tests)\n"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .contains("tool_loop FAIL tl-010  no terminal state in 2 turns (2 tool calls)\n"),
+            "a row without a trace prints no empty suffix: {rendered}"
+        );
     }
 
     /// Three reached (2, 3, 6 turns), one stopped unmet, and tl-001 truncated

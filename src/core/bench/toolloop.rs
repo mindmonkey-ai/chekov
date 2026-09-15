@@ -996,6 +996,7 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
         let outcome = drive(&mut script.door(), &run(&set, 8)).expect("drove");
         assert_eq!(outcome.end, LoopEnd::GoalMet);
         assert_eq!((outcome.turns, outcome.tool_calls), (3, 2));
+        assert_eq!(outcome.calls, ["read_file", "edit_file"]);
         assert_eq!(
             outcome.measure.decode_samples.len(),
             3,
@@ -1117,6 +1118,10 @@ input_schema = '{"type":"object","properties":{"path":{"type":"string"},"old":{"
             3,
             "the fourth reply was never asked for"
         );
+        // Ruling 2026-09-15: the row says WHAT was called, turn by turn, so an
+        // exhausted loop can be read without replaying it. Names only, never
+        // arguments — the path is still never scored.
+        assert_eq!(outcome.calls, vec!["read_file"; 3]);
     }
 
     #[test]
