@@ -1532,7 +1532,106 @@ for `tool_loop`, since single-turn emission will not separate them. Not
 benchable here from the same survey: Tencent Hy4 preview (770B-A49B; the
 1-bit GGUF is 229 GB against a 182.62 GiB budget); GLM-5.3-Flash stays
 upstream-blocked (BLOCKED entry above).
-Proposed 2026-09-06 — status: APPROVED 2026-09-09 (measurement)
+Proposed 2026-09-06 — status: APPROVED 2026-09-09 (measurement) — MEASURED 2026-09-15 (below)
+
+**Registered 2026-09-14.** `unsloth/Muse-Glimmer-30B-GGUF` Q8_0 at
+`faa5b025c584` (the HF repo names it Muse Glimmer; architecture
+`muse-glimmer`, 52 layers, no MTP head, 33.3 GB at 131072 context per
+`explain`; Meta's sampling 1.0 / 0.95 / 64) and
+`unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF` Q8_0 at `f2d3fe369450`
+(`nemotron_h_moe`, 53 blocks, ONE native MTP draft head — the speculative
+question answered yes; NVIDIA's sampling 1.0 / 0.95). `explain` reports zero
+KV bytes for the Nemotron hybrid because its Mamba-2 layers expose no
+attention geometry to the sizing model; the cache is tiny on this
+architecture, so the fit verdict stands, but the number is a gap. Both
+registrations are local (`models.toml` is gitignored), pinned here by repo
+and revision.
+
+**Measured 2026-09-14/15 (MDT, 18:38–22:03).** `bench --suite agentic` on
+each candidate under the loop-cap identity `7882af966fae`, read against
+Ornith's run on that identity (`20260914T201544Z-ornith-1.5-35b-a3b`);
+the built-in `compare` refuses across the differing registered contexts
+and sampling, so the table is tallied from the rows as every receipt
+before it. Runs `20260915T003820Z-nemotron-3.5-lightning-30b-a3b` (212
+rows, 29 min) and `20260915T024259Z-muse-glimmer-30b` (211 rows, 81 min).
+Raw evidence with a SHA-256 manifest:
+[docs/agentic-campaign-20260915-tooluse-lane.tar.gz](docs/agentic-campaign-20260915-tooluse-lane.tar.gz).
+
+| Axis (buffered) | Muse Glimmer 30B | Nemotron 3.5 Lightning | Ornith 1.5 35B A3B |
+| --- | --- | --- | --- |
+| tool_loop | 8/12 | 8/12 | 11/12 |
+| instruction strict | 39/40 | 37/40 | 32/40 |
+| tool_emit | 32/39 | 34/39 | 36/39 |
+| grammar_gap | N/A (29 of 30 unavailable) | 2/30 (harness artifact) | 29/30 |
+
+Both candidates are the strongest instruction followers measured on any
+identity — Muse's 39/40 (40/40 streamed) and Nemotron's 37/40 beat GPT-OSS's
+36/40 — and both are the weakest loopers after GPT. Of 92 axis/case pairs
+graded on all three stacks, 25 distinguish, 65 pass everywhere and 2 fail
+everywhere; five of twelve loop cases separate (`tl-003`, `tl-005`,
+`tl-007`, `tl-009`, `tl-012`). The two candidates fail exactly the same four
+loop cases, all by exhausting eight turns with a tool call on every turn:
+the three test-gated edits (`tl-003`, `tl-009`, `tl-012`) and the missing-file
+abstention (`tl-005`). Ornith closes all four. Both candidates pass the decoy
+grep hit (`tl-007`) that Ornith and GPT fail, so the loop axis now separates
+in both directions.
+
+**Why the four (replayed, not inferred).** Rows record turn counts but not
+the call sequence, so the four cases were replayed once against Muse
+through the translator with the bench's own system text, palette and canned
+tool behaviour (unseeded, so a reproduction of the shape, not the rows). All
+four exhausted again. The shape: one call per turn, never a plain-text
+reply. On the three test-gated cases the palette has no `list_dir`, and Muse
+spends turns probing the layout through `read_file` on `.`, `src`,
+`Cargo.toml` and `tests` (four of eight turns on `tl-012`, three on
+`tl-009`), reaching `run_tests` only at turn seven. On `tl-003` it read,
+ran the tests, edited the constant to the value the failure named at turn
+six, saw `ok. 1 passed` at turn seven — and ran the tests again at turn
+eight instead of reporting: the goal was met and the loop still failed,
+because the design's only terminal state is a text reply. On `tl-005` it
+listed, read the missing path, read every other file, and retried
+`src/Legacy.rs` on turn eight without ever saying the file was missing. So
+the shared failure is a habit both new stacks have and the three earlier
+stacks lack: keep calling tools until the budget ends. Whether that habit is
+the model or the eight-turn budget is a ruling, not a measurement.
+
+**Caveats.** (a) Muse's forced arm returns the engine's `peg-native` parse
+error (HTTP 500) on 29 of 30 cases, the same fault GPT-OSS hits on one loop
+case; its grammar axis reads N/A and `bench` said so at launch. (b)
+Nemotron's 2/30 is the forced arm's own 256-token cap: it thinks ~900
+characters under the grammar and 28 of 30 forced replies stopped on
+`max_tokens` with no answer — the same starvation the 2026-09-13 ruling
+fixed on the other arms, on the one cap that ruling left alone. (c) Muse's
+first run (`20260915T010705Z-muse-glimmer-30b`, in the tarball, one row
+short) scored 1/40 strict because its entry carried `--reasoning-format
+none`: Muse writes reasoning as a `to=self` message, and the engine's Muse
+Glimmer parser (`llama.cpp/common/chat.cpp:3332`) only extracts it under the
+default format, so the reasoning sat in the visible answer and every
+line-count and fence check failed. The entry now carries no reasoning flag,
+like GPT-OSS; the rerun is the measurement. (d) Muse is the first stack
+whose verdicts differ across transports: `te-029` buffered thought 4323
+characters into the 1024 tool cap and emitted no call (streamed: 2055 and a
+pass), and `if-028` failed `contains:unchanged` buffered and passed
+streamed — at temperature 1.0 the seeded doors do not sample alike. (e)
+Muse's first download stalled at 7.7 GB and the pull sat on a dead
+connection for three hours; the restarted pull finished in ten minutes.
+
+**Verdict on the survey's question.** Neither candidate takes the tool-use
+lane from Ornith on this bench: both lose the loop axis 8/12 to 11/12 and
+single-turn emission 32–34/39 to 36/39, and win only the instruction axis.
+The `all` + `--codebase` + `--judge` stage from the approval is not run: the
+loop verdict the survey said to hold for is in, and it is against.
+
+**Follow-ups (proposed, not rulings):**
+1. Give the forced arm a named cap that rides in the agentic identity hash
+   beside the other three (`caps=4096/1024/4096` today lists only those),
+   and raise it to the tool cap; the grammar axis is blind on any thinker
+   at 256, and the change refuses old comparisons by construction.
+2. Record the per-turn tool names in the loop row (`["read_file",
+   "run_tests", …]`, never the arguments): the replay above cost a server
+   launch to learn what the row could have said.
+3. The downloader has no read timeout (caveat e): a stalled connection
+   should fail in minutes, not sit for hours.
 
 ## Upstream engine work to watch, not build (2026-09-06)
 Recorded so the next round does not re-research it. (a) Speculative prefill

@@ -626,6 +626,17 @@ instruction probes, and a final re-measurement changed exactly one verdict
 of 636: loops are 12/12, 11/12, and 7/11, with four loop cases separating
 the stacks. See
 [the loop expansion](IDEAS.md#harder-tool-loop-scenarios-loop-corpus-expansion-decision-2026-09-14).
+The two approved tool-use lane candidates were then measured on that
+identity: Muse Glimmer 30B and Nemotron 3.5 Lightning 30B-A3B, read against
+Ornith. Strict instruction 39/40 and 37/40 against 32/40; tools 32/39 and
+34/39 against 36/39; loops 8/12 and 8/12 against 11/12, both new stacks
+exhausting the same four loop cases. Muse's forced-grammar arm is an
+engine-side parse error (N/A) and Nemotron's 2/30 there is the forced arm's
+256-token cap starving its thinking, a harness artifact with a follow-up
+filed. Muse's first run measured a registry mistake, not the model: an
+explicit `--reasoning-format none` left its `to=self` reasoning in the
+visible answer (1/40), and the engine-default format fixed it. See
+[the measurement](IDEAS.md#new-tool-use-lane-candidates-for-the-agentic-bench-survey-2026-09-06).
 
 ### Long-context traces
 
