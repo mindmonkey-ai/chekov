@@ -542,6 +542,24 @@ mod tests {
     }
 
     #[test]
+    fn pull_stall_timeout_defaults_to_three_minutes_and_overrides() {
+        // Ruling 2026-09-15: a pull that stops receiving bytes fails after
+        // this long instead of sitting on a dead connection for hours.
+        assert_eq!(super::PullSection::default().stall_timeout_secs, 180);
+        let cfg: super::FileConfig =
+            toml::from_str("[pull]\nstall_timeout_secs = 30\n").expect("overrides parse");
+        assert_eq!(cfg.pull.stall_timeout_secs, 30);
+        let root = scratch("cfg-pull-stall-zero");
+        std::fs::write(root.join("config.toml"), "[pull]\nstall_timeout_secs = 0\n")
+            .expect("write");
+        let err = Config::load(&root).expect_err("zero would fail every pull on its first read");
+        assert!(
+            err.to_string().contains("[pull] stall_timeout_secs"),
+            "refused at load, naming the key: {err}"
+        );
+    }
+
+    #[test]
     fn engine_section_parses_git_ref_and_defaults_to_unpinned() {
         assert_eq!(
             super::FileConfig::default().engine.git_ref,
