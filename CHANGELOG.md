@@ -18,7 +18,10 @@ All notable changes to chekov are recorded here. The format follows
   `(calls: read_file, run_tests, …)`; and `chekov pull` gives up a shard
   whose connection delivers nothing for `[pull] stall_timeout_secs`
   (default 180, zero refused at load), keeping the `.part` for the next run
-  to resume, instead of sitting on a dead socket for hours.
+  to resume, instead of sitting on a dead socket for hours. Re-measured
+  under identity `e4cdb862d9e6`: Nemotron's grammar axis 2/30 → 25/30, and
+  every other verdict on five stacks reproduced except two Muse cases that
+  sampled differently.
 - The agentic corpus now has 39 tool cases (30 calls and 9 abstentions),
   30 paired forced-grammar checks, and 40 instruction cases. All original
   questions and six tool-loop scenarios are preserved. New cases exercise

@@ -635,7 +635,13 @@ engine-side parse error (N/A) and Nemotron's 2/30 there is the forced arm's
 256-token cap starving its thinking, a harness artifact with a follow-up
 filed. Muse's first run measured a registry mistake, not the model: an
 explicit `--reasoning-format none` left its `to=self` reasoning in the
-visible answer (1/40), and the engine-default format fixed it. See
+visible answer (1/40), and the engine-default format fixed it. Under the
+2026-09-15 rulings that followed (the forced arm's cap in the identity, a
+call trace on every loop row, a pull stall window) all five stacks were
+re-measured: only Nemotron's grammar moved, 2/30 to 25/30, and Muse's two
+door asymmetries closed on requests the cap does not touch; every other
+verdict reproduced. The traces show Nemotron re-running the tests without
+editing and Muse re-reading without stopping. See
 [the measurement](IDEAS.md#new-tool-use-lane-candidates-for-the-agentic-bench-survey-2026-09-06).
 
 ### Long-context traces
