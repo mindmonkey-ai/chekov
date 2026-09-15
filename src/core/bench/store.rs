@@ -264,6 +264,11 @@ pub enum LoopEnd {
 pub struct LoopRow {
     pub turns: u32,
     pub tool_calls: u32,
+    /// The tool names called, in order (ruling 2026-09-15) — names only,
+    /// never arguments, and never scored. Rows written before the field
+    /// load with none, and print as they always did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<String>,
     pub end: LoopEnd,
 }
 
@@ -706,12 +711,21 @@ fn agentic_fail_line(row: &TaskRow) -> String {
         .and_then(|g| g.reason.as_deref())
         .unwrap_or("");
     format!(
-        "{} FAIL {}{}  {reason}{}\n",
+        "{} FAIL {}{}  {reason}{}{}\n",
         row.suite,
         row.task_id,
         door_tag(row.transport),
-        stop_suffix(row)
+        stop_suffix(row),
+        calls_suffix(row)
     )
+}
+
+/// The loop's call sequence, when the row recorded one.
+fn calls_suffix(row: &TaskRow) -> String {
+    row.tool_loop
+        .as_ref()
+        .filter(|l| !l.calls.is_empty())
+        .map_or_else(String::new, |l| format!(" (calls: {})", l.calls.join(", ")))
 }
 
 /// Strict instruction passes that showed the reader nothing: thinking was
@@ -2719,15 +2733,21 @@ mod tests {
         let json = serde_json::to_string(&LoopRow {
             turns: 2,
             tool_calls: 3,
+            calls: vec!["grep".into(), "rm".into()],
             end: end.clone(),
         })
         .expect("ser");
         assert_eq!(
             json,
-            r#"{"turns":2,"tool_calls":3,"end":{"kind":"fabricated_tool","name":"rm"}}"#
+            r#"{"turns":2,"tool_calls":3,"calls":["grep","rm"],"end":{"kind":"fabricated_tool","name":"rm"}}"#
         );
         let back: LoopRow = serde_json::from_str(&json).expect("de");
         assert_eq!(back.end, end);
+        assert_eq!(back.calls, ["grep", "rm"]);
+        let untraced: LoopRow =
+            serde_json::from_str(r#"{"turns":2,"tool_calls":3,"end":{"kind":"turns_exhausted"}}"#)
+                .expect("a row written before the field loads");
+        assert!(untraced.calls.is_empty());
         assert_eq!(
             serde_json::to_string(&LoopEnd::GoalMet).expect("ser"),
             r#"{"kind":"goal_met"}"#

@@ -272,6 +272,9 @@ pub struct LoopOutcome {
     pub end: LoopEnd,
     pub turns: u32,
     pub tool_calls: u32,
+    /// The tool names called, in order across every turn — names only,
+    /// never arguments (ruling 2026-09-15). Read, never scored.
+    pub calls: Vec<String>,
     pub measure: Measure,
     /// The loop's last-turn stop reason, when the final reply carried one —
     /// the same budget/starvation signal `ReplyStamp` stamps on an agentic
@@ -300,6 +303,7 @@ struct LoopState<'a> {
     env: ToolEnv<'a>,
     messages: Vec<Value>,
     tool_calls: u32,
+    calls: Vec<String>,
     measure: Measure,
     /// The final reply's stop reason, when it carried one — read the same way
     /// `ReplyStamp::from_body` reads a graded body, so a tool-loop row stamps
@@ -313,6 +317,7 @@ impl<'a> LoopState<'a> {
             env: ToolEnv::new(case),
             messages: vec![json!({"role": "user", "content": case.prompt})],
             tool_calls: 0,
+            calls: Vec::new(),
             measure: empty_measure(),
             reply: None,
         }
@@ -338,6 +343,7 @@ impl<'a> LoopState<'a> {
         let mut results = Vec::new();
         for call in &reply.tool_uses {
             self.tool_calls += 1;
+            self.calls.push(call.name.clone());
             match self.env.answer(call) {
                 Ok(text) => results
                     .push(json!({"type": "tool_result", "tool_use_id": call.id, "content": text})),
@@ -368,6 +374,7 @@ impl<'a> LoopState<'a> {
             end,
             turns,
             tool_calls: self.tool_calls,
+            calls: self.calls,
             measure: self.measure,
             reply: self.reply,
         }
