@@ -300,8 +300,32 @@ mod tests {
         assert_eq!(cap(super::tool_probe(&set.tool_emit[0])), Some(1024));
         assert_eq!(
             cap(super::forced_probe(&set.tool_emit[0])),
-            Some(256),
-            "the forced arm is grammar-bound and keeps its cap"
+            Some(1024),
+            "the forced arm gets the tool cap: a thinker under the grammar was starved at 256"
+        );
+    }
+
+    #[test]
+    fn a_run_under_the_forced_cap_ruling_never_compares_with_the_loop_cap_run() {
+        use crate::core::bench::lifecycle::Suite;
+        use crate::core::bench::sweep::SweepPlan;
+        // `7882af966fae` is the agentic hash the 2026-09-14 loop-cap
+        // measurement and the 2026-09-15 tool-use lane measurement ran under
+        // (seed 42, eight turns), read from their stamps. The forced arm's
+        // cap now rides in the identity, so that identity is retired.
+        let plan = SweepPlan {
+            depths: vec![1024],
+            repetitions: 5,
+            max_tokens: 128,
+        };
+        let loop_cap = super::HashPins {
+            seed: 42,
+            max_turns: 8,
+        };
+        assert_ne!(
+            super::suite_prompt_hash(Suite::Agentic, &plan, loop_cap),
+            "7882af966fae",
+            "the forced arm's cap rides in the identity"
         );
     }
 
