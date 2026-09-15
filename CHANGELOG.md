@@ -7,6 +7,18 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Rulings 2026-09-15 (approved), from the tool-use lane measurement receipt:
+  the forced-grammar arm of `grammar_gap` gets the tool cap (1024 tokens,
+  from 256 — a model that thinks under the grammar stopped on `max_tokens`
+  with no answer on 28 of 30 cases) and the cap now rides in the agentic
+  identity hash, so runs under the ruling refuse to compare with, or resume,
+  the `7882af966fae` runs; a `tool_loop` row records the tool names it
+  called in order (`calls`, names only, never scored — rows written before
+  the field load with none) and a failing loop's report line prints them as
+  `(calls: read_file, run_tests, …)`; and `chekov pull` gives up a shard
+  whose connection delivers nothing for `[pull] stall_timeout_secs`
+  (default 180, zero refused at load), keeping the `.part` for the next run
+  to resume, instead of sitting on a dead socket for hours.
 - The agentic corpus now has 39 tool cases (30 calls and 9 abstentions),
   30 paired forced-grammar checks, and 40 instruction cases. All original
   questions and six tool-loop scenarios are preserved. New cases exercise
