@@ -1,0 +1,16 @@
+# fixture-v1 — a small event-sourced ledger used to grade a candidate's
+# ability to integrate cross-file context, honour a stated invariant, and
+# choose the correct of two near-identical APIs.
+#
+# This is a CONTENT SLICE, not production chekov code and not wired into src/.
+# See manifest.toml and README.md.
+[package]
+name = "fixture-v1"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[profile.dev]
+panic = "abort"
