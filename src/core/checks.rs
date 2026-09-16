@@ -226,6 +226,42 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_content_reads_text_after_thinking() {
+        let body = serde_json::json!({"content": [
+            {"type": "thinking", "thinking": "plan"},
+            {"type": "text", "text": "hello"}
+        ]});
+        assert_eq!(
+            anthropic_content(&body.to_string()).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn anthropic_content_requires_a_text_block() {
+        let body = r#"{"content":[{"type":"thinking","text":"not an answer"}]}"#;
+        assert_eq!(anthropic_content(body), None);
+    }
+
+    #[test]
+    fn anthropic_content_without_an_answer_is_missing() {
+        let body = r#"{"content":[{"type":"thinking","thinking":"plan"}]}"#;
+        assert_eq!(anthropic_content(body), None);
+    }
+
+    #[test]
+    fn anthropic_content_rejects_malformed_responses() {
+        for body in [
+            "not json",
+            "{}",
+            r#"{"content":{}}"#,
+            r#"{"content":[{"type":"text","text":42}]}"#,
+        ] {
+            assert_eq!(anthropic_content(body), None, "{body}");
+        }
+    }
+
+    #[test]
     fn sysctl_output_parses_with_whitespace() {
         assert_eq!(parse_sysctl_mb("163840\n"), Some(163_840));
         assert_eq!(parse_sysctl_mb("garbage"), None);

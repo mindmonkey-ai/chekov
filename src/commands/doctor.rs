@@ -291,6 +291,28 @@ mod tests {
         serde_json::json!({"content": [{"type": "text", "text": text}]}).to_string()
     }
 
+    #[test]
+    fn anthropic_door_passes_when_thinking_precedes_text() {
+        let (cfg, eff) = fixture(false, None);
+        let body = serde_json::json!({"content": [
+            {"type": "thinking", "thinking": "plan"},
+            {"type": "text", "text": "hello"}
+        ]})
+        .to_string();
+        let http = SeqHttp::new(&[&body]);
+        assert_eq!(super::check_anthropic(&http, &cfg, &eff), CheckStatus::Pass);
+    }
+
+    #[test]
+    fn anthropic_door_without_text_still_fails() {
+        let (cfg, eff) = fixture(false, None);
+        let http = SeqHttp::new(&[r#"{"content":[{"type":"thinking","thinking":"plan"}]}"#]);
+        assert_eq!(
+            super::check_anthropic(&http, &cfg, &eff),
+            CheckStatus::Fail("no text block in response content".into())
+        );
+    }
+
     fn fixture(
         reasoning: bool,
         ctx_size: Option<u32>,
