@@ -1699,3 +1699,82 @@ a draft-FILE path, which tune's spec stage deliberately does not model.
 engine's `--spec-type` list already, but each needs a trained draft head
 shipped as a file — same reason, same deferral.
 Proposed 2026-09-06 — status: APPROVED 2026-09-09 as DEFERRED (upstream) — revisit when upstream merges
+
+## Time-to-first-visible-text — a design decision, not a build (2026-09-15)
+
+**Question:** Should chekov measure elapsed time until the first visible
+answer text, separately from throughput and thinking share? The reasoning
+stamp records how much output is thinking (`thinking_chars`/`answer_chars`),
+but those character counts do not measure when an answer becomes visible.
+
+**Why the first proposal was withdrawn.** The earlier proposal added a
+`to_first_visible` mark in `hub.rs` without first resolving the stream seam's
+freeze and the metric's meaning. It remains withdrawn as an implementation
+proposal. A new observation made while reading a stream could be honest;
+reconstructing its arrival time from the completed response cannot be.
+
+**What the current code measures (reviewed 2026-09-15).**
+
+- `src/core/hub.rs:161-203` records `to_first_data`, elapsed time until a read
+  first satisfies the SSE data predicate, and `first_to_done`, the remaining
+  time until EOF. It retains the assembled body and whether it arrived in one
+  read, not an arrival timestamp for each frame. These are client read times,
+  not exact server token-generation times.
+- On the client-timed path, `src/core/bench/runner.rs:518-552` computes prompt
+  tokens divided by `to_first_data`, and completion tokens minus one divided
+  by `first_to_done`. Both are rates in **tokens per second**, not latency.
+  A first data event can contain metadata or reasoning before visible text;
+  even a non-thinking model need not expose answer text in its first event.
+- The llama.cpp streamed path instead reads the engine's timings object
+  (`src/core/bench/runner.rs:364-393`), as does the buffered path. It is wrong
+  to describe every reported `tok/s` value as derived from `to_first_data`.
+  Foreign client timing is explicitly labeled in the report
+  (`src/core/bench/store.rs:1101-1108`).
+- `src/core/proxy/serve.rs:131-146` relays data through the translator without
+  preserving arrival times. Parsing the final body in the runner can locate
+  answer text but cannot recover when that text arrived. Thinking-character
+  share is not a substitute for that missing observation.
+
+**The gap to keep:** chekov does not yet report time to first visible answer
+text. This is a missing latency measurement, not evidence that its existing
+throughput units are mislabeled. The earlier reasoning-stamp decision left
+this work deferred. Any new design must distinguish upstream arrival from
+client-visible translated output; neither proves when a UI rendered it.
+
+**Decisions to resolve:** Is visible-answer latency useful enough to change
+model-selection decisions? If so, what observation point and narrowly scoped
+change to the frozen seam should be authorized? A stored timestamp per frame
+is one possible design, not a proven requirement: detecting the first visible
+text during incremental reads may need only one additional mark. Metadata,
+split tags, extracted reasoning, tool-only replies, empty replies, and reads
+containing several events must all have explicit semantics. No answer means
+unavailable, never a zero or an estimate from thinking share.
+
+**Resolution paths:**
+
+1. **Rule now:** retain the deferral and document that throughput and thinking
+   share do not answer the visible-latency question.
+2. **Research first (recommended):** spend at most one hour defining the
+   observation point, tracing the existing paths read-only, and identifying
+   a decision that would benefit from the new measurement. Return a proposed
+   design and the exact freeze exception it would need; do not implement it.
+3. **Spike first:** after a written, bounded exception for any frozen-file
+   edits, spend at most one hour on `spike/first-visible-text` testing the
+   observation with controlled streams. Never merge the spike. Report timing
+   uncertainty and whether the result adds information beyond existing rates.
+
+**Proposed research scope:** read the HTTP stream seam, bench runner, and
+translator; change no production code, registry, configuration, or gates.
+The recommendation does not approve a spike or supersede the existing design.
+
+**More information / tags:** reasoning-stamp entry above;
+`docs/superpowers/specs/2026-09-09-reasoning-stamp-design.md` §1c;
+`pushkin-hub-freeze`. The historical claim of a roughly tenfold latency
+change in a Qwen sweep has not been independently verified in this review and
+is not an acceptance criterion or evidence authorizing implementation.
+
+Proposed 2026-09-15 — status: OPEN as a design decision; the earlier build
+proposal remains WITHDRAWN; research first recommended. A new charter is
+conditional on confirming the current roadmap's completion: the capability
+entry above still records fixture-v1 as release-gated, and its dated slice
+status must be reconciled with the later delivery records before closure.

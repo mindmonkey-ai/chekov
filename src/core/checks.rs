@@ -45,10 +45,19 @@ pub fn chat_content(body: &str) -> Option<String> {
     json_pointer_str(body, "/choices/0/message/content")
 }
 
-/// `content[0].text` from an Anthropic-door response body.
+/// The first text block, which may follow thinking or tool-use blocks.
 #[must_use]
 pub fn anthropic_content(body: &str) -> Option<String> {
-    json_pointer_str(body, "/content/0/text")
+    let response: serde_json::Value = serde_json::from_str(body).ok()?;
+    response
+        .get("content")?
+        .as_array()?
+        .iter()
+        .find_map(|block| {
+            (block.get("type")?.as_str()? == "text")
+                .then(|| block.get("text")?.as_str().map(ToOwned::to_owned))
+                .flatten()
+        })
 }
 
 fn json_pointer_str(body: &str, pointer: &str) -> Option<String> {
@@ -223,6 +232,42 @@ mod tests {
         let body = r#"{"content":[{"type":"text","text":"hello"}],"role":"assistant"}"#;
         assert_eq!(anthropic_content(body).as_deref(), Some("hello"));
         assert_eq!(anthropic_content(r#"{"content":[]}"#), None);
+    }
+
+    #[test]
+    fn anthropic_content_reads_text_after_thinking() {
+        let body = serde_json::json!({"content": [
+            {"type": "thinking", "thinking": "plan"},
+            {"type": "text", "text": "hello"}
+        ]});
+        assert_eq!(
+            anthropic_content(&body.to_string()).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn anthropic_content_requires_a_text_block() {
+        let body = r#"{"content":[{"type":"thinking","text":"not an answer"}]}"#;
+        assert_eq!(anthropic_content(body), None);
+    }
+
+    #[test]
+    fn anthropic_content_without_an_answer_is_missing() {
+        let body = r#"{"content":[{"type":"thinking","thinking":"plan"}]}"#;
+        assert_eq!(anthropic_content(body), None);
+    }
+
+    #[test]
+    fn anthropic_content_rejects_malformed_responses() {
+        for body in [
+            "not json",
+            "{}",
+            r#"{"content":{}}"#,
+            r#"{"content":[{"type":"text","text":42}]}"#,
+        ] {
+            assert_eq!(anthropic_content(body), None, "{body}");
+        }
     }
 
     #[test]
