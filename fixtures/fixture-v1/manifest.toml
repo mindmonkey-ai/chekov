@@ -1,0 +1,77 @@
+# fixture-v1 grading manifest.
+#
+# This file is the source of truth for how the content slice is assembled and
+# graded. The context assembler consults it (not a glob that someone can later
+# edit): every `hidden` file named below is excluded from EVERY prompt by
+# construction, and the grader copies the workspace to a scratch dir, writes
+# those `hidden` files in, and runs them against the model's patch.
+#
+# Three properties follow from naming, not from a filter that could be bypassed:
+#   1. The model can never read the tests (physically absent from disk).
+#   2. The tasks cannot be answered by pattern-matching a visible assertion.
+#   3. The leakage filter from capability-spec §8 runs over the fixture
+#      identically, with its exclusion count printed — the fixture's honesty is
+#      auditable by the same mechanism as a user repo's.
+#
+# §9 tier ladder (cheapest to strongest, highest available tier awarded, every
+# tier reported separately):
+#   1 whitespace-normalized exact match        — line-level, NOT used here
+#   2 edit similarity (Levenshtein)            — line-level, NOT used here
+#   3 identifier-set F1                        — not used here
+#   4 parse gate (brace/indent balance)        — not used here
+#   5 repo-symbol existence                    — not used here
+#   6 compile gate (`cargo check`, JSON diagnostics)
+#   7 test gate  (run only the covering test)
+#
+# Body-level tasks lean on tiers 6-7. Tiers 1-2 are line-level and would punish
+# semantically-correct alternative implementations, so they are deliberately
+# not assigned to any body-level task here.
+
+version = 1
+id = "fixture-v1"
+content_hash = "pending-materialization"
+
+# Total task slots the release-gate campaign is measured against.
+# Ten are held in reserve (unreleased) so v1 can be hardened without renumbering
+# existing tasks — capability-spec §9.
+task_slots = 10
+
+# The four graded devices. `source` is the masked body the candidate writes;
+# `hidden` is the held-out assertion the grader injects and that the assembler
+# excludes from every prompt. `tier` is how the task is scored.
+[[tasks]]
+id = "device-1-store-limited-full"
+device = "cross-file first-use mask + capacity"
+source = "src/store/mod.rs"
+hidden = "hidden/store_limited_full.rs"
+tier = 7
+# The masked span is the first use of StoreError::Full; LedgerEntry/StoreError
+# are defined two modules away, so reading only this file cannot resolve them.
+
+[[tasks]]
+id = "device-2-near-miss-api"
+device = "near-miss API (the central discriminator)"
+source = "src/api/mod.rs"
+hidden = "hidden/near_miss_api.rs"
+tier = 7
+# apply_entry vs append_entry both compile and return Ok; only apply_entry
+# advances the projection. The wrong choice fails the balance assertion.
+
+[[tasks]]
+id = "device-3-invariant-exact"
+device = "invariant trap (money is i128 cents, never f64)"
+source = "src/domain/money.rs"
+hidden = "hidden/invariant_exact.rs"
+tier = 7
+# Correct value 2499.95 -> 249995 cents. A float path (as i128) yields 249994.
+# NOTE: capability-spec §9's concrete example (8014.35) does not trap under
+# as i128 (both paths give 801435); 2499.95 is the real invariant candidate.
+
+[[tasks]]
+id = "device-4-lifetime-knot"
+device = "generic + lifetime knot"
+source = "src/store/replay.rs"
+hidden = "hidden/lifetime_knot.rs"
+tier = 6
+# One signature type-checks exactly one way; a near-miss borrow fails to
+# compile, so this is graded by the compile gate (tier 6), not the test gate.
