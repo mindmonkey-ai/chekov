@@ -117,7 +117,7 @@ fn check_anthropic(http: &dyn HttpClient, cfg: &Config, eff: &Effective) -> Chec
     match http.post_json(&req) {
         Err(e) => CheckStatus::Fail(e.to_string()),
         Ok(body) => crate::core::checks::anthropic_content(&body).map_or_else(
-            || CheckStatus::Fail("no content[0].text in response".into()),
+            || CheckStatus::Fail("no text block in response content".into()),
             |_| CheckStatus::Pass,
         ),
     }

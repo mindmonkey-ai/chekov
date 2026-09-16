@@ -45,10 +45,19 @@ pub fn chat_content(body: &str) -> Option<String> {
     json_pointer_str(body, "/choices/0/message/content")
 }
 
-/// `content[0].text` from an Anthropic-door response body.
+/// The first text block, which may follow thinking or tool-use blocks.
 #[must_use]
 pub fn anthropic_content(body: &str) -> Option<String> {
-    json_pointer_str(body, "/content/0/text")
+    let response: serde_json::Value = serde_json::from_str(body).ok()?;
+    response
+        .get("content")?
+        .as_array()?
+        .iter()
+        .find_map(|block| {
+            (block.get("type")?.as_str()? == "text")
+                .then(|| block.get("text")?.as_str().map(ToOwned::to_owned))
+                .flatten()
+        })
 }
 
 fn json_pointer_str(body: &str, pointer: &str) -> Option<String> {
