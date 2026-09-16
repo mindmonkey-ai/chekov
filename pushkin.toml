@@ -20,7 +20,7 @@ authoring = "none"
 #protected_paths = ["pushkin.toml", ".claude/settings.json", "AGENTS.md", ".github/**", "clippy.toml", "deny.toml", "rustfmt.toml", "Cargo.toml", "Cargo.lock"]
 read_only_paths = ["tests/**"]
 retrieval_paths = ["src/**/*.rs"]
-retrieval_tool = "mcp__codebase-retrieval__codebase-retrieval"
+retrieval_tool = "mcp__pushkin__search" 
 
 # Hooks are managed via Claude Code settings.json (`pushkin-v1`), not lefthook,
 # so the git-hooks plane stays off.
