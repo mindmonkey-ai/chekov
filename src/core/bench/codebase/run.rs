@@ -621,12 +621,36 @@ mod tests {
         }
     }
 
+    fn prepared_body() -> Prepared {
+        let mut prepared = prepared_pair();
+        prepared.tasks.truncate(1);
+        prepared.tasks[0].tier = TaskTier::FunctionBody;
+        prepared.tasks[0].id = "function_body-abc123-L7".into();
+        prepared.counts = Counts {
+            in_file: 0,
+            function_body: 1,
+            cross_file_first: 0,
+        };
+        prepared
+    }
+
     fn infill_200() -> String {
         serde_json::json!({
             "content": "let a = 1;",
             "timings": {
                 "prompt_n": 12, "prompt_per_second": 400.0,
                 "predicted_n": 5, "predicted_per_second": 20.0
+            }
+        })
+        .to_string()
+    }
+
+    fn infill_200_with(content: &str) -> String {
+        serde_json::json!({
+            "content": content,
+            "timings": {
+                "prompt_n": 12, "prompt_per_second": 400.0,
+                "predicted_n": 20, "predicted_per_second": 20.0
             }
         })
         .to_string()
@@ -840,6 +864,38 @@ mod tests {
         prepared.exec.finish().expect("cleanup");
     }
 
+    #[test]
+    fn exec_splices_the_same_evaluated_body_that_the_row_persists() {
+        let script = "grep -q 'let b = 2;' src/a.rs || exit 1\n\
+                      grep -q 'let a = b - 1;' src/a.rs || exit 1\n\
+                      grep -q 'fn leaked' src/a.rs && exit 1\n\
+                      exit 0";
+        let mut prepared = with_exec("evaluated-body", script);
+        prepared.tasks[0].tier = TaskTier::FunctionBody;
+        prepared.counts = Counts {
+            in_file: 0,
+            function_body: 1,
+            cross_file_first: 0,
+        };
+        let raw = "let b = 2;\nlet a = b - 1;\n}\nfn leaked() {}";
+        let (rows, _, _) = drive(
+            "exec-evaluated-body",
+            &prepared,
+            (vec![Ok(infill_200_with(raw))], vec![]),
+        );
+        let row = rows[0].codebase.as_ref().expect("codebase row");
+
+        assert_eq!(
+            row.exec.as_ref().map(|e| &e.compile),
+            Some(&crate::core::bench::store::ExecScore::Value(1.0))
+        );
+        assert_eq!(
+            row.evaluated_prediction.as_deref(),
+            Some("let b = 2;\nlet a = b - 1;\n")
+        );
+        prepared.exec.finish().expect("cleanup");
+    }
+
     /// No toolchain: every crossing records the one reason, and no cargo is
     /// ever spawned.
     #[test]
@@ -873,6 +929,33 @@ mod tests {
         let grade = row.grade.as_ref().expect("an unavailable row is graded");
         assert!(grade.unavailable, "{grade:?}");
         grade.reason.clone().unwrap_or_default()
+    }
+
+    #[test]
+    fn a_body_row_keeps_raw_and_evaluated_fills_and_uses_the_fixed_cap() {
+        let raw = "let b = 2;\nlet a = b - 1;\n}\nfn leaked() {}";
+        let evaluated = "let b = 2;\nlet a = b - 1;\n";
+        let (rows, _, bodies) = drive(
+            "body-evaluation",
+            &prepared_body(),
+            (vec![Ok(infill_200_with(raw))], vec![]),
+        );
+        let row = rows[0].codebase.as_ref().expect("codebase row");
+
+        assert_eq!(row.prediction, raw, "raw evidence is immutable");
+        assert_eq!(row.evaluated_prediction.as_deref(), Some(evaluated));
+        assert_eq!(
+            row.extraction.as_ref().and_then(|e| e.cut_at),
+            Some(evaluated.len())
+        );
+        assert_eq!(
+            row.n_predict,
+            Some(crate::core::bench::codebase::FUNCTION_BODY_MAX_TOKENS)
+        );
+        assert_eq!(
+            bodies[0]["n_predict"],
+            crate::core::bench::codebase::FUNCTION_BODY_MAX_TOKENS
+        );
     }
 
     #[test]

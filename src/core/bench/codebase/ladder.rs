@@ -640,8 +640,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        Known, Score, Scored, Symbols, Tier, edit_sim, exact, file_use_symbols, ident_f1,
-        identifiers, parse, repo_symbols, score_all, symbols,
+        ExtractionOutcome, Known, Score, Scored, StoredText, Symbols, Tier, edit_sim,
+        evaluated_fill, exact, file_use_symbols, ident_f1, identifiers, parse, repo_symbols,
+        score_all, stored_tier, symbols,
     };
     use crate::core::bench::codebase::{CodebaseTask, Excluded, TaskTier};
 
@@ -793,6 +794,79 @@ mod tests {
             })
             .expect("function_body is scored on tier 3");
         assert!(f1 < 1.0 && f1 > 0.0, "{f1}");
+    }
+
+    #[test]
+    fn a_function_body_keeps_a_valid_alternative_longer_than_the_gold() {
+        let prediction = "let parts = values.chunks(2);\n    parts.flatten().sum()";
+        let short_gold = "values.iter().sum()";
+        let long_gold = "let total = values.iter().sum();\n    total";
+
+        let short = evaluated_fill(TaskTier::FunctionBody, short_gold, prediction);
+        let long = evaluated_fill(TaskTier::FunctionBody, long_gold, prediction);
+
+        assert_eq!(short.text, prediction);
+        assert_eq!(
+            short, long,
+            "body extraction is independent of the reference"
+        );
+        assert_eq!(short.outcome, ExtractionOutcome::Unchanged);
+        assert_eq!(short.cut_at, None);
+    }
+
+    #[test]
+    fn a_function_body_stops_before_the_first_unmatched_closing_brace() {
+        let prediction = "if ready {\n        work();\n    }\n    finish()\n}\nfn leaked() {}";
+        let cut_at = prediction.find("}\nfn leaked").expect("runaway boundary");
+        let fill = evaluated_fill(TaskTier::FunctionBody, "finish()", prediction);
+
+        assert_eq!(fill.text, &prediction[..cut_at]);
+        assert_eq!(fill.outcome, ExtractionOutcome::FunctionBoundary);
+        assert_eq!(fill.cut_at, Some(cut_at));
+    }
+
+    #[test]
+    fn body_boundaries_ignore_literals_and_nested_block_comments() {
+        let prediction = "let text = r#\"}\"#;\n    /* outer } /* nested } */ still } */\n    done()\n}\nfn leaked() {}";
+        let cut_at = prediction.find("}\nfn leaked").expect("runaway boundary");
+        let fill = evaluated_fill(TaskTier::FunctionBody, "done()", prediction);
+
+        assert_eq!(fill.text, &prediction[..cut_at]);
+        assert_eq!(fill.cut_at, Some(cut_at));
+    }
+
+    #[test]
+    fn line_level_tasks_keep_the_existing_gold_line_boundary() {
+        let fill = evaluated_fill(
+            TaskTier::InFile,
+            "let a = 1;",
+            "let a = 1;\n    let leaked = 2;\n",
+        );
+
+        assert_eq!(fill.text, "let a = 1;");
+        assert_eq!(fill.outcome, ExtractionOutcome::GoldLineBoundary);
+        assert_eq!(fill.cut_at, Some("let a = 1;\n".len()));
+    }
+
+    #[test]
+    fn stored_semantic_tiers_read_the_persisted_evaluated_fill() {
+        let gold = "finish()";
+        let raw = "if ready { work(); }\nfinish()\n}\nfn leaked() {}";
+        let evaluated = "if ready { work(); }\nfinish()\n";
+        let text = StoredText {
+            tier: TaskTier::FunctionBody,
+            gold,
+            prediction: raw,
+            evaluated_prediction: Some(evaluated),
+            prefix: "fn f() {\n",
+            suffix: "}\n",
+        };
+
+        assert_eq!(
+            stored_tier(Tier::IdentF1, &text),
+            Score::Value(ident_f1(gold, evaluated))
+        );
+        assert_eq!(stored_tier(Tier::Parse, &text), Score::Value(1.0));
     }
 
     #[test]

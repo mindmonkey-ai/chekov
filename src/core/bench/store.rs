@@ -3063,6 +3063,31 @@ mod tests {
         assert!(codebase.also_first_uses.is_empty());
         assert_eq!(codebase.excluded.cross_file_withheld, 0);
         assert_eq!(codebase.excluded.cfg_test_lines, 0);
+        assert_eq!(codebase.evaluated_prediction, None);
+        assert_eq!(codebase.extraction, None);
+    }
+
+    #[test]
+    fn evaluated_fill_and_extraction_metadata_round_trip_beside_raw_evidence() {
+        let text = r#"{"tier":"function_body","file":"src/a.rs","line":7,
+            "label":"boundary-scanned (not AST)","gold":"let a = 1;",
+            "prediction":"let b = 2;\nlet a = b - 1;\n}\nfn leaked() {}",
+            "evaluated_prediction":"let b = 2;\nlet a = b - 1;\n",
+            "extraction":{"outcome":"function_boundary","cut_at":26},
+            "prefix":"fn f() {\n","suffix":"\n}\n",
+            "excluded":{"doc_comment":0,"cross_file":"n/a: same-file"}}"#;
+        let row: super::CodebaseRow = serde_json::from_str(text).expect("new row loads");
+
+        assert!(row.prediction.contains("fn leaked"));
+        assert!(
+            !row.evaluated_prediction
+                .as_deref()
+                .unwrap_or_default()
+                .contains("leaked")
+        );
+        assert_eq!(row.extraction.as_ref().and_then(|e| e.cut_at), Some(26));
+        let encoded = serde_json::to_string(&row).expect("serialise");
+        assert!(encoded.contains("\"outcome\":\"function_boundary\""));
     }
 
     /// The row a run with `--allow-exec` writes, and the one a run without it

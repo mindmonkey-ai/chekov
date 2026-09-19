@@ -374,6 +374,22 @@ mod tests {
     }
 
     #[test]
+    fn the_judge_reads_the_persisted_evaluated_fill_not_the_raw_runaway() {
+        let mut stored = row(
+            TaskTier::FunctionBody,
+            "x = 1;",
+            "x = 1;\n}\nfn leaked() {}",
+        );
+        stored.evaluated_prediction = Some("x = 1;\n".into());
+        stored.extraction = Some(crate::core::bench::store::ExtractionRow {
+            outcome: crate::core::bench::codebase::ladder::ExtractionOutcome::FunctionBoundary,
+            cut_at: Some("x = 1;\n".len()),
+        });
+
+        assert!(matches!(eligibility(&stored), Some(Eligibility::Identical)));
+    }
+
+    #[test]
     fn the_two_requests_swap_a_and_b_and_bound_the_context() {
         let stored = row(TaskTier::FunctionBody, "GOLD;", "PRED;");
         let Some(Eligibility::Judge(pair)) = eligibility(&stored) else {
