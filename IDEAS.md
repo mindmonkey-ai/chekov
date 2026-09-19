@@ -1883,3 +1883,12 @@ and 3 are unchanged and remain the discriminators. If a campaign returns a flat
 spread on 1 and 4 while 2 and 3 separate the models, harden 1 and 4 out of the
 ten reserve slots rather than concluding the candidates are equivalent.
 Decisions 2 and 3 above remain open.
+
+**Correction 2026-09-19.** The 2026-09-16 record above says `gpt-oss-120b` is
+gone from `models/`. It is not: the registry entry is intact and its F16
+weights sit at `/Volumes/jane/models/gpt-oss-120b@ff1a82da6ad4` (the
+external volume that also holds the 27B, the 397B and MiniMax). The
+preflight trio — Qwen-9B / Ornith-35B / GPT-OSS-120B — can be reproduced
+as-is, so the first half of decision 3 is closed. Still open: the spread
+threshold that counts as discriminating, and decision 2 (license exposure,
+now moot in practice since the fixture is compiled in and public).
