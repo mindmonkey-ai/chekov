@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::masker::balance;
+use super::masker::{balance, first_unmatched_closing_brace};
 use super::{CodebaseTask, TaskTier};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -42,6 +42,23 @@ impl Tier {
 pub enum Score {
     Value(f64),
     Skipped(&'static str),
+}
+
+/// Why the evaluated fill differs from the raw model output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionOutcome {
+    Unchanged,
+    GoldLineBoundary,
+    FunctionBoundary,
+}
+
+/// The canonical text consumed by semantic grading, judging, and execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluatedFill {
+    pub text: String,
+    pub outcome: ExtractionOutcome,
+    pub cut_at: Option<usize>,
 }
 
 const EXEC_SKIPPED: &str = "slice B2 (--allow-exec)";
@@ -250,6 +267,9 @@ pub struct StoredText<'a> {
     pub tier: TaskTier,
     pub gold: &'a str,
     pub prediction: &'a str,
+    /// Persisted canonical fill on new rows. `None` means a legacy row, whose
+    /// original gold-line grading contract remains in force when re-read.
+    pub evaluated_prediction: Option<&'a str>,
     pub prefix: &'a str,
     pub suffix: &'a str,
 }
@@ -257,9 +277,8 @@ pub struct StoredText<'a> {
 /// One tier over stored text. Tier 5 needs the repo's symbol set, which the
 /// worktree took with it, so it is scored at run time and skipped here.
 ///
-/// Tiers 1–4 read the fill trimmed to the gold's line count (§6, amended
-/// 2026-08-30). Tier 5 keeps the whole prediction: what it asks is which
-/// identifiers the model emitted, and it emitted all of them.
+/// Tiers 1–4 read the persisted canonical fill. Tier 5 is scored at run time
+/// from those same bytes because its repository symbol set is not persisted.
 #[must_use]
 pub fn stored_tier(tier: Tier, text: &StoredText) -> Score {
     // A cross-file span is a statement, exactly as an `in_file` span is: same
@@ -267,15 +286,61 @@ pub fn stored_tier(tier: Tier, text: &StoredText) -> Score {
     // there. Only `function_body`, where many different bodies are correct,
     // skips them.
     let line_level = text.tier != TaskTier::FunctionBody;
-    let fill = trimmed_to_gold(text.gold, text.prediction);
+    let legacy;
+    let fill = if let Some(fill) = text.evaluated_prediction {
+        fill
+    } else {
+        legacy = trimmed_to_gold(text.gold, text.prediction);
+        &legacy
+    };
     match tier {
-        Tier::Exact if line_level => Score::Value(exact(text.gold, &fill)),
-        Tier::EditSim if line_level => Score::Value(edit_sim(text.gold, &fill)),
+        Tier::Exact if line_level => Score::Value(exact(text.gold, fill)),
+        Tier::EditSim if line_level => Score::Value(edit_sim(text.gold, fill)),
         Tier::Exact | Tier::EditSim => Score::Skipped(BODY_SKIPPED),
-        Tier::IdentF1 => Score::Value(ident_f1(text.gold, &fill)),
-        Tier::Parse => Score::Value(parse(text.prefix, &fill, text.suffix)),
+        Tier::IdentF1 => Score::Value(ident_f1(text.gold, fill)),
+        Tier::Parse => Score::Value(parse(text.prefix, fill, text.suffix)),
         Tier::Symbols => Score::Skipped(SYMBOLS_AT_RUN_TIME),
         Tier::Compile | Tier::Test => Score::Skipped(EXEC_SKIPPED),
+    }
+}
+
+/// Canonical evaluated text for one raw prediction.
+///
+/// Function bodies stop at their first lexical unmatched `}` and never consult
+/// the reference. Other task classes retain the gold-line boundary contract.
+#[must_use]
+pub fn evaluated_fill(tier: TaskTier, gold: &str, prediction: &str) -> EvaluatedFill {
+    if tier == TaskTier::FunctionBody {
+        return first_unmatched_closing_brace(prediction).map_or_else(
+            || EvaluatedFill {
+                text: prediction.to_owned(),
+                outcome: ExtractionOutcome::Unchanged,
+                cut_at: None,
+            },
+            |at| EvaluatedFill {
+                text: prediction[..at].to_owned(),
+                outcome: ExtractionOutcome::FunctionBoundary,
+                cut_at: Some(at),
+            },
+        );
+    }
+    let text = trimmed_to_gold(gold, prediction);
+    if text == prediction {
+        return EvaluatedFill {
+            text,
+            outcome: ExtractionOutcome::Unchanged,
+            cut_at: None,
+        };
+    }
+    let cut_at = prediction
+        .split_inclusive('\n')
+        .take(gold.lines().count())
+        .map(str::len)
+        .sum();
+    EvaluatedFill {
+        text,
+        outcome: ExtractionOutcome::GoldLineBoundary,
+        cut_at: Some(cut_at),
     }
 }
 
@@ -315,10 +380,12 @@ pub fn score_all(s: &Scored) -> Vec<(Tier, Score)> {
         file_uses: &file_uses,
         context: &context,
     };
+    let evaluated = evaluated_fill(t.tier, &t.gold, s.prediction);
     let text = StoredText {
         tier: t.tier,
         gold: &t.gold,
         prediction: s.prediction,
+        evaluated_prediction: Some(&evaluated.text),
         prefix: &t.prefix,
         suffix: &t.suffix,
     };
@@ -328,7 +395,7 @@ pub fn score_all(s: &Scored) -> Vec<(Tier, Score)> {
         .chain([
             (
                 Tier::Symbols,
-                Score::Value(symbols(s.prediction, &t.gold, &known)),
+                Score::Value(symbols(&evaluated.text, &t.gold, &known)),
             ),
             (Tier::Compile, Score::Skipped(EXEC_SKIPPED)),
             (Tier::Test, Score::Skipped(EXEC_SKIPPED)),
@@ -823,6 +890,30 @@ mod tests {
         assert_eq!(fill.text, &prediction[..cut_at]);
         assert_eq!(fill.outcome, ExtractionOutcome::FunctionBoundary);
         assert_eq!(fill.cut_at, Some(cut_at));
+    }
+
+    #[test]
+    fn function_body_symbols_ignore_identifiers_after_the_boundary() {
+        let task = task(TaskTier::FunctionBody, "finish()");
+        let score = |prediction| {
+            score_all(&Scored {
+                task: &task,
+                prediction,
+                symbols: &Symbols(BTreeSet::new()),
+                extra: "",
+            })
+            .into_iter()
+            .find_map(|(tier, score)| match (tier, score) {
+                (Tier::Symbols, Score::Value(value)) => Some(value),
+                _ => None,
+            })
+            .expect("tier 5 has a value")
+        };
+
+        assert!(approx(
+            score("finish()"),
+            score("finish()\n}\nfabricated()")
+        ));
     }
 
     #[test]

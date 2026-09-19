@@ -16,6 +16,13 @@ use serde::{Deserialize, Serialize};
 /// Printed once per run: the masks come from a brace scanner, not a parser.
 pub const MASK_LABEL: &str = "boundary-scanned (not AST)";
 
+/// The codebase grader's versioned contract. It rides in `prompt_set_hash`,
+/// so runs from before and after a grading change cannot compare as peers.
+pub const GRADING_VERSION: &str = "function-body-lexical-v1";
+
+/// Reference-independent generation budget for function-body tasks.
+pub const FUNCTION_BODY_MAX_TOKENS: u32 = 1_440;
+
 /// What the with-extra arm's `task_id` ends in (§5).
 ///
 /// `run::arms` writes it and `base_id` strips it back off to pair the two

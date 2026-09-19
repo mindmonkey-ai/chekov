@@ -2138,6 +2138,8 @@ mod tests {
                 label: "fn f".into(),
                 gold: GOLD.into(),
                 prediction: case.prediction.into(),
+                evaluated_prediction: None,
+                extraction: None,
                 prefix: "fn f() {".into(),
                 suffix: "}".into(),
                 excluded: Excluded {

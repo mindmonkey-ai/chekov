@@ -135,6 +135,17 @@ fn gold_lines(task: &CodebaseTask) -> usize {
     task.gold.lines().count().max(1)
 }
 
+/// Generation budget for one codebase task. Function bodies are bounded by a
+/// fixed instrument policy; line-level tasks retain their historical scale.
+fn n_predict(task: &CodebaseTask) -> u32 {
+    match task.tier {
+        super::TaskTier::FunctionBody => super::FUNCTION_BODY_MAX_TOKENS,
+        super::TaskTier::InFile | super::TaskTier::CrossFileFirst => {
+            runner::n_predict_for(gold_lines(task))
+        }
+    }
+}
+
 /// One codebase task through `/infill`, or the reason it could not be
 /// measured.
 ///
@@ -157,7 +168,7 @@ fn infill_or_latch(
     let infill_task = InfillTask {
         prefix: &task.prefix,
         suffix: &task.suffix,
-        gold_lines: gold_lines(task),
+        n_predict: n_predict(task),
         extra: extra_chunk(crossing),
     };
     match cross_fim(wire, crossing.fim, &infill_task) {
@@ -214,6 +225,7 @@ impl Unavailable {
 /// `record_codebase_task` at 3 params).
 struct Recorded<'a> {
     outcome: Result<ProbeArtifact, Unavailable>,
+    evaluated: Option<ladder::EvaluatedFill>,
     symbols: &'a ladder::Symbols,
     arm: &'a Arm,
     /// Tiers 6-7, when the run was allowed to build. `None` when it was not,
@@ -279,6 +291,51 @@ fn cross_file_line(task: &CodebaseTask, arm: &Arm) -> String {
     }
 }
 
+struct RowData<'a> {
+    prediction: String,
+    unsupported: bool,
+    evaluated: Option<ladder::EvaluatedFill>,
+    symbols_score: Option<f64>,
+    arm: &'a Arm,
+    exec: Option<store::ExecRow>,
+}
+
+fn codebase_row(task: &CodebaseTask, data: RowData<'_>) -> store::CodebaseRow {
+    let (evaluated_prediction, extraction) = data.evaluated.map_or((None, None), |fill| {
+        (
+            Some(fill.text),
+            Some(store::ExtractionRow {
+                outcome: fill.outcome,
+                cut_at: fill.cut_at,
+            }),
+        )
+    });
+    store::CodebaseRow {
+        tier: task.tier,
+        file: task.file.clone(),
+        line: task.line,
+        label: MASK_LABEL.to_owned(),
+        gold: task.gold.clone(),
+        prediction: data.prediction,
+        evaluated_prediction,
+        extraction,
+        prefix: task.prefix.clone(),
+        suffix: task.suffix.clone(),
+        excluded: super::Excluded {
+            cross_file: cross_file_line(task, data.arm),
+            ..task.excluded.clone()
+        },
+        symbols_score: data.symbols_score,
+        unsupported: data.unsupported,
+        arm: data.arm.label.map(str::to_owned),
+        extra: data.arm.with_extra.then(|| task.extra.clone()).flatten(),
+        also_first_uses: task.also_first_uses.clone(),
+        name: task.name.clone(),
+        n_predict: Some(n_predict(task)),
+        exec: data.exec,
+    }
+}
+
 /// Assemble and append one codebase row: an answered task's raw prediction
 /// with tier 5 scored against the worktree's symbol set, or an unavailable
 /// one's reason with no tier-5 score at all — a task nobody answered has no
@@ -290,41 +347,37 @@ fn record_codebase_task(
 ) -> Result<(), ChekovError> {
     let Recorded {
         outcome,
+        evaluated,
         symbols,
         arm,
         exec,
     } = recorded;
     let parts = row_parts(outcome);
     let symbols_score = tier_five(task, &parts, &Scoring { symbols, arm });
+    let RowParts {
+        measure,
+        grade,
+        prediction,
+        unsupported,
+    } = parts;
     sink.writer.append(store::Task {
         suite: "codebase".into(),
         task_id: arm.id.clone(),
-        measure: parts.measure,
-        grade: parts.grade,
+        measure,
+        grade,
         transport: store::Transport::Buffered,
         reply: None,
-        codebase: Some(store::CodebaseRow {
-            tier: task.tier,
-            file: task.file.clone(),
-            line: task.line,
-            label: MASK_LABEL.to_owned(),
-            gold: task.gold.clone(),
-            prediction: parts.prediction,
-            prefix: task.prefix.clone(),
-            suffix: task.suffix.clone(),
-            excluded: super::Excluded {
-                cross_file: cross_file_line(task, arm),
-                ..task.excluded.clone()
+        codebase: Some(codebase_row(
+            task,
+            RowData {
+                prediction,
+                unsupported,
+                evaluated,
+                symbols_score,
+                arm,
+                exec,
             },
-            symbols_score,
-            unsupported: parts.unsupported,
-            arm: arm.label.map(str::to_owned),
-            extra: arm.with_extra.then(|| task.extra.clone()).flatten(),
-            also_first_uses: task.also_first_uses.clone(),
-            name: task.name.clone(),
-            n_predict: Some(runner::n_predict_for(gold_lines(task))),
-            exec,
-        }),
+        )),
         judge: None,
         tool_loop: None,
     })
@@ -392,8 +445,8 @@ impl ExecTiming {
 
 /// What `exec_row` needs beyond the prepared set and the task (§4).
 struct ExecInput<'a> {
-    /// The raw prediction, or `None` when the crossing was never answered.
-    prediction: Option<&'a str>,
+    /// The canonical evaluated fill, or `None` when nobody answered.
+    fill: Option<&'a str>,
     timing: &'a std::cell::RefCell<ExecTiming>,
 }
 
@@ -403,22 +456,17 @@ fn exec_row(
     task: &CodebaseTask,
     parts: &ExecInput,
 ) -> Result<Option<store::ExecRow>, ChekovError> {
-    let Some(prediction) = parts.prediction else {
+    let Some(fill) = parts.fill else {
         return Ok(None);
     };
     match &prepared.exec {
         super::exec::Exec::Off => Ok(None),
         super::exec::Exec::Unavailable(reason) => Ok(Some(store::ExecRow::skipped(reason))),
         super::exec::Exec::Ready(env) => {
-            let fill = ladder::trimmed_to_gold(&task.gold, prediction);
             let hidden = prepared.hidden.iter().find(|h| h.task_id == task.id);
             let row = super::exec::exec_crossing_with(
                 env,
-                &super::exec::Crossing {
-                    task,
-                    fill: &fill,
-                    hidden,
-                },
+                &super::exec::Crossing { task, fill, hidden },
             )?;
             parts.timing.borrow_mut().record(row.check_secs);
             Ok(Some(row))
@@ -451,12 +499,15 @@ pub fn run_codebase(
                 runtime: sink.runtime.clone(),
             };
             let outcome = infill_or_latch(wire, &crossing, &mut unsupported);
-            let prediction = outcome.as_ref().ok().map(|a| a.anthropic_body.clone());
+            let evaluated = outcome
+                .as_ref()
+                .ok()
+                .map(|a| ladder::evaluated_fill(task.tier, &task.gold, &a.anthropic_body));
             let exec = exec_row(
                 prepared,
                 task,
                 &ExecInput {
-                    prediction: prediction.as_deref(),
+                    fill: evaluated.as_ref().map(|fill| fill.text.as_str()),
                     timing: &timing,
                 },
             )?;
@@ -465,6 +516,7 @@ pub fn run_codebase(
                 task,
                 Recorded {
                     outcome,
+                    evaluated,
                     symbols: &prepared.symbols,
                     arm: &arm,
                     exec,

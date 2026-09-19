@@ -2674,8 +2674,13 @@ fn head_corpus(
 /// never carry the same hash (spec §6). A foreign run with no codebase suite
 /// sends no FIM prompt at all, and keeps today's value.
 fn wrapped_prompt_hash(inputs: &HeadInputs, base: String) -> String {
-    if inputs.runtime.is_some() && inputs.codebase.is_some() {
-        return crate::core::bench::runner::chat_fim_hash(&base);
+    if inputs.codebase.is_some() {
+        let fim = inputs
+            .runtime
+            .map_or(crate::core::bench::runner::FimTransport::Infill, |_| {
+                crate::core::bench::runner::FimTransport::Chat
+            });
+        return crate::core::bench::runner::codebase_hash(&base, fim);
     }
     base
 }
@@ -3752,13 +3757,28 @@ mod tests {
         );
     }
 
+    fn assert_codebase_hashes(base: &str, local: &str, chat: &str) {
+        use crate::core::bench::runner::{FimTransport, codebase_hash};
+        assert_eq!(
+            local,
+            codebase_hash(base, FimTransport::Infill),
+            "the local arm pins the grader and fixed body cap"
+        );
+        assert_ne!(local, base, "legacy runs have a different identity");
+        assert_eq!(
+            chat,
+            codebase_hash(base, FimTransport::Chat),
+            "the chat arm also pins its prompt template"
+        );
+        assert_ne!(chat, local, "the two FIM transports are distinct");
+    }
+
     /// Every codebase run hashes the grading and budget policy; the chat arm
     /// additionally hashes its template, so neither transport can impersonate
     /// the other or a pre-ruling run.
     #[test]
     fn a_codebase_hash_pins_the_instrument_and_the_fim_transport() {
         use crate::core::bench::lifecycle::Suite;
-        use crate::core::bench::runner::FimTransport;
         let plan = plan_fixture();
         let bench_cfg = crate::core::config::BenchSection::default();
         let local = super::HeadInputs {
@@ -3792,18 +3812,7 @@ mod tests {
         };
         let (wrapped, foreign_corpus) =
             super::head_corpus(&foreign, &bench_cfg).expect("chat hash");
-        assert_eq!(
-            local_hash,
-            crate::core::bench::runner::codebase_hash(&base, FimTransport::Infill),
-            "the local arm pins the grader and fixed body cap"
-        );
-        assert_ne!(local_hash, base, "legacy runs have a different identity");
-        assert_eq!(
-            wrapped,
-            crate::core::bench::runner::codebase_hash(&base, FimTransport::Chat),
-            "the chat arm also pins its prompt template"
-        );
-        assert_ne!(wrapped, local_hash, "the two FIM transports are distinct");
+        assert_codebase_hashes(&base, &local_hash, &wrapped);
         assert_eq!(
             crate::core::bench::codebase::FUNCTION_BODY_MAX_TOKENS,
             1_440
@@ -4130,6 +4139,8 @@ mod tests {
             label: "<mask>".into(),
             gold: "let a = 1;".into(),
             prediction: "let b = 2;".into(),
+            evaluated_prediction: None,
+            extraction: None,
             prefix: "fn f() {\n".into(),
             suffix: "\n}\n".into(),
             excluded: crate::core::bench::codebase::Excluded::default(),

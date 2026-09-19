@@ -786,13 +786,14 @@ pub struct ExtraChunk<'a> {
     pub text: &'a str,
 }
 
-/// One infill task on the wire: the file before and after the mask, the
-/// gold's line count (to bound `n_predict`), and the other file when this
-/// arm sends one.
+/// One infill task on the wire.
+///
+/// The task-class owner selects the generation budget; the transport receives
+/// it beside the mask and optional extra file.
 pub struct InfillTask<'a> {
     pub prefix: &'a str,
     pub suffix: &'a str,
-    pub gold_lines: usize,
+    pub n_predict: u32,
     pub extra: Option<ExtraChunk<'a>>,
 }
 
@@ -889,6 +890,22 @@ pub fn chat_fim_hash(base: &str) -> String {
     crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
 }
 
+/// Codebase instrument identity: grading policy, body budget, and FIM wire.
+/// The chat template is included only on the transport that sends it.
+#[must_use]
+pub fn codebase_hash(base: &str, fim: FimTransport) -> String {
+    let wire = match fim {
+        FimTransport::Infill => "infill".to_owned(),
+        FimTransport::Chat => format!("chat:{FIM_CHAT_INSTRUCTION}"),
+    };
+    let canonical = format!(
+        "{base}|codebase|grader={}|function_body_max_tokens={}|fim={wire}",
+        crate::core::bench::codebase::GRADING_VERSION,
+        crate::core::bench::codebase::FUNCTION_BODY_MAX_TOKENS
+    );
+    crate::core::hash::sha256_hex(canonical.as_bytes())[..12].to_owned()
+}
+
 /// The reply's first TEXT block — a leading `thinking` block (a reasoning
 /// model's extracted `reasoning_content`, translated ahead of the answer) is
 /// skipped rather than mistaken for the fill. Mirrors `judge::parse_reply`,
@@ -909,12 +926,12 @@ fn chat_text_of(artifact: &ProbeArtifact) -> Result<String, ChekovError> {
 }
 
 /// The chat-completions fill: same pins as `/infill` (`temperature 0`,
-/// `top_k 1`, the gold-bounded budget), one deterministic user message,
+/// `top_k 1`, the task-class budget), one deterministic user message,
 /// crossing the translator exactly as the agentic probes do.
 fn cross_fim_chat(wire: &ProbeWire, task: &InfillTask) -> Result<InfillOutcome, ChekovError> {
     let body = serde_json::json!({
         "model": "claude-sonnet-4",
-        "max_tokens": n_predict_for(task.gold_lines),
+        "max_tokens": task.n_predict,
         "temperature": 0,
         "top_k": 1,
         "messages": [{"role": "user", "content": chat_fim_prompt(task)}],
@@ -946,20 +963,15 @@ pub fn cross_fim(
     }
 }
 
-/// The token budget a gold of this many lines earns. The run loop records
-/// the same number on the row, from here, so what the row says was sent and
-/// what the wire sent cannot drift.
+/// The legacy line-level budget. Function bodies use their fixed class budget.
 #[must_use]
 pub fn n_predict_for(gold_lines: usize) -> u32 {
     u32::try_from((gold_lines * 36).max(64)).unwrap_or(u32::MAX)
 }
 
-/// The `/infill` request body: prefix/suffix, no chat prompt, the pins, the
-/// extra files (one or none), and an `n_predict` bounded by the gold's size
-/// (three tokens per twelve characters of line, floored at 64 so a one-liner
-/// still gets room).
+/// The `/infill` request body: prefix/suffix, no chat prompt, pins, optional
+/// extra file, and the task-class budget selected by the caller.
 fn infill_body(task: &InfillTask, seed: u32) -> Value {
-    let n_predict = n_predict_for(task.gold_lines);
     let input_extra = task.extra.as_ref().map_or_else(
         || serde_json::json!([]),
         |e| serde_json::json!([{ "filename": e.filename, "text": e.text }]),
@@ -969,7 +981,7 @@ fn infill_body(task: &InfillTask, seed: u32) -> Value {
         "input_suffix": task.suffix,
         "prompt": "",
         "input_extra": input_extra,
-        "n_predict": n_predict,
+        "n_predict": task.n_predict,
         "temperature": 0,
         "top_k": 1,
         "seed": seed,
@@ -1554,7 +1566,7 @@ mod tests {
         let task = super::InfillTask {
             prefix: "fn add(a: i32, b: i32) -> i32 {\n",
             suffix: "\n}\n",
-            gold_lines: 1,
+            n_predict: 64,
             extra: None,
         };
         let outcome = super::cross_infill(&wire(&http, &facade, &up), &task).expect("crosses");
@@ -1596,7 +1608,7 @@ mod tests {
         let task = super::InfillTask {
             prefix: "fn f() {\n",
             suffix: "\n}\n",
-            gold_lines: 1,
+            n_predict: 64,
             extra: Some(super::ExtraChunk {
                 filename: "src/defs.rs",
                 text: "pub struct Widget { pub id: u32 }\n",
@@ -1631,7 +1643,7 @@ mod tests {
         let task = super::InfillTask {
             prefix: "fn f() {\n",
             suffix: "\n}\n",
-            gold_lines: 1,
+            n_predict: 64,
             extra: None,
         };
         let Err(err) = super::cross_infill(&wire(&http, &facade, &up), &task) else {
@@ -1669,7 +1681,7 @@ mod tests {
         let task = super::InfillTask {
             prefix: "x",
             suffix: "y",
-            gold_lines: 1,
+            n_predict: 64,
             extra: None,
         };
         match super::cross_infill(&w, &task).expect("a refusal naming infill is an outcome") {
@@ -1685,7 +1697,7 @@ mod tests {
         let task = super::InfillTask {
             prefix: "fn a() {",
             suffix: "}",
-            gold_lines: 1,
+            n_predict: 64,
             extra: Some(super::ExtraChunk {
                 filename: "lib.rs",
                 text: "pub fn b() {}",
@@ -1747,7 +1759,7 @@ mod tests {
         let task = super::InfillTask {
             prefix: "fn a() {\n",
             suffix: "\n}\n",
-            gold_lines: 1,
+            n_predict: 64,
             extra: None,
         };
         let outcome =
@@ -1767,7 +1779,7 @@ mod tests {
         assert_eq!(sent["temperature"], 0);
         assert_eq!(sent["top_k"], 1);
         assert_eq!(sent["seed"], 42);
-        assert_eq!(sent["max_tokens"], super::n_predict_for(task.gold_lines));
+        assert_eq!(sent["max_tokens"], task.n_predict);
         assert_eq!(sent["stream"], true, "{sent}");
     }
 
@@ -1787,7 +1799,7 @@ mod tests {
         let task = super::InfillTask {
             prefix: "fn a() {\n",
             suffix: "\n}\n",
-            gold_lines: 1,
+            n_predict: 64,
             extra: None,
         };
         super::cross_fim(
@@ -1829,7 +1841,7 @@ mod tests {
         let task = super::InfillTask {
             prefix: "fn a() {\n",
             suffix: "\n}\n",
-            gold_lines: 1,
+            n_predict: 64,
             extra: None,
         };
         let outcome =
@@ -1858,7 +1870,7 @@ mod tests {
         let task = super::InfillTask {
             prefix: "fn a() {\n",
             suffix: "\n}\n",
-            gold_lines: 1,
+            n_predict: 64,
             extra: None,
         };
         let Err(err) =

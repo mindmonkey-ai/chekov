@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::bench::codebase::ladder::{self, Score, Tier, as_f64};
+use crate::core::bench::codebase::ladder::{self, ExtractionOutcome, Score, Tier, as_f64};
 use crate::core::bench::codebase::{Excluded, ExtraFile, TaskTier};
 use crate::core::bench::stamp::{Stamp, first_mismatch, mismatch_error};
 use crate::core::bench::sweep::curve_note;
@@ -282,6 +282,12 @@ pub struct CodebaseRow {
     pub label: String,
     pub gold: String,
     pub prediction: String,
+    /// Canonical fill used by tiers 3-4, the judge, and tiers 6-7. Raw output
+    /// remains in `prediction`; old rows load without this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluated_prediction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<ExtractionRow>,
     pub prefix: String,
     pub suffix: String,
     pub excluded: Excluded,
@@ -323,6 +329,15 @@ pub struct CodebaseRow {
     /// that executed nothing, not runs that failed to compile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecRow>,
+}
+
+/// How the canonical evaluated fill was obtained from the raw prediction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractionRow {
+    pub outcome: ExtractionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_at: Option<usize>,
 }
 
 /// The crossing's stop reason — why a graded row's visible answer is what it is.
@@ -1067,7 +1082,7 @@ fn codebase_header(header: &Header) -> String {
     format!(
         "codebase     {} tasks, {} crossings, from {} files ({}) — {}; context: same-file, \
          plus the defining file for cross_file_first (engine window ≤ n_batch; extra from \
-         ctx); tiers 1-4 score the first gold_lines lines of each fill{}{}{}{}\n",
+         ctx); line tasks use gold_lines; function bodies use lexical closing-brace extraction{}{}{}{}\n",
         distinct_tasks(kept),
         kept.len(),
         distinct_files(kept),
@@ -1816,6 +1831,7 @@ pub(crate) fn recompute(c: &CodebaseRow, tier: Tier) -> Score {
             tier: c.tier,
             gold: &c.gold,
             prediction: &c.prediction,
+            evaluated_prediction: c.evaluated_prediction.as_deref(),
             prefix: &c.prefix,
             suffix: &c.suffix,
         },
@@ -2964,6 +2980,8 @@ mod tests {
                 label: "boundary-scanned (not AST)".into(),
                 gold: fixture.gold.into(),
                 prediction: fixture.prediction.into(),
+                evaluated_prediction: None,
+                extraction: None,
                 prefix: "fn f() {\n".into(),
                 suffix: "\n}\n".into(),
                 excluded: Excluded {
@@ -3335,8 +3353,9 @@ mod tests {
         let rendered = render_run(&RunLog::load(writer.dir()).expect("load"));
         assert!(
             rendered.contains(
-                "(engine window ≤ n_batch; extra from ctx); tiers 1-4 score the first \
-                 gold_lines lines of each fill; tests elided: 21 lines in 2 files"
+                "(engine window ≤ n_batch; extra from ctx); line tasks use gold_lines; \
+                 function bodies use lexical closing-brace extraction; tests elided: 21 lines \
+                 in 2 files"
             ),
             "{rendered}"
         );
@@ -3366,8 +3385,8 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "(engine window ≤ n_batch; extra from ctx); tiers 1-4 score the first \
-                 gold_lines lines of each fill (1 unavailable, excluded)"
+                "(engine window ≤ n_batch; extra from ctx); line tasks use gold_lines; \
+                 function bodies use lexical closing-brace extraction (1 unavailable, excluded)"
             ),
             "{rendered}"
         );
