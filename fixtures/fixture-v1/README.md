@@ -14,7 +14,7 @@ fixture-v1/
   src/            the materialized crate (compiled-in, shown to the candidate)
     domain/       entities + invariants stated only in comments
     store/        a trait and two impls with deliberately different failure
-                  semantics, plus the replay/lifetime helper
+                  semantics, plus replay helpers
     projection/   a fold over a sliding window
     api/          the command dispatcher containing the near-miss API pair
   hidden/         held-out assertions — NEVER materialized into any prompt
@@ -39,16 +39,10 @@ grader injects:
 
 | # | Device | Masked source | Held-out file | Tier |
 |---|--------|---------------|---------------|------|
-| 1 | Cross-file first-use mask + capacity | `src/store/mod.rs` `LimitedStore::record` | `hidden/store_limited_full.rs` | 7 |
 | 2 | Near-miss API (central discriminator) | `src/api/mod.rs` `handle_credit` | `hidden/near_miss_api.rs` | 7 |
 | 3 | Invariant trap — money is `i128` cents, never `f64` | `src/domain/money.rs` `from_str` | `hidden/invariant_exact.rs` | 7 |
-| 4 | Move-capture closure (compile gate) | `src/store/replay.rs` `replay_filtered` | `hidden/lifetime_knot.rs` | 6 |
-
-**Device 1** — the masked capacity check is the first use of `StoreError::Full`
-and the only place a `LedgerEntry` triggers a hard rejection; `LedgerEntry` and
-`StoreError` are defined two modules away, so reading only this file cannot
-resolve them. A candidate that unconditionally `push`es passes the obvious
-assertion but leaves the balance of a full store wrong.
+| 5 | Integer-remainder split conserves money | `src/domain/money.rs` `split_evenly` | `hidden/split_conserves.rs` | 7 |
+| 6 | Exact overdraft boundary | `src/domain/ledger.rs` `debit_allowed` | `hidden/debit_boundary.rs` | 7 |
 
 **Device 2** — `apply_entry` and `append_entry` both compile and both return
 `Ok`; only `apply_entry` advances the projection. Choosing the wrong one fails
@@ -60,24 +54,25 @@ passes `from_str("0.01")` but underflows the cents by one on `2499.95`
 (`249994` via float, `249995` via str-path). The invariant is stated only in a
 comment in `domain/mod.rs`.
 
-> Note: the capability-spec's concrete example `8014.35` does **not** trap under
-> `as i128` (both paths give `801435`). `2499.95` is the real invariant
-> candidate and is what the held-out assertion pins.
+**Device 5** — integer division alone drops indivisible cents. The contract
+requires every share to sum back to the exact total, including below zero, with
+the Euclidean remainder distributed to the earliest shares. The tempting
+`total / parts` body compiles but fails the held-out conservation cases. Its
+body is followed only by an elided test module, preventing FIM suffix runaway.
 
-**Device 4** — the signature is given; only the body is masked, so what is
-graded is the body's capture. The predicate closure has to `move`-capture
-`filter` for the declared `'a`: a closure that borrows `filter` from the
-function frame instead does not live as long as the returned iterator and fails
-to compile. Graded by the **compile gate** (tier 6), not the test gate.
+**Device 6** — an overdraft is strictly greater than the current balance. The
+tempting `< balance` predicate compiles but refuses a debit equal to the
+balance. `debit_allowed` is a short exhaustive match at end of file, with no
+similar-signature method for an infill model to continue into.
 
 ## Scoring tiers (capability-spec §9)
 
-Tiers 6 and 7 are the ones this slice uses:
+This slice uses tier 7, after every fill passes tier 6:
 
 - **Tier 6 — compile gate:** `cargo check` (JSON diagnostics). A body the
-  candidate writes must still compile. Device 4 is graded here.
-- **Tier 7 — test gate:** run only the specific covering test. Devices 1–3 are
-  graded here.
+  candidate writes must still compile before a held-out test can grade it.
+- **Tier 7 — test gate:** run only the specific covering test. All four devices
+  are graded here.
 
 Tiers 1–2 (whitespace exact match, edit similarity) are line-level and would
 punish semantically-correct alternative implementations and reward formatting
@@ -103,18 +98,15 @@ user repo's.
 
 ## Release-gate status — NOT cleared
 
-Per `IDEAS.md` (2026-09-16) and `capability-spec.md` §9, this slice is
-**release-gated** and the gate is **unmet**. It does not ship compiled-in until
-it has been measured against **three models of clearly different capability**
-with a real spread published.
+Per `IDEAS.md` and `capability-spec.md` §9, this compiled-in slice remains
+**release-gated**: it ships, but no published capability number rests on it
+until three models of clearly different capability produce a real spread.
 
-This work authors the content slice that makes the gate *measurable in the
-future*; it does not clear the gate. Concretely:
-
-- **Angle A (release gate) is unmet.** No three-model campaign has run on this
-  fixture. The preflight trio in `IDEAS.md` listed `gpt-oss-120b`, which is
-  **gone** from `models/` — only `gpt-oss-20b` remains — so even the preflight
-  set can no longer be reproduced as-is.
+- **Angle A (release gate) remains unmet.** Two three-model campaigns on older
+  corpus ids failed acceptance: the original devices saturated, and the first
+  hardening attempt measured FIM suffix runaway rather than capability. Corpus
+  `fixture-v1:068b719a1d81` replaces those runaway-prone bodies and must be
+  measured independently before any ruling changes.
 - **Angle B (runtime detector)** will be applied at run time: when every
   candidate scores above 90% or below 10% on a tier, the tier is reported, not
   ranked.
@@ -126,20 +118,21 @@ future*; it does not clear the gate. Concretely:
   leakage of the *answers*, not the *prompts*. Codebase mode (a private repo) is
   the durable signal; the fixture is the convenient one.
 
-## Verified before shipping
+## Verification
 
-- In the materialized tree: `cargo build` — warning-free; `cargo test` — 20
-  unit tests pass.
+- In the materialized tree: clippy is warning-free and 21 unit tests pass.
 - All four held-out assertions compile against the real public API and pass
   against the correct implementation.
-- Each device confirmed to discriminate: a plausible wrong body for every device
-  fails its hidden assertion (devices 1–3 by value, device 4 by failing to
-  compile).
+- Devices 5 and 6 are exercised end to end by the real-cargo gated test: each
+  plausible wrong body compiles, then fails only its hidden assertion; each
+  gold body passes.
+- Prompt assembly resolves all four devices in order and withholds each gold
+  body and every checked held-out answer literal.
 
 ## Scope
 
-Content only. Nothing here is wired into production `chekov` (`src/`). The
-`manifest.toml` + `hidden/` mechanism is a contract for the not-yet-built
-materialization/grading pipeline; it names the pieces rather than implementing
-the plumbing. See `capability-spec.md` §9 and `IDEAS.md` for the release-gate
-reconciliation.
+The content remains isolated from chekov's production behavior, but it is
+compiled into the binary by `build.rs`. The manifest-driven fixture pipeline
+materializes it into a clean scratch repository, assembles prompts through
+codebase mode, and injects exactly one held-out test for each tier-7 crossing.
+See `capability-spec.md` §9 and `IDEAS.md` for the release-gate record.

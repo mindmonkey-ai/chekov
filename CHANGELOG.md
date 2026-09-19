@@ -321,6 +321,14 @@ All notable changes to chekov are recorded here. The format follows
   in the reason.
 
 ### Changed
+- fixture-v1 device set hardened for the release-gate measurement: retired
+  device-1 (capacity check) and device-4 (lifetime knot) into the reserve
+  slots and added device-5 (integer-remainder money conservation) and device-6
+  (overdraft exact boundary) — two short, end-of-file/device-neighbour-free
+  bodies whose contract is visible in source and whose obvious wrong body
+  compiles but fails a held-out test. `src/domain/tests.rs` is now a
+  `#[cfg(test)]` module so it can never surface as a visible answer key. The
+  corpus id is now `fixture-v1:068b719a1d81`.
 - README gains a "Tuning launch flags" runbook section between "Swapping
   models" and "Updating": the real `--dry-run` plan and the 2026-09-05 spec-
   stage report from this desk, what the `server` line means before you

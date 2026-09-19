@@ -1937,3 +1937,82 @@ ornith-1.5-35b-a3b — about a minute per model.
 the 120B is out for lack of FIM support, not for being gone); the spread
 threshold is "at least two discriminating devices", not a tier-7 delta.
 Decision 2 (license exposure) is moot: the fixture is compiled in and public.
+
+## fixture-v1 hardening — first attempt failed acceptance (2026-09-19)
+
+**What was done.** On `feat/fixture-v1-harden`: retired device-1 (capacity)
+and device-4 (lifetime knot) into the reserve slots, kept device-2 (near-miss
+API) and device-3 (exact cents), and added two new device-3-shaped traps —
+device-5 (`Window::push`: newest-first + drop-oldest, contract in the module
+doc) and device-6 (`Ledger::apply_entry`: a `Debit` of exactly the balance
+must settle, not reject; contract on `LedgerError::InsufficientFunds`). Also
+wrapped `src/domain/tests.rs` in a `#[cfg(test)]` module so it can never
+surface as a visible answer key, and refreshed the `Cargo.toml.in` header.
+New corpus id `fixture-v1:16f311a1699a` (was `78fc70e6de1c`). Both new devices
+were pre-verified against real cargo in a scratch crate: gold passes, the
+obvious wrong body compiles and fails the held-out test.
+
+**Rerun (same stamp, temp 0, engine `dcacec736`, machine `c057455fb3a1`):**
+`eval/20260919T213142Z-qwen3.5-9b`, `eval/20260919T213203Z-qwen3.8-27b`,
+`eval/20260919T213323Z-ornith-1.5-35b-a3b`.
+
+| device | qwen3.5-9b | qwen3.8-27b | ornith-1.5-35b-a3b |
+|---|---|---|---|
+| 2 near-miss API | test-fail | did not compile | test-fail |
+| 3 exact cents | did not compile | pass | test-fail |
+| 5 window slide | pass | did not compile | pass |
+| 6 overdraft | did not compile | did not compile | did not compile |
+| tier 7 | 1 of 4 | 1 of 4 | 1 of 4 |
+
+**Reading — acceptance NOT met, and worse than the first measurement.**
+Tier 7 is a flat 1/1/1. The 27B passes only device-3, exactly one device —
+the target was two. Two failures made the new devices worthless as measured:
+
+- *Device-6 is a compile sink.* All three models fail it on the **compile
+  gate**, never reaching the boundary trap. `apply_entry`'s 15-line gold is
+  followed by the near-identical `append_entry`; under `/infill` every model
+  runs past the masked span and regenerates trailing methods, orphaning the
+  suffix's closing brace (predictions 3585 / 3904 chars against 880 gold). It
+  measures nothing.
+- *Device-5 "discriminated" for the wrong reason.* qwen3.5 and ornith pass it
+  cleanly; the 27B's only miss is the **same runaway** (958 chars, emitted new
+  `pub fn`s), not the newest-first trap. Weakest+strongest pass, mid fails on
+  a formatting artifact — noise, not signal.
+
+**Root cause: FIM boundary runaway, not the traps.** The scratch verification
+hand-wrote the bodies, so it proved the *traps* are sound but could not see
+that a live model overruns the mask when a **similar-signature neighbour sits
+in the suffix** (device-2's `handle_debit`, device-6's `append_entry`, the
+window's sibling accessors). Device-3 survives because its neighbour
+(`from_whole_dollars`) is dissimilar and its body ends cleanly. The first
+measurement already showed this on device-2 (27B "did not compile"); the two
+new devices inherited it.
+
+**Ruling:** `fixture-v1` stays release-gated — the gate is NOT cleared. The
+device change is a regression as-built and is not merged on its own.
+
+**Next — runaway-resistant redesign (in progress):** reshape the new devices
+so the masked body is short and self-contained and its file's *following*
+lines are not a body a model will keep writing (dissimilar or no neighbour, or
+end-of-impl). Re-verify against real cargo AND against the live trio before
+proposing any gate ruling. The `tests.rs` answer-key wrapping and the
+`Cargo.toml.in` refresh stand on their own regardless of the device outcome.
+
+## fixture-v1 hardening — runaway-resistant redesign ready (2026-09-19)
+
+The failed window/apply-entry pair above was not kept. Device 5 is now
+`money::split_evenly`, a short integer-remainder body followed only by an
+elided `#[cfg(test)]` module; device 6 is `ledger::debit_allowed`, a four-line
+exhaustive match at end of file. Neither has a similar-signature method in its
+suffix, so the boundary shape that caused the first rerun's runaway is gone.
+The held-out split assertion covers positive, negative, exact, and zero-part
+cases without exposing its values in prompt context; the debit assertion pins
+equal, below, above, and credit cases. New corpus id:
+`fixture-v1:068b719a1d81`.
+
+Preflight against real cargo is green: all fixture unit tests and all four
+held-out tests pass on the gold bodies; each new obvious wrong body still
+passes `cargo check` and fails only its held-out tier-7 test. The assembler
+resolves all four symbols and finds none of the gold or held-out answer
+literals in its own prompt. The release gate remains closed until the same
+three live models measure this corpus.
