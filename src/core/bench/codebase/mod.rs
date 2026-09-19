@@ -688,12 +688,6 @@ mod tests {
         assert_eq!(prepared.counts.function_body, 1);
         assert_eq!(prepared.hidden, named.hidden);
         assert_eq!(prepared.corpus.as_deref(), Some("fixture-v1:0123456789ab"));
-        for task in &prepared.tasks {
-            assert!(
-                !task.prefix.contains("fn x()") && !task.suffix.contains("fn x()"),
-                "hidden text in a prompt"
-            );
-        }
         let absent = prepare_named_for(&repo, &root, "nope");
         assert!(absent.is_err(), "an unresolved name refuses");
     }

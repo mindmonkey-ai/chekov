@@ -214,10 +214,11 @@ expect_contains = ["hello"]
         assert!(err.contains("was not materialized"), "{err}");
     }
 
-    /// The compiled-in fixture, materialized and prepared with real exec on
-    /// — the setup `device_two_fails...` shares with any future real-cargo
-    /// device test.
-    fn real_prepared(scratch: &Path) -> codebase::Prepared {
+    /// The compiled-in fixture, materialized and prepared — the setup the
+    /// resolution test shares with `device_two_fails...` and any future
+    /// real-cargo device test. `allow_exec` is what separates them: the
+    /// resolution test needs only `git`.
+    fn real_prepared(scratch: &Path, allow_exec: bool) -> codebase::Prepared {
         let manifest = super::builtin().expect("manifest");
         let m = super::materialize::materialize(scratch, &manifest.content_hash[..12])
             .expect("materialize");
@@ -228,10 +229,59 @@ expect_contains = ["hello"]
             &codebase::PrepareInputs {
                 scratch_root: scratch,
                 tasks: 0,
-                allow_exec: true,
+                allow_exec,
             },
         )
         .expect("prepare_named")
+    }
+
+    /// Each device's id, and the strings that would hand its answer over:
+    /// device 1's capacity comparison, device 2's two entry calls, device 3's
+    /// exact cents both ways, device 4's move capture.
+    const DEVICE_LEAKS: [(&str, &[&str]); 4] = [
+        ("device-1-store-limited-full", &[">= self.capacity"]),
+        (
+            "device-2-near-miss-api",
+            &[".apply_entry(", ".append_entry("],
+        ),
+        ("device-3-invariant-exact", &["249995", "2499.95"]),
+        ("device-4-lifetime-knot", &["move |"]),
+    ];
+
+    /// One task's prompt — prefix, suffix, and the extra file when it has one —
+    /// carries neither the gold body nor any of `leaks`.
+    fn assert_prompt_withholds(task: &codebase::CodebaseTask, leaks: &[&str]) {
+        let prompt = format!("{}{}{}", task.prefix, task.suffix, task.extra_text);
+        assert!(
+            !prompt.contains(&task.gold),
+            "{}: the gold body is in its own prompt",
+            task.id
+        );
+        for leak in leaks {
+            assert!(
+                !prompt.contains(leak),
+                "{}: `{leak}` is in its prompt",
+                task.id
+            );
+        }
+    }
+
+    /// The real compiled-in fixture resolves to its four devices and none of
+    /// them can be answered from its own prompt. Needs `git`, not `cargo`, so
+    /// this one is ungated — it is the check that a content edit reopening a
+    /// leak cannot pass CI.
+    #[test]
+    fn the_four_devices_resolve_in_order_and_no_prompt_carries_its_answer() {
+        let scratch = std::env::temp_dir().join("chekov-test-fixture-resolve");
+        let _ = std::fs::remove_dir_all(&scratch);
+        let prepared = real_prepared(&scratch, false);
+        let ids: Vec<&str> = prepared.tasks.iter().map(|t| t.id.as_str()).collect();
+        let expected: Vec<&str> = DEVICE_LEAKS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, expected, "the manifest's four devices, in order");
+        for (task, (id, leaks)) in prepared.tasks.iter().zip(DEVICE_LEAKS) {
+            assert_eq!(task.tier, codebase::TaskTier::FunctionBody, "{id}");
+            assert_prompt_withholds(task, leaks);
+        }
     }
 
     /// One crossing against a real toolchain, unwrapped.
@@ -270,7 +320,7 @@ expect_contains = ["hello"]
         }
         let scratch = std::env::temp_dir().join("chekov-test-fixture-real");
         let _ = std::fs::remove_dir_all(&scratch);
-        let prepared = real_prepared(&scratch);
+        let prepared = real_prepared(&scratch, true);
         let env = prepared.exec.env().expect("a toolchain");
         let task = prepared
             .tasks
