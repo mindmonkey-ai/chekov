@@ -29,7 +29,7 @@
 
 version = 1
 id = "fixture-v1"
-content_hash = "pending-materialization"
+content_hash = "78fc70e6de1cf9659a8aa24e6f248a58019a39d14c8fc9bd0e2a2969a20730a9"
 
 # Total task slots the release-gate campaign is measured against.
 # Ten are held in reserve (unreleased) so v1 can be hardened without renumbering
@@ -39,12 +39,14 @@ task_slots = 10
 # The four graded devices. `source` is the masked body the candidate writes;
 # `hidden` is the held-out assertion the grader injects and that the assembler
 # excludes from every prompt. `tier` is how the task is scored.
+# symbol: the masked fn — "name", or "Owner::name" when the name repeats in the file (both stores define record).
 [[tasks]]
 id = "device-1-store-limited-full"
 device = "cross-file first-use mask + capacity"
 source = "src/store/mod.rs"
 hidden = "hidden/store_limited_full.rs"
 tier = 7
+symbol = "LimitedStore::record"
 # The masked span is the first use of StoreError::Full; LedgerEntry/StoreError
 # are defined two modules away, so reading only this file cannot resolve them.
 
@@ -54,6 +56,7 @@ device = "near-miss API (the central discriminator)"
 source = "src/api/mod.rs"
 hidden = "hidden/near_miss_api.rs"
 tier = 7
+symbol = "handle_credit"
 # apply_entry vs append_entry both compile and return Ok; only apply_entry
 # advances the projection. The wrong choice fails the balance assertion.
 
@@ -63,15 +66,19 @@ device = "invariant trap (money is i128 cents, never f64)"
 source = "src/domain/money.rs"
 hidden = "hidden/invariant_exact.rs"
 tier = 7
+symbol = "from_str"
 # Correct value 2499.95 -> 249995 cents. A float path (as i128) yields 249994.
 # NOTE: capability-spec §9's concrete example (8014.35) does not trap under
 # as i128 (both paths give 801435); 2499.95 is the real invariant candidate.
 
 [[tasks]]
 id = "device-4-lifetime-knot"
-device = "generic + lifetime knot"
+device = "move-capture closure (compile gate)"
 source = "src/store/replay.rs"
 hidden = "hidden/lifetime_knot.rs"
 tier = 6
-# One signature type-checks exactly one way; a near-miss borrow fails to
-# compile, so this is graded by the compile gate (tier 6), not the test gate.
+symbol = "replay_filtered"
+# The signature is given; only the body is masked. The body's `move` capture of
+# `filter` is what type-checks against the declared `'a`: a borrowing closure
+# fails to compile, so this is graded by the compile gate (tier 6), not the
+# test gate.

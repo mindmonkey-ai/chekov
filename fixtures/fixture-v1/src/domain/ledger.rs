@@ -1,8 +1,7 @@
 //! The event-sourced ledger. `LedgerLog` records commands; the `Ledger`
-//! projection folds them into a running balance. The near-miss API lives here:
-//! `append_entry` and `apply_entry` both compile and both return `Ok`; only
-//! `apply_entry` advances the balance projection. Choosing the wrong one is
-//! the central discriminator.
+//! projection folds them into a running balance. `Ledger` exposes two entry
+//! points, `append_entry` and `apply_entry`; each has a distinct contract for
+//! what happens to the balance projection.
 
 use super::money::{apply, Cents, CreditCommand};
 
@@ -43,8 +42,7 @@ impl LedgerLog {
         self.entries.push(entry);
     }
 
-    /// The entry count, exposed so a hidden assertion can prove which API was
-    /// actually used.
+    /// The entry count on the log.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -72,8 +70,8 @@ impl Ledger {
 
     /// Fold the next command into the projection and record it on the log.
     ///
-    /// This is the correct API: it advances both `balance` and `log`. It
-    /// rejects a `Debit` that overdraws and any non-positive amount.
+    /// Advances both `balance` and `log`. Rejects a `Debit` that overdraws
+    /// and any non-positive amount.
     pub fn apply_entry(&mut self, cmd: CreditCommand) -> CreditOutcome {
         match cmd {
             CreditCommand::Debit(c) if c.0 > self.balance || c.0 <= 0 => {
@@ -100,9 +98,8 @@ impl Ledger {
         }
     }
 
-    /// The near-miss API: it **only** appends to the log and never touches the
-    /// projection. Compiles, returns `Ok`, passes the obvious behavioural
-    /// assertion — but leaves the balance at zero. Choosing this is the trap.
+    /// Record the command on the log without folding it into the balance
+    /// projection: `balance` is left unchanged.
     pub fn append_entry(&mut self, cmd: CreditCommand) -> CreditOutcome {
         let log_len = self.log.len();
         self.log.push(LedgerEntry {
@@ -137,7 +134,7 @@ impl Default for Ledger {
 
 impl Ledger {
     /// Stream the recorded entries newest-first, borrowing `self` for as long
-    /// as the borrow lives. Used by `store::replay_filtered` (device #4).
+    /// as the borrow lives. Used by `store::replay_filtered`.
     pub fn replay(&self) -> std::slice::Iter<'_, LedgerEntry> {
         self.log.entries.iter()
     }

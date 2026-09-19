@@ -1,15 +1,6 @@
-//! Replay the recorded entries newest-first. Two devices live here:
-//!
-//! #2 (cross-file first-use mask): `replay_filtered` is the first use of
-//! `LedgerEntry`'s fields outside `domain/`, so a model that read only this
-//! file cannot know that `LedgerEntry` has a `command`/`outcome` shape. The
-//! field accesses are the mask.
-//!
-//! #4 (generic + lifetime knot): the signature type-checks exactly one way.
-//! The returned iterator borrows `entries` for `'a` and is filtered by a
-//! closure that captures `&'a Filter`. Getting the lifetime wrong (e.g.
-//! borrowing the filter for a shorter scope than the iterator) fails to
-//! compile; the one correct form ties the iterator borrow to `entries`.
+//! Replay the recorded entries through a `Filter`. `replay_filtered` returns
+//! a lazy iterator over `entries`; the filter's predicate decides which
+//! entries survive.
 
 use crate::domain::ledger::LedgerEntry;
 
@@ -37,33 +28,15 @@ impl Filter {
     }
 }
 
-/// Record entries into a `Ledger` and stream the surviving entries through a
-/// `Filter`, newest-first.
-///
-/// **TASK 4 (lifetime knot).** The signature must tie the iterator borrow to
-/// `entries` and the closure borrow to `filter` for the same `'a`:
-/// ```text
-/// pub fn replay_filtered<'a>(
-///     entries: &'a [LedgerEntry],
-///     filter: &'a Filter,
-/// ) -> impl Iterator<Item = &'a LedgerEntry> + 'a
-/// ```
-/// A near-miss that returns `impl Iterator` borrowing only `entries` while
-/// capturing `filter` for a shorter lifetime fails to compile — the closure
-/// outlives the value it borrows.
-
-        // MASKED — TASK 4 (lifetime knot, §9 device 4). The reference body below is
-        // the one signature that type-checks. The returned iterator must borrow
-        // `entries` and the filter closure must borrow `filter` for the SAME 'a:
-        // pub fn replay_filtered<'a>(entries: &'a [LedgerEntry], filter: &'a Filter)
-        //     -> impl Iterator<Item = &'a LedgerEntry> + 'a
-        // A near-miss that lets the closure capture filter for a shorter lifetime
-        // than the returned iterator fails to compile (the closure outlives what it borrows).
+/// Stream the entries that satisfy `filter`, lazily, borrowing both for the
+/// same `'a`.
 pub fn replay_filtered<'a>(
     entries: &'a [LedgerEntry],
     filter: &'a Filter,
 ) -> impl Iterator<Item = &'a LedgerEntry> + 'a {
-    entries.iter().filter(move |e| filter.matches(e))
+    let keep = move |entry: &&LedgerEntry| filter.matches(entry);
+    let recorded = entries.iter();
+    recorded.filter(keep)
 }
 
 /// Fold the recorded entries through `replay_filtered`, returning the count of

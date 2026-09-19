@@ -7,6 +7,15 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `chekov capability bench --fixture --allow-exec` runs the compiled-in
+  fixture-v1 (embedded by `build.rs` from `fixtures/fixture-v1/`) through
+  codebase mode: four bodies named by `manifest.toml` (`symbol`, with
+  `Owner::name` where a name repeats), the leakage filter and exclusion
+  counts unchanged, and tier 7 grading against held-out tests that are
+  written into the scratch checkout for one `cargo test` and removed after.
+  The manifest's `content_hash` is verified against the embedded bytes at
+  every run; the corpus id is `fixture-v1:<hash>`. `--fixture <PATH>` keeps
+  its external probe-set meaning. Release-gated per capability-spec §9.
 - Rulings 2026-09-15 (approved), from the tool-use lane measurement receipt:
   the forced-grammar arm of `grammar_gap` gets the tool cap (1024 tokens,
   from 256 — a model that thinks under the grammar stopped on `max_tokens`

@@ -3,8 +3,9 @@
 A small event-sourced ledger crate that grades a candidate's ability to
 integrate cross-file context, honour a stated invariant, and choose the correct
 of two near-identical APIs. It is a **content slice**, not production chekov
-code and **not wired into `src/`** (see `AGENTS.md` scope discipline and
-`docs/capability-spec.md` §9).
+code and embedded into the chekov binary by `build.rs` and run by
+`chekov capability bench --fixture --allow-exec` (`docs/capability-spec.md`
+§9).
 
 ## Layout
 
@@ -18,11 +19,17 @@ fixture-v1/
     api/          the command dispatcher containing the near-miss API pair
   hidden/         held-out assertions — NEVER materialized into any prompt
   manifest.toml   the grading contract: names the hidden set
-  Cargo.toml      `panic = "abort"` in dev, matching chekov's release policy
+  Cargo.toml.in   `panic = "abort"` in dev, matching chekov's release policy —
+                  named `.in` so this tree is not a nested cargo package, which
+                  would drop it out of the published `.crate`; `build.rs`
+                  embeds it under the key `Cargo.toml` and the materializer
+                  writes it back out under that name
 ```
 
-The crate is self-contained: build with `cargo build`, test with
-`cargo test`. No network, no download, no new dependency.
+The crate is self-contained — no network, no download, no new dependency — but
+it is not buildable in place: there is no `Cargo.toml` here to build against.
+Run it through `chekov capability bench --fixture --allow-exec`, or materialize
+it (see `fixture::materialize`) and `cargo test` in the materialized tree.
 
 ## The four anti-saturation devices
 
@@ -35,7 +42,7 @@ grader injects:
 | 1 | Cross-file first-use mask + capacity | `src/store/mod.rs` `LimitedStore::record` | `hidden/store_limited_full.rs` | 7 |
 | 2 | Near-miss API (central discriminator) | `src/api/mod.rs` `handle_credit` | `hidden/near_miss_api.rs` | 7 |
 | 3 | Invariant trap — money is `i128` cents, never `f64` | `src/domain/money.rs` `from_str` | `hidden/invariant_exact.rs` | 7 |
-| 4 | Generic + lifetime knot | `src/store/replay.rs` `replay_filtered` | `hidden/lifetime_knot.rs` | 6 |
+| 4 | Move-capture closure (compile gate) | `src/store/replay.rs` `replay_filtered` | `hidden/lifetime_knot.rs` | 6 |
 
 **Device 1** — the masked capacity check is the first use of `StoreError::Full`
 and the only place a `LedgerEntry` triggers a hard rejection; `LedgerEntry` and
@@ -57,10 +64,11 @@ comment in `domain/mod.rs`.
 > `as i128` (both paths give `801435`). `2499.95` is the real invariant
 > candidate and is what the held-out assertion pins.
 
-**Device 4** — the returned iterator must borrow `entries` for `'a`, and the
-filter closure must capture `filter` for that same `'a`. A near-miss borrow
-signature fails to compile, so this is graded by the **compile gate** (tier 6),
-not the test gate.
+**Device 4** — the signature is given; only the body is masked, so what is
+graded is the body's capture. The predicate closure has to `move`-capture
+`filter` for the declared `'a`: a closure that borrows `filter` from the
+function frame instead does not live as long as the returned iterator and fails
+to compile. Graded by the **compile gate** (tier 6), not the test gate.
 
 ## Scoring tiers (capability-spec §9)
 
@@ -120,7 +128,8 @@ future*; it does not clear the gate. Concretely:
 
 ## Verified before shipping
 
-- `cargo build` — warning-free; `cargo test` — 20 unit tests pass.
+- In the materialized tree: `cargo build` — warning-free; `cargo test` — 20
+  unit tests pass.
 - All four held-out assertions compile against the real public API and pass
   against the correct implementation.
 - Each device confirmed to discriminate: a plausible wrong body for every device

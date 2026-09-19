@@ -8,20 +8,9 @@ pub struct Cents(pub i128);
 
 /// Parse a decimal currency string into exact `i128` cents.
 ///
-/// This is the **only** constructor that must be used. It parses dollars and
-/// cents independently so `2499.95` becomes `249995` and never `249994`. A
-/// tempting alternative — `s.parse::<f64>() * 100.0` then `as i128` — compiles,
-/// passes `assert_eq!(from_str("0.01").0, 1)`, and silently underflows the
-/// cents by one on `2499.95`. That is the invariant trap.
-///
+/// This is the only constructor that must be used. `12.34` is `1234`.
 /// Exactly two fractional digits are allowed: a string with a third (`12.345`)
 /// is rejected, not truncated, so the parse is total over the accepted format.
-
-        // MASKED — TASK 3 (invariant trap, §9 device 3). The reference body below
-        // is exact str-path parsing over `i128` cents. A candidate that swaps in
-        // `(s.parse::<f64>() * 100.0) as i128` compiles and passes `from_str("0.01")`
-        // but underflows the cents by one on `2499.95` (249994, not 249995).
-        // Honour the invariant stated in domain/mod.rs: never build money from an f64.
 pub fn from_str(s: &str) -> Result<Cents, &'static str> {
     let (dollars, frac) = match s.split_once('.') {
         Some((d, f)) => (d, f),

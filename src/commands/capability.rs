@@ -113,16 +113,57 @@ impl From<MetricArg> for frontier::Metric {
     }
 }
 
+/// What `--fixture` named: the compiled-in fixture-v1, or a probe-set path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FixtureArg {
+    Builtin,
+    External(std::path::PathBuf),
+}
+
+impl FixtureArg {
+    /// The value clap fills in for a bare `--fixture`; not a legal path.
+    pub const BUILTIN: &'static str = "builtin";
+
+    #[must_use]
+    pub fn external(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::External(path) => Some(path),
+            Self::Builtin => None,
+        }
+    }
+}
+
+impl std::str::FromStr for FixtureArg {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(if s == Self::BUILTIN {
+            Self::Builtin
+        } else {
+            Self::External(s.into())
+        })
+    }
+}
+
 #[derive(Debug, clap::Args)]
 pub struct BenchOpts {
     /// Add four two-hop traces per estimated prompt length on both transports.
     /// Opt-in; for example 4096,16384,65536,131072. Prints a context recommendation.
     #[arg(long, value_delimiter = ',', value_name = "LENGTHS")]
     pub long_ctx_trace: Vec<u32>,
-    /// Graded probe set (TOML). There is no compiled-in fixture yet:
-    /// fixture-v1 is release-gated on a three-model measurement campaign.
-    #[arg(long)]
-    pub fixture: Option<std::path::PathBuf>,
+    /// Graded probes. Bare `--fixture` runs the compiled-in fixture-v1
+    /// through codebase mode — its four masked bodies graded by held-out
+    /// tests, so `--allow-exec` is required; release-gated on the
+    /// three-model campaign (spec §9). `--fixture <PATH>` reads your own
+    /// probe set (TOML) instead.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "builtin",
+        value_name = "PATH",
+        value_parser = clap::value_parser!(FixtureArg)
+    )]
+    pub fixture: Option<FixtureArg>,
     /// Continue a previous run id, skipping tasks its JSONL already holds.
     #[arg(long)]
     pub resume: Option<String>,
@@ -899,14 +940,40 @@ fn resolve_judge(
     }))
 }
 
+/// Whether launch runs at all, and if so, whether the confirm gate is asked —
+/// `--dry-run` and `--yes` collapsed to one choice instead of two
+/// independent bools (clippy's `struct_excessive_bools`).
+#[derive(Debug, Clone, Copy)]
+enum LaunchMode {
+    /// `--dry-run`: print the plan, launch nothing.
+    DryRun,
+    /// `--yes`: skip the confirm gate.
+    SkipConfirm,
+    /// Neither flag: the confirm gate asks, when a launch step needs it.
+    Confirm,
+}
+
+impl LaunchMode {
+    const fn from_flags(dry_run: bool, yes: bool) -> Self {
+        if dry_run {
+            Self::DryRun
+        } else if yes {
+            Self::SkipConfirm
+        } else {
+            Self::Confirm
+        }
+    }
+}
+
 /// The bench invocation's own inputs, bundled (§4).
 struct BenchArgs<'a> {
     long_ctx_trace: Option<crate::core::bench::longctx::Plan>,
     fixture: Option<&'a std::path::Path>,
+    /// Bare `--fixture`: the compiled-in fixture-v1 is the whole run.
+    builtin_fixture: bool,
     resume: Option<&'a str>,
     models: &'a [String],
-    dry_run: bool,
-    yes: bool,
+    launch: LaunchMode,
     suite: Option<crate::core::bench::lifecycle::Suite>,
     codebase: Option<&'a std::path::Path>,
     allow_exec: bool,
@@ -927,12 +994,15 @@ struct BenchArgs<'a> {
 fn bench_args(opts: &BenchOpts) -> Result<BenchArgs<'_>, ChekovError> {
     Ok(BenchArgs {
         long_ctx_trace: crate::core::bench::longctx::Plan::optional(&opts.long_ctx_trace, 0)?,
-        fixture: opts.fixture.as_deref(),
+        fixture: opts.fixture.as_ref().and_then(FixtureArg::external),
+        builtin_fixture: matches!(opts.fixture, Some(FixtureArg::Builtin)),
         resume: opts.resume.as_deref(),
         models: &opts.models,
-        dry_run: opts.dry_run,
-        yes: opts.yes,
-        suite: effective_suite(opts.suite, opts.codebase.is_some()),
+        launch: LaunchMode::from_flags(opts.dry_run, opts.yes),
+        suite: effective_suite(
+            opts.suite,
+            opts.codebase.is_some() || matches!(opts.fixture, Some(FixtureArg::Builtin)),
+        ),
         codebase: opts.codebase.as_deref(),
         allow_exec: opts.allow_exec,
         judge: opts.judge.as_deref(),
@@ -946,14 +1016,14 @@ fn bench_args(opts: &BenchOpts) -> Result<BenchArgs<'_>, ChekovError> {
     })
 }
 
-/// `--suite` not passed means `throughput` — unless `--codebase` is given, in
-/// which case nothing beyond the codebase set runs.
+/// `--suite` not passed means `throughput` — unless `--codebase` or a bare
+/// `--fixture` is given, in which case nothing beyond that set runs.
 fn effective_suite(
     passed: Option<crate::core::bench::lifecycle::Suite>,
-    codebase: bool,
+    standalone: bool,
 ) -> Option<crate::core::bench::lifecycle::Suite> {
     use crate::core::bench::lifecycle::Suite;
-    passed.or(if codebase {
+    passed.or(if standalone {
         None
     } else {
         Some(Suite::Throughput)
@@ -962,6 +1032,13 @@ fn effective_suite(
 
 fn codebase_corpus_id(head: &str, set_hash: &str) -> String {
     format!("codebase:{}:{set_hash}", &head[..12.min(head.len())])
+}
+
+/// The corpus the head records for a codebase run: the manifest's own id
+/// when there is one, otherwise derived from HEAD and the sampled set.
+fn codebase_corpus(c: &CodebaseHead) -> String {
+    c.corpus
+        .map_or_else(|| codebase_corpus_id(c.head, c.set_hash), str::to_owned)
 }
 
 /// `--codebase`'s gate-through-sample step, or nothing when it wasn't asked
@@ -974,17 +1051,51 @@ fn prepare_codebase(
     ctx: &Ctx,
     args: &BenchArgs,
 ) -> Result<Option<crate::core::bench::codebase::Prepared>, ChekovError> {
-    match args.codebase {
-        Some(repo) => Ok(Some(crate::core::bench::codebase::prepare(
+    use crate::core::bench::codebase;
+    let scratch = ctx.config.eval_dir().join(".scratch");
+    if let Some(repo) = args.codebase {
+        return Ok(Some(codebase::prepare(
             repo,
-            &crate::core::bench::codebase::PrepareInputs {
-                scratch_root: &ctx.config.eval_dir().join(".scratch"),
+            &codebase::PrepareInputs {
+                scratch_root: &scratch,
                 tasks: ctx.config.file.bench.codebase_tasks,
                 allow_exec: args.allow_exec,
             },
-        )?)),
-        None => Ok(None),
+        )?));
     }
+    if args.builtin_fixture {
+        return prepare_fixture(&scratch, args.allow_exec).map(Some);
+    }
+    Ok(None)
+}
+
+/// The compiled-in fixture: verified, materialized, its bodies named —
+/// refused without `--allow-exec`, since the held-out tests ARE its grade.
+fn prepare_fixture(
+    scratch: &std::path::Path,
+    allow_exec: bool,
+) -> Result<crate::core::bench::codebase::Prepared, ChekovError> {
+    use crate::core::bench::{codebase, fixture};
+    if !allow_exec {
+        return Err(ChekovError::FixtureInvalid {
+            path: fixture::ID.into(),
+            reason: "the compiled-in fixture is graded by its held-out tests (tiers 6-7), \
+                     which run only under --allow-exec"
+                .to_owned(),
+        });
+    }
+    let manifest = fixture::builtin()?;
+    let materialized = fixture::materialize::materialize(scratch, &manifest.content_hash[..12])?;
+    let named = fixture::named_tasks(&manifest, &materialized.hidden)?;
+    codebase::prepare_named(
+        &materialized.repo,
+        &named,
+        &codebase::PrepareInputs {
+            scratch_root: scratch,
+            tasks: 0,
+            allow_exec: true,
+        },
+    )
 }
 
 /// One candidate's launch inputs, bundled so no callee below grows past 3
@@ -1164,7 +1275,11 @@ fn render_dry_run(
     use crate::core::bench::lifecycle::render_plan;
     let mut out = String::new();
     out.push_str(&trace_plan_line(inputs));
-    if let (Some(p), Some(repo)) = (inputs.prepared, inputs.args.codebase) {
+    if let Some(p) = inputs.prepared {
+        let repo = inputs
+            .args
+            .codebase
+            .unwrap_or_else(|| std::path::Path::new("fixture-v1 (compiled in)"));
         out.push_str(&codebase_plan_line(p, repo, inputs.args.allow_exec));
     }
     if inputs.judge.is_some() {
@@ -1199,12 +1314,16 @@ fn bench(ctx: &Ctx, args: &BenchArgs) -> Result<ExitCode, ChekovError> {
     let plan: sweep::SweepPlan = (&ctx.config.file.bench).into();
     let steps = bench_steps(ctx, &candidates, judge.as_ref());
     let estimate = bench_estimate(&steps, &plan, &inputs)?;
-    if args.dry_run {
+    if matches!(args.launch, LaunchMode::DryRun) {
         print!("{}", render_dry_run(&steps, estimate, &inputs));
         return finish_codebase(prepared).map(|()| ExitCode::SUCCESS);
     }
     eprint!("{}", trace_plan_line(&inputs));
-    confirm_launches(&steps, estimate, args.yes)?;
+    confirm_launches(
+        &steps,
+        estimate,
+        matches!(args.launch, LaunchMode::SkipConfirm),
+    )?;
     let outcome = run_candidates(ctx, &candidates, &inputs)
         .and_then(|dirs| judge_phase(ctx, &dirs, judge.as_ref()));
     finish_codebase(prepared)?;
@@ -1380,6 +1499,7 @@ fn head_inputs<'a>(
             set_hash: p.set_hash.as_str(),
             allow_exec: p.exec.allowed(),
             cargo_version: p.exec.cargo_version(),
+            corpus: p.corpus.as_deref(),
         }),
         judge: inputs
             .judge
@@ -2452,6 +2572,9 @@ struct CodebaseHead<'a> {
     set_hash: &'a str,
     allow_exec: bool,
     cargo_version: Option<&'a str>,
+    /// The manifest-given corpus id, when the tasks were named rather than
+    /// sampled.
+    corpus: Option<&'a str>,
 }
 
 /// Everything the stamp is built from beyond `Ctx` and the setup (§4).
@@ -2539,7 +2662,7 @@ fn head_corpus(
     );
     let prompt_set_hash = wrapped_prompt_hash(inputs, base);
     let corpus = match inputs.codebase.as_ref() {
-        Some(c) => codebase_corpus_id(c.head, c.set_hash),
+        Some(c) => codebase_corpus(c),
         None => corpus_id(inputs.suite, inputs.fixture)?,
     };
     Ok((prompt_set_hash, corpus))
@@ -2906,8 +3029,8 @@ mod tests {
                     assert_eq!(opts.resume, None);
                     assert!(opts.models.is_empty() && !opts.dry_run && !opts.yes);
                     assert_eq!(
-                        opts.fixture.as_deref(),
-                        Some(std::path::Path::new("probes.toml"))
+                        opts.fixture,
+                        Some(super::FixtureArg::External("probes.toml".into()))
                     );
                 }
                 other => panic!("expected Bench, got {other:?}"),
@@ -2928,6 +3051,82 @@ mod tests {
             }
             _ => panic!("expected capability"),
         }
+    }
+
+    fn bench_opts(argv: &[&str]) -> super::BenchOpts {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from(
+            [&["chekov", "capability", "bench"][..], argv].concat(),
+        )
+        .expect("parses");
+        match cli.cmd {
+            crate::cli::Cmd::Capability(cap) => match cap.action {
+                Some(super::CapAction::Bench(opts)) => opts,
+                other => panic!("expected Bench, got {other:?}"),
+            },
+            _ => panic!("expected capability"),
+        }
+    }
+
+    #[test]
+    fn a_bare_fixture_is_the_compiled_in_one_and_a_path_is_external() {
+        use super::FixtureArg;
+        assert_eq!(
+            bench_opts(&["--fixture"]).fixture,
+            Some(FixtureArg::Builtin)
+        );
+        assert_eq!(
+            bench_opts(&["--fixture", "probes.toml"]).fixture,
+            Some(FixtureArg::External("probes.toml".into()))
+        );
+        assert_eq!(bench_opts(&[]).fixture, None);
+        let builtin_opts = bench_opts(&["--fixture", "--allow-exec"]);
+        let args = super::bench_args(&builtin_opts).expect("args");
+        assert!(args.builtin_fixture);
+        assert_eq!(args.fixture, None, "no external path");
+        assert_eq!(
+            args.suite, None,
+            "the fixture is the whole run, like --codebase"
+        );
+        let external_opts = bench_opts(&["--fixture", "p.toml"]);
+        let external = super::bench_args(&external_opts).expect("args");
+        assert!(!external.builtin_fixture);
+        assert_eq!(
+            external.suite,
+            Some(crate::core::bench::lifecycle::Suite::Throughput)
+        );
+    }
+
+    #[test]
+    fn the_compiled_in_fixture_refuses_without_allow_exec_before_touching_disk() {
+        let scratch = std::env::temp_dir().join("chekov-test-fixture-refuse");
+        let _ = std::fs::remove_dir_all(&scratch);
+        let err = match super::prepare_fixture(&scratch, false) {
+            Ok(_) => panic!("expected the compiled-in fixture to be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("--allow-exec"), "{err}");
+        assert!(!scratch.exists(), "nothing materialized");
+    }
+
+    #[test]
+    fn a_manifest_corpus_overrides_the_head_derived_id() {
+        let head = super::CodebaseHead {
+            head: "4818813deeaa1111",
+            set_hash: "abcdef123456",
+            allow_exec: true,
+            cargo_version: None,
+            corpus: Some("fixture-v1:0123456789ab"),
+        };
+        assert_eq!(super::codebase_corpus(&head), "fixture-v1:0123456789ab");
+        let sampled = super::CodebaseHead {
+            corpus: None,
+            ..head
+        };
+        assert_eq!(
+            super::codebase_corpus(&sampled),
+            "codebase:4818813deeaa:abcdef123456"
+        );
     }
 
     /// The masks `compare a b <flags...>` parsed — the two bare switches, each
@@ -3571,6 +3770,7 @@ mod tests {
                 set_hash: "abcdef123456",
                 allow_exec: false,
                 cargo_version: None,
+                corpus: None,
             }),
             judge: None,
             runtime: None,
@@ -3636,6 +3836,8 @@ mod tests {
                 cross_file_first: cross,
             },
             exec: crate::core::bench::codebase::exec::Exec::Off,
+            hidden: vec![],
+            corpus: None,
         }
     }
 
@@ -3669,6 +3871,7 @@ mod tests {
                 set_hash: "abcdef123456",
                 allow_exec: false,
                 cargo_version: None,
+                corpus: None,
             }),
             judge: None,
             runtime: None,
@@ -3682,6 +3885,7 @@ mod tests {
                 set_hash: "abcdef123456",
                 allow_exec: true,
                 cargo_version: Some("cargo 1.95.0"),
+                corpus: None,
             }),
             ..off
         };
