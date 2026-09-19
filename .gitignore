@@ -31,6 +31,8 @@
 # Agent/tooling state and local session dumps — never part of the release.
 /.claude/
 /.scout/
+/.augment/
+/.codex/
 /session*.json
 /review-contex*.json
 
