@@ -411,7 +411,15 @@ fn exec_row(
         super::exec::Exec::Unavailable(reason) => Ok(Some(store::ExecRow::skipped(reason))),
         super::exec::Exec::Ready(env) => {
             let fill = ladder::trimmed_to_gold(&task.gold, prediction);
-            let row = super::exec::exec_crossing(env, task, &fill)?;
+            let hidden = prepared.hidden.iter().find(|h| h.task_id == task.id);
+            let row = super::exec::exec_crossing_with(
+                env,
+                &super::exec::Crossing {
+                    task,
+                    fill: &fill,
+                    hidden,
+                },
+            )?;
             parts.timing.borrow_mut().record(row.check_secs);
             Ok(Some(row))
         }

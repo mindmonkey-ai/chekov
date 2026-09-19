@@ -738,7 +738,7 @@ fn failure_text(outcome: &CargoOutcome) -> String {
 
 use crate::core::bench::store::{ExecRow, ExecScore};
 
-use super::CodebaseTask;
+use super::{CodebaseTask, HiddenTest};
 
 /// Tier 7's reason when the span sits outside every function body.
 pub const NO_ENCLOSING_FN: &str = "no enclosing function";
@@ -749,13 +749,35 @@ pub const NO_COVERING_TEST: &str = "no covering test";
 /// Tier 7's reason when tier 6 did not pass (spec §4).
 pub const DID_NOT_COMPILE: &str = "did not compile";
 
-/// One crossing's tiers 6 and 7: splice, check, tests, revert.
+/// One crossing's inputs beyond the environment (§4): the task, the fill,
+/// and — for the compiled-in fixture — the held-out test tier 7 injects.
+pub struct Crossing<'a> {
+    pub task: &'a CodebaseTask,
+    pub fill: &'a str,
+    pub hidden: Option<&'a HiddenTest>,
+}
+
+/// One crossing's tiers 6 and 7 against the crate's own covering tests.
+pub fn exec_crossing(env: &Env, task: &CodebaseTask, fill: &str) -> Result<ExecRow, ChekovError> {
+    exec_crossing_with(
+        env,
+        &Crossing {
+            task,
+            fill,
+            hidden: None,
+        },
+    )
+}
+
+/// Splice, check, tests, revert.
 ///
 /// The revert runs whatever the tiers decided, and its failure is the run's
 /// abort. Nothing here returns an `Err` for a cargo outcome — a timeout, an
-/// offline registry, an unbuildable test module are all skips with reasons,
-/// because none of them is the model's answer being wrong.
-pub fn exec_crossing(env: &Env, task: &CodebaseTask, fill: &str) -> Result<ExecRow, ChekovError> {
+/// offline registry, an unbuildable test module are all skips with reasons —
+/// but a hidden test that cannot be written or removed is an `io` error
+/// attributed to its path, never a silent skip.
+pub fn exec_crossing_with(env: &Env, crossing: &Crossing) -> Result<ExecRow, ChekovError> {
+    let task = crossing.task;
     let path = env.worktree.path.join(&task.file);
     let original = std::fs::read_to_string(&path)
         .map_err(|e| ChekovError::io(format!("reading {}", path.display()), e))?;
@@ -765,15 +787,29 @@ pub fn exec_crossing(env: &Env, task: &CodebaseTask, fill: &str) -> Result<ExecR
             original: &original,
             span: task.byte_range.clone(),
         },
-        fill,
+        crossing.fill,
     )?;
-    let row = tiers(env, task, &original);
+    let row = tiers(
+        env,
+        &Graded {
+            task,
+            original: &original,
+            hidden: crossing.hidden,
+        },
+    );
     revert(env, &task.file, &original)?;
-    Ok(row)
+    row
+}
+
+/// What the tiers read after the splice (§4).
+struct Graded<'a> {
+    task: &'a CodebaseTask,
+    original: &'a str,
+    hidden: Option<&'a HiddenTest>,
 }
 
 /// Tier 6, and tier 7 only if tier 6 passed.
-fn tiers(env: &Env, task: &CodebaseTask, original: &str) -> ExecRow {
+fn tiers(env: &Env, g: &Graded) -> Result<ExecRow, ChekovError> {
     let (compile, compile_error, check_secs) = check_tier(env);
     let mut row = ExecRow {
         compile,
@@ -785,14 +821,70 @@ fn tiers(env: &Env, task: &CodebaseTask, original: &str) -> ExecRow {
         test_secs: 0.0,
     };
     if row.compile != ExecScore::Value(1.0) {
-        return row;
+        return Ok(row);
     }
-    let seven = test_tier(env, task, original);
+    let seven = match g.hidden {
+        Some(hidden) => injected_tier(env, g.task, hidden)?,
+        None => test_tier(env, g.task, g.original),
+    };
     row.tests = seven.tests;
     row.test = seven.score;
     row.test_failure = seven.failure;
     row.test_secs = seven.secs;
-    row
+    Ok(row)
+}
+
+/// Tier 7 with the fixture's held-out test written into `tests/` for exactly
+/// one `cargo test --test <stem>`, then removed — on the timeout path too.
+fn injected_tier(
+    env: &Env,
+    task: &CodebaseTask,
+    hidden: &HiddenTest,
+) -> Result<Seven, ChekovError> {
+    let Some(krate) = crate_of(&env.worktree.path, &task.file) else {
+        return Ok(Seven::skipped(NO_CRATE));
+    };
+    let Some(stem) = Path::new(&hidden.file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+    else {
+        return Ok(Seven::skipped("hidden test has no file name"));
+    };
+    let dest = env.worktree.path.join("tests").join(format!("{stem}.rs"));
+    write_hidden(&dest, &hidden.text)?;
+    let (verdict, secs) = integration_test(env, &krate.name, &stem);
+    std::fs::remove_file(&dest)
+        .map_err(|e| ChekovError::io(format!("removing {}", dest.display()), e))?;
+    Ok(seven_from(verdict, vec![stem], secs))
+}
+
+fn write_hidden(dest: &Path, text: &str) -> Result<(), ChekovError> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ChekovError::io(format!("creating {}", parent.display()), e))?;
+    }
+    std::fs::write(dest, text)
+        .map_err(|e| ChekovError::io(format!("writing {}", dest.display()), e))
+}
+
+/// `cargo test -p <crate> --test <stem> --offline`: the one integration test
+/// file the hidden test became.
+fn integration_test(env: &Env, krate: &str, stem: &str) -> (TestVerdict, f64) {
+    let timeout = env.timeouts.test;
+    let outcome = run_cargo(&CargoRun {
+        program: &env.cargo,
+        args: &["test", "-p", krate, "--test", stem, "--offline"],
+        cwd: &env.worktree.path,
+        target_dir: &env.target_dir,
+        timeout,
+    });
+    let Ok(outcome) = outcome else {
+        return (
+            TestVerdict::Skipped(format!("cargo test failed to run: {stem}")),
+            0.0,
+        );
+    };
+    (test_verdict(&outcome, stem, timeout), outcome.secs)
 }
 
 /// `cargo check --message-format=json --offline`, judged by its diagnostics.
@@ -1730,5 +1822,152 @@ mod tests {
         missing
             .finish()
             .expect("Unavailable holds nothing to remove");
+    }
+
+    use super::super::{CodebaseTask, Excluded, HiddenTest, TaskTier};
+    use super::{Crossing, Env, ExecScore, exec_crossing_with};
+
+    /// A `CodebaseTask` masking `needle` in the worktree's `src/lib.rs`.
+    fn task_masking(worktree: &Path, needle: &str) -> CodebaseTask {
+        let text = std::fs::read_to_string(worktree.join("src/lib.rs")).expect("lib.rs");
+        let start = text.find(needle).expect("needle");
+        CodebaseTask {
+            id: "device-t".into(),
+            tier: TaskTier::FunctionBody,
+            file: "src/lib.rs".into(),
+            line: 1,
+            byte_range: start..start + needle.len(),
+            gold: needle.into(),
+            prefix: text[..start].into(),
+            suffix: text[start + needle.len()..].into(),
+            excluded: Excluded::default(),
+            name: None,
+            also_first_uses: vec![],
+            extra: None,
+            extra_text: String::new(),
+        }
+    }
+
+    fn env_with(name: &str, cargo_body: &str, timeouts: Timeouts) -> (PathBuf, Env) {
+        let dir = scratch(name);
+        let repo = repo(name);
+        let worktree = Worktree::add(&repo, &dir.join("wt")).expect("worktree");
+        let cargo = fake_cargo(&dir, cargo_body);
+        let env = Env {
+            worktree,
+            cargo,
+            target_dir: dir.join("target"),
+            cargo_version: "fake".into(),
+            timeouts,
+        };
+        (dir, env)
+    }
+
+    fn hidden() -> HiddenTest {
+        HiddenTest {
+            task_id: "device-t".into(),
+            file: "hidden/near_miss_api.rs".into(),
+            text: "#[test]\nfn pins() {}\n".into(),
+        }
+    }
+
+    #[test]
+    fn the_hidden_test_is_on_disk_only_for_the_cargo_test_run_and_named_on_the_row() {
+        let body = "if [ \"$1\" = \"check\" ]; then exit 0; fi\n\
+                    ls tests > \"$(dirname \"$0\")/seen.txt\"\n\
+                    echo \"$@\" >> \"$(dirname \"$0\")/seen.txt\"\n\
+                    exit 0";
+        let (dir, env) = env_with("inject", body, Timeouts::DEFAULT);
+        std::fs::create_dir_all(dir.join("target")).expect("target");
+        let task = task_masking(&env.worktree.path, "a()");
+        let row = exec_crossing_with(
+            &env,
+            &Crossing {
+                task: &task,
+                fill: "a()",
+                hidden: Some(&hidden()),
+            },
+        )
+        .expect("the crossing runs");
+        let seen =
+            std::fs::read_to_string(dir.join("seen.txt")).expect("the fake cargo ran the test");
+        assert!(
+            seen.contains("near_miss_api.rs"),
+            "present during cargo test: {seen}"
+        );
+        assert!(seen.contains("--test near_miss_api"), "run by stem: {seen}");
+        assert!(
+            !env.worktree.path.join("tests/near_miss_api.rs").exists(),
+            "removed after"
+        );
+        assert_eq!(row.tests, vec!["near_miss_api".to_owned()]);
+        assert_eq!(row.test, ExecScore::Value(1.0));
+    }
+
+    #[test]
+    fn a_failing_hidden_test_scores_zero() {
+        let (_, env) = env_with(
+            "inject-fail",
+            "if [ \"$1\" = \"check\" ]; then exit 0; fi\necho 'test pins ... FAILED'\nexit 101",
+            Timeouts::DEFAULT,
+        );
+        let task = task_masking(&env.worktree.path, "a()");
+        let row = exec_crossing_with(
+            &env,
+            &Crossing {
+                task: &task,
+                fill: "a()",
+                hidden: Some(&hidden()),
+            },
+        )
+        .expect("runs");
+        assert_eq!(row.test, ExecScore::Value(0.0));
+        assert!(
+            row.test_failure
+                .as_deref()
+                .is_some_and(|f| f.contains("FAILED"))
+        );
+    }
+
+    #[test]
+    fn a_timeout_on_the_injected_test_still_removes_it() {
+        let (_, env) = env_with(
+            "inject-timeout",
+            "if [ \"$1\" = \"check\" ]; then exit 0; fi\nsleep 30 &\nwait",
+            Timeouts {
+                test: Duration::from_secs(1),
+                ..Timeouts::DEFAULT
+            },
+        );
+        let task = task_masking(&env.worktree.path, "a()");
+        let row = exec_crossing_with(
+            &env,
+            &Crossing {
+                task: &task,
+                fill: "a()",
+                hidden: Some(&hidden()),
+            },
+        )
+        .expect("runs");
+        assert!(
+            matches!(row.test, ExecScore::Skipped(ref r) if r.contains("timed out")),
+            "{:?}",
+            row.test
+        );
+        assert!(
+            !env.worktree.path.join("tests/near_miss_api.rs").exists(),
+            "removed on the timeout path too"
+        );
+    }
+
+    #[test]
+    fn without_a_hidden_test_the_wrapper_is_the_old_crossing() {
+        let (_, env) = env_with("no-hidden", "exit 0", Timeouts::DEFAULT);
+        let task = task_masking(&env.worktree.path, "a()");
+        let row = super::exec_crossing(&env, &task, "a()").expect("runs");
+        assert!(
+            matches!(row.test, ExecScore::Skipped(_)),
+            "no covering test in the one-file crate"
+        );
     }
 }
