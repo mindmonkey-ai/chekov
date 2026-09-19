@@ -42,8 +42,7 @@ impl LedgerLog {
         self.entries.push(entry);
     }
 
-    /// The entry count, exposed so a hidden assertion can prove which API was
-    /// actually used.
+    /// The entry count on the log.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
