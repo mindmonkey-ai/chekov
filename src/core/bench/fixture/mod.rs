@@ -1,11 +1,26 @@
-//! User-supplied graded probe sets (TOML).
+//! Graded probe sets: the compiled-in fixture-v1 (`builtin`, embedded by
+//! `build.rs`, graded through codebase mode with its held-out tests) and a
+//! user-supplied probe-set TOML (`load`).
 //!
-//! Deliberately NO compiled-in fixture: fixture-v1 carries a release gate —
-//! it does not ship until measured against three models of clearly different
-//! capability with the spread published — so until that campaign happens,
-//! `--fixture <path>` is the only source of graded probes.
+//! fixture-v1 is release-gated (capability-spec §9): it ships, but no
+//! published number rests on it until it has been measured against three
+//! models of clearly different capability with the spread published.
 
 pub mod embedded;
+pub mod manifest;
+
+/// The compiled-in fixture's id — in every corpus id it produces.
+pub const ID: &str = "fixture-v1";
+
+/// The embedded manifest, parsed and checked against the embedded bytes.
+pub fn builtin() -> Result<manifest::Manifest, ChekovError> {
+    let text = embedded::FILES
+        .iter()
+        .find(|(p, _)| *p == manifest::MANIFEST_PATH)
+        .map(|(_, t)| *t)
+        .ok_or_else(|| manifest::invalid("manifest.toml is not embedded".to_owned()))?;
+    manifest::parse(text, embedded::FILES)
+}
 
 use std::path::Path;
 
@@ -105,6 +120,28 @@ expect_contains = ["hello"]
         assert!(
             super::load(&path).is_err(),
             "a fixture with nothing to grade is a mistake"
+        );
+    }
+
+    #[test]
+    fn the_embedded_manifest_parses_and_declares_the_real_content_hash() {
+        let computed = super::manifest::content_hash(super::embedded::FILES);
+        let manifest = super::builtin().unwrap_or_else(|e| {
+            panic!(
+                "{e}\n\nwrite content_hash = \"{computed}\" into fixtures/fixture-v1/manifest.toml"
+            )
+        });
+        assert_eq!(manifest.id, super::ID);
+        assert_eq!(manifest.tasks.len(), 4);
+        let symbols: Vec<&str> = manifest.tasks.iter().map(|t| t.symbol.as_str()).collect();
+        assert_eq!(
+            symbols,
+            [
+                "LimitedStore::record",
+                "handle_credit",
+                "from_str",
+                "replay_filtered"
+            ]
         );
     }
 }

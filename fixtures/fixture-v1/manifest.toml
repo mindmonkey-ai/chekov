@@ -29,7 +29,7 @@
 
 version = 1
 id = "fixture-v1"
-content_hash = "pending-materialization"
+content_hash = "55bd6c531a8886d1c68491865422de36b82f627e7eb7150a2cb8493aa1f7b229"
 
 # Total task slots the release-gate campaign is measured against.
 # Ten are held in reserve (unreleased) so v1 can be hardened without renumbering
