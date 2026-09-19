@@ -2085,3 +2085,33 @@ compile failures. The corrected result is still 1/4 for every model, now with
 an honest taxonomy: device 6 passes all three and every other device fails on
 its model output rather than reference-line truncation. The release gate stays
 closed pending a fresh, identity-versioned campaign.
+
+## Function-body grading — post-ruling campaign remains flat (2026-09-19)
+
+**Campaign:** corpus `fixture-v1:068b719a1d81`, grading identity
+`f93fc06b2db4`, temperature 0, engine `dcacec736`, machine `c057455fb3a1`.
+Runs: `eval/20260919T235139Z-qwen3.5-9b`,
+`eval/20260919T235200Z-qwen3.8-27b`, and
+`eval/20260919T235259Z-ornith-1.5-35b-a3b`.
+
+| device | qwen3.5-9b | qwen3.8-27b | ornith-1.5-35b-a3b |
+|---|---|---|---|
+| 2 near-miss API | test-fail | did not compile | test-fail |
+| 3 exact cents | test-fail | test-fail | did not compile |
+| 5 split conserves | test-fail | test-fail | test-fail |
+| 6 debit boundary | pass | pass | pass |
+| absolute tier 7 | 1 of 4 | 1 of 4 | 1 of 4 |
+
+Every row used the fixed 1440-token body cap and persisted its raw reply,
+evaluated fill, and extraction outcome. Device 5 is now classified honestly:
+the 27B and Ornith 15-line alternatives remain unchanged, compile, and fail the
+held-out negative-total ordering assertion. The 27B device-3 runaway is cut
+from 1900 to 1033 bytes at its function boundary and reaches the hidden test;
+Ornith's body calls a helper emitted beyond that boundary, so its retained body
+correctly fails compilation with the helper absent.
+
+**Ruling:** acceptance remains unmet. Device 6 saturates and no other device
+passes for any candidate, so there are still zero genuine separators. The new
+grader removes reference-length artifacts but does not rescue this fixture's
+capability spread. The release gate stays closed; any further progress requires
+new device design rather than another grading-policy change.

@@ -119,6 +119,13 @@ until three models of clearly different capability produce a real spread.
   lexical ruling makes both answers compile, but both then fail the negative
   remainder assertion. The corrected taxonomy is semantic test failure, while
   the absolute result remains one pass per model.
+- **The post-ruling campaign is also flat.** Runs
+  `20260919T235139Z-qwen3.5-9b`, `20260919T235200Z-qwen3.8-27b`, and
+  `20260919T235259Z-ornith-1.5-35b-a3b` share grading identity
+  `f93fc06b2db4` and again score 1/4 each. Device 5's two longer alternatives
+  are retained, compile, and fail only the hidden negative-total case; device 6
+  passes all three models. The gate therefore remains closed for lack of a
+  genuine separator, not because of a grading artifact.
 - **Angle B (runtime detector)** will be applied at run time: when every
   candidate scores above 90% or below 10% on a tier, the tier is reported, not
   ranked.

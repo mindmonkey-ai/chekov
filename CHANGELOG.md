@@ -16,7 +16,10 @@ All notable changes to chekov are recorded here. The format follows
   receive a fixed 1440-token cap (40 eligible lines × 36), while line tasks keep
   their existing gold-line policy. The grader version and cap join
   `prompt_set_hash`, preventing resume or comparison across the ruling; legacy
-  rows retain their historical read contract.
+  rows retain their historical read contract. The post-ruling fixture-v1 trio
+  ran under identity `f93fc06b2db4`: longer device-5 alternatives now compile
+  and fail only the held-out semantics, but all three models still score 1/4,
+  so the fixture release gate remains closed.
 - `chekov capability bench --fixture --allow-exec` runs the compiled-in
   fixture-v1 (embedded by `build.rs` from `fixtures/fixture-v1/`) through
   codebase mode: four bodies named by `manifest.toml` (`symbol`, with
