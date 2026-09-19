@@ -1778,3 +1778,87 @@ proposal remains WITHDRAWN; research first recommended. A new charter is
 conditional on confirming the current roadmap's completion: the capability
 entry above still records fixture-v1 as release-gated, and its dated slice
 status must be reconciled with the later delivery records before closure.
+
+## fixture-v1 release-gate reconciliation and the gate it can't yet clear (2026-09-16)
+
+**Question:** The capability-spec records `fixture-v1` as release-gated — it
+does not ship compiled-in until it has been measured against three models of
+clearly different capability with a real spread published. Today's
+reconciliation asks: is that gate still in force, and if so, what is the
+smallest next step?
+
+**Why this was reopened.** The 2026-09-15 visible-text entry withholds its own
+charter on the grounds that `fixture-v1` still records release-gated and its
+dated-slice status must be reconciled with the later delivery records before
+closure. So this record is the reconciliation it is waiting on.
+
+**Reconciliation facts, checked 2026-09-16 against the tree, not the spec's
+memory:**
+
+- `fixture-v1` content does **not exist**. There are no compiled-in fixture
+  templates, no `manifest.toml`, no fixture-v1 source tree. Only
+  `--fixture <path>` (an external TOML the user points at) is wired in the
+  bench CLI, and its `--fixture` flag still says "there is no compiled-in
+  fixture yet."
+- The three-model preflight (2026-09-11) measured the **agentic-v0 corpus** on
+  three models with a real spread. It never ran on a compiled-in fixture,
+  because there was none to run on. Angle A of the gate ("measured against three
+  models of clearly different capability with the spread published") is therefore
+  **unmet** — there is nothing to measure, not a measurement that failed.
+- `gpt-oss-120b` (the F16 member of the preflight trio) is **gone** from
+  `models/`; only `gpt-oss-20b` remains. The preflight set can no longer be
+  reproduced as-is even once content exists.
+- Fixture licensing (spec item #10: a fixture shipping in a public repo becomes
+  training data) is still an open question, not a settled one.
+
+**The reconciliation.** `fixture-v1` is still release-gated, and the gate has a
+two-part precondition that does not exist yet. The gate cannot be cleared
+against the *preflight corpus* — that corpus was never the fixture's subject,
+and clearing the gate requires content that was never written. So the honest
+status is: **unmet gate, pending a content slice that was never authored.**
+
+**Decisions to resolve (only the human can answer these):**
+
+1. **Author the content slice first (rule now / research first).** The gate
+   cannot be approached until ~1,800 LOC of Rust fixture content plus a
+   hidden-test manifest exist. Do we approve authoring that slice (a graded
+   probe set for the compile / symbol-existence / near-miss API tiers), or is
+   the fixture's purpose — no suitable repo, cross-machine comparability — no
+   longer worth the work?
+2. **License exposure (rule now / research first).** fixture-v1 ships in a public
+   repo, so its templates become training data. The hidden-test design mitigates
+   leakage of the *answers*, not the *prompts*. Do we accept that exposure, or is
+   the fixture meant to be gated to codebase mode and never compiled-in?
+3. **Acceptance threshold (research first).** "Clearly different capability with
+   a real spread" — the preflight used Qwen-9B / Ornith-35B / GPT-OSS-120B. With
+   120B gone, which three models define the spread today, and what spread value
+   counts as "discriminating, not flat"?
+
+**Recommended next step (research first, recommended):** before any gate,
+author the fixture content slice as a bounded, separate decision (the
+near-miss-API + invariant-trap + repo-symbol tiers the spec already sketches).
+That content is the thing that does not exist; the gate can only be measured
+against content. Do not run a campaign against the agentic-v0 corpus and call it
+the fixture gate — that is a different measurement.
+
+**Resolution paths:** rule now that the gate remains in force and the content
+slice is the next artifact; research first (recommended) to author the slice
+scope and settle the license question before a campaign; or spike a sample
+fixture on a `spike/` branch to test discrimination, never merged.
+
+**More information / tags:** capability-spec §9 (fixture mode), the
+three-model-campaign preflight above, fixture.rs (`--fixture` external-only),
+item #10 in the capability-spec's open decisions list. No production code,
+registry, configuration, or gate changed by this record.
+
+**Follow-up 2026-09-18.** The content slice this record asked for now exists:
+`fixtures/fixture-v1/` (materialized ledger crate, four devices, held-out
+assertions under `hidden/`, grading `manifest.toml`) landed on `develop` in
+commits a8f9c74 (red) and f55ce68 (green). Decision 1 is therefore resolved by
+delivery. Still open before the gate can be measured: decisions 2 (license
+exposure) and 3 (which three models replace the preflight trio now that
+`gpt-oss-120b` is gone, and what spread counts as discriminating). Also owed:
+`manifest.toml` still reads `content_hash = "pending-materialization"`, and
+nothing in `src/` reads the manifest yet — the assembler that withholds
+`hidden/` from prompts and the grader that injects it are the next bounded
+slice.
