@@ -7,6 +7,16 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Codebase `function_body` grading is now gold-independent. The raw model reply
+  is preserved, while one canonical evaluated fill stops before the first
+  unmatched closing brace outside Rust literals and nested comments; if none is
+  found, the complete reply is retained. Tiers 1–7, symbol scoring, judging,
+  compilation, and tests all consume those same bytes. Rows persist the
+  evaluated fill and extraction outcome beside the raw reply. Function bodies
+  receive a fixed 1440-token cap (40 eligible lines × 36), while line tasks keep
+  their existing gold-line policy. The grader version and cap join
+  `prompt_set_hash`, preventing resume or comparison across the ruling; legacy
+  rows retain their historical read contract.
 - `chekov capability bench --fixture --allow-exec` runs the compiled-in
   fixture-v1 (embedded by `build.rs` from `fixtures/fixture-v1/`) through
   codebase mode: four bodies named by `manifest.toml` (`symbol`, with

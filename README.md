@@ -142,10 +142,15 @@ statement or before a `::`. Without that second condition a bare `x.next()`
 matched whichever file happened to declare `fn next`. So the `context lift`
 measures what the defining file buys on tasks where the calling file already
 imports it; it is not a claim that the symbol is unrecoverable otherwise.
-Tiers 1–4 score the first `gold_lines` lines of each fill: `n_predict` is
-generous, and a model that answers a one-line span and then keeps writing
-should be graded on the answer, not on the token budget. Tier 5 reads the
-whole prediction. A name declared in two or more files is ambiguous and
+Line-level tasks retain the first-`gold_lines` boundary. `function_body` tasks
+instead use a reference-independent lexical boundary: the evaluated fill stops
+before the first unmatched `}` outside literals and nested comments, or keeps
+the complete prediction when no such boundary appears. Their fixed 1440-token
+cap covers the 40-line eligible-body maximum without consulting the gold.
+Raw and evaluated fills plus the extraction outcome are stored separately, and
+tiers 1–7 plus the judge consume the same evaluated bytes. The grading version
+and cap are part of `prompt_set_hash`, so legacy runs cannot compare or resume
+across this ruling. A name declared in two or more files is ambiguous and
 never masked, a name whose defining module the file never mentions is not a
 candidate, and the shortfall line counts both. Tiers 6–7 (compile gate, covering test) run only under
 `--allow-exec`. Because the task set now includes the new tier's ids, its
@@ -218,7 +223,7 @@ fixes properly. The registry name still names everything else: the run
 directory, the stamp's weights identity, and the report header. A
 thinking-default model must be served with reasoning disabled (mlx-lm:
 `--chat-template-args '{"enable_thinking": false}'`) or the codebase suite's
-chat-FIM fills burn the gold-bounded budget on reasoning and fail loudly as
+chat-FIM fills burn the task's output budget on reasoning and fail loudly as
 `chat fill has no text content` — a second live finding, not yet automated.
 Launch flags chekov cannot observe are stamped with
 fixed sentinels (`ctx`/`n_parallel` `0`; the six flag fields `"unmanaged"`,

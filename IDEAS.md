@@ -2057,3 +2057,31 @@ replacement is not a gate-clearing result and should not be represented as
 one. Any next redesign must first rule on body-level execution grading: either
 budget enough lines for semantically valid alternatives or stop trimming a
 self-terminated fill before cargo sees it.
+
+## Function-body grading ruling and counterfactual replay (2026-09-19)
+
+**Ruling implemented.** `function_body` predictions are now evaluated by a
+gold-independent lexical boundary. The raw reply remains auditable; a canonical
+fill stops before the first unmatched `}` outside Rust literals and nested
+comments, or retains the complete reply when it never crosses that boundary.
+Semantic tiers, symbol scoring, the judge, compilation, and tests all consume
+that same fill. Line-level tasks retain their existing gold-line policy.
+
+Function bodies receive a fixed 1440-token cap: the candidate class admits at
+most 40 body lines, and the established allowance is 36 tokens per line. This
+is fixed before sampling and does not reveal reference length. The grader
+version and cap ride in `prompt_set_hash`; old and new campaigns therefore
+refuse comparison and resume. New rows persist the evaluated fill and extraction
+outcome beside the raw reply. Historical rows keep their original read contract;
+the replay below is explicitly counterfactual, not a rewritten campaign.
+
+**Replay:** all 12 rows from the `20260919T224905Z`, `20260919T224926Z`, and
+`20260919T225024Z` runs were passed through the production extractor and the
+real Cargo compile/test gates. The two disputed device-5 fills (27B and Ornith)
+now compile, confirming that their old compile failures were grader-induced;
+both fail the held-out negative-total ordering case. Device 3's runaway output
+is cut at the function boundary, while genuinely malformed bodies remain
+compile failures. The corrected result is still 1/4 for every model, now with
+an honest taxonomy: device 6 passes all three and every other device fails on
+its model output rather than reference-line truncation. The release gate stays
+closed pending a fresh, identity-versioned campaign.

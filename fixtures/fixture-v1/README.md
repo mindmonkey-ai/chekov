@@ -87,6 +87,13 @@ The grader:
 2. writes the `hidden/` assertions into it,
 3. runs them against the model's patch.
 
+The patch is the canonical evaluated body, not a reference-length prefix. The
+grader preserves the raw reply, then lexically stops before the first unmatched
+closing brace outside literals and nested comments; a reply that never crosses
+that boundary is kept in full. All semantic, symbol, judge, compile, and test
+consumers use those same bytes. Function bodies receive a fixed 1440-token
+budget, independent of the gold body.
+
 `manifest.toml` is consulted by the context assembler — not a glob that someone
 can later edit — so every `hidden` file named there is **excluded from every
 prompt by construction**. Three properties follow: the model can never read the
@@ -108,7 +115,10 @@ until three models of clearly different capability produce a real spread.
   `fixture-v1:068b719a1d81` was also flat at one pass per model. Device 6
   saturated; two syntactically complete but longer device-5 answers were cut
   to the gold body's line budget and failed compilation, so that apparent
-  difference is not a capability signal.
+  difference is not a capability signal. A counterfactual replay under the
+  lexical ruling makes both answers compile, but both then fail the negative
+  remainder assertion. The corrected taxonomy is semantic test failure, while
+  the absolute result remains one pass per model.
 - **Angle B (runtime detector)** will be applied at run time: when every
   candidate scores above 90% or below 10% on a tier, the tier is reported, not
   ranked.
