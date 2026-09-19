@@ -116,7 +116,10 @@ pub fn load(path: &Path) -> Result<Fixture, ChekovError> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    use crate::core::bench::codebase::{self, exec};
+    use crate::core::bench::store::{ExecRow, ExecScore};
 
     fn write_scratch(name: &str, text: &str) -> PathBuf {
         let dir = std::env::temp_dir().join("chekov-test-fixture");
@@ -209,5 +212,93 @@ expect_contains = ["hello"]
             .expect_err("nothing materialized")
             .to_string();
         assert!(err.contains("was not materialized"), "{err}");
+    }
+
+    /// The compiled-in fixture, materialized and prepared with real exec on
+    /// — the setup `device_two_fails...` shares with any future real-cargo
+    /// device test.
+    fn real_prepared(scratch: &Path) -> codebase::Prepared {
+        let manifest = super::builtin().expect("manifest");
+        let m = super::materialize::materialize(scratch, &manifest.content_hash[..12])
+            .expect("materialize");
+        let named = super::named_tasks(&manifest, &m.hidden).expect("named");
+        codebase::prepare_named(
+            &m.repo,
+            &named,
+            &codebase::PrepareInputs {
+                scratch_root: scratch,
+                tasks: 0,
+                allow_exec: true,
+            },
+        )
+        .expect("prepare_named")
+    }
+
+    /// One crossing against a real toolchain, unwrapped.
+    fn crossing_row(env: &exec::Env, crossing: &exec::Crossing) -> ExecRow {
+        exec::exec_crossing_with(env, crossing).expect("crossing")
+    }
+
+    /// Tier 6: the row's `compile` score is exactly 1.0, with cargo's own
+    /// words on mismatch.
+    fn assert_compiled(row: &ExecRow) {
+        assert_eq!(
+            row.compile,
+            ExecScore::Value(1.0),
+            "expected to compile: {:?}",
+            row.compile_error
+        );
+    }
+
+    /// Tier 7: the row's `test` score against its expected value.
+    fn assert_test_score(row: &ExecRow, expected: f64) {
+        assert_eq!(
+            row.test,
+            ExecScore::Value(expected),
+            "{:?}",
+            row.test_failure
+        );
+    }
+
+    /// Device 2 end to end against a real `cargo`, once. Gated on
+    /// `CHEKOV_TEST_EXEC=1` like `tests/codebase_exec.rs`.
+    #[test]
+    fn device_two_fails_the_hidden_test_on_the_near_miss_and_passes_on_the_gold() {
+        if std::env::var("CHEKOV_TEST_EXEC").as_deref() != Ok("1") {
+            eprintln!("skipping: set CHEKOV_TEST_EXEC=1 to run the fixture against a real cargo");
+            return;
+        }
+        let scratch = std::env::temp_dir().join("chekov-test-fixture-real");
+        let _ = std::fs::remove_dir_all(&scratch);
+        let prepared = real_prepared(&scratch);
+        let env = prepared.exec.env().expect("a toolchain");
+        let task = prepared
+            .tasks
+            .iter()
+            .find(|t| t.id == "device-2-near-miss-api")
+            .expect("device 2");
+        let hidden = prepared.hidden.iter().find(|h| h.task_id == task.id);
+        let wrong = task.gold.replace("apply_entry", "append_entry");
+        assert_ne!(wrong, task.gold, "the gold uses apply_entry");
+        let row = crossing_row(
+            env,
+            &exec::Crossing {
+                task,
+                fill: &wrong,
+                hidden,
+            },
+        );
+        assert_compiled(&row);
+        assert_test_score(&row, 0.0);
+        let row = crossing_row(
+            env,
+            &exec::Crossing {
+                task,
+                fill: &task.gold,
+                hidden,
+            },
+        );
+        assert_test_score(&row, 1.0);
+        prepared.exec.finish().expect("cleanup");
     }
 }
