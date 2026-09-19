@@ -1892,3 +1892,48 @@ preflight trio — Qwen-9B / Ornith-35B / GPT-OSS-120B — can be reproduced
 as-is, so the first half of decision 3 is closed. Still open: the spread
 threshold that counts as discriminating, and decision 2 (license exposure,
 now moot in practice since the fixture is compiled in and public).
+
+## fixture-v1 release gate — first measurement (2026-09-19)
+
+**Question:** capability-spec §9 gates `fixture-v1` on three models of clearly
+different capability showing a real spread. Merged as PR #99 today, the
+fixture was run on three candidates under one stamp (`corpus
+fixture-v1:78fc70e6de1c`, engine `dcacec736`, machine `c057455fb3a1`).
+
+**Runs:** `eval/20260919T191534Z-qwen3.5-9b`,
+`eval/20260919T192600Z-qwen3.8-27b`, `eval/20260919T191556Z-ornith-1.5-35b-a3b`.
+`gpt-oss-120b` (`eval/20260919T191643Z-gpt-oss-120b`) recorded the codebase
+lane as N/A: the model has no fill-in-the-middle tokens, and the managed
+llama.cpp path grades the fixture over `/infill`. It cannot be a member of
+this campaign; the 27B took its place.
+
+| device | qwen3.5-9b | qwen3.8-27b | ornith-1.5-35b-a3b |
+|---|---|---|---|
+| 1 capacity check | pass | pass | pass |
+| 2 near-miss API | wrong API (`append_entry`) | did not compile | wrong API (`append_entry`) |
+| 3 exact cents | did not compile | pass | wrong result (integer parse) |
+| 4 move capture | pass | pass | pass |
+| tier 7 | 2 of 4 | 3 of 4 | 2 of 4 |
+
+**Reading.** Tier 7 is not flat by the §9 band rule (0.67 / 1.00 / 0.50), so
+the letter of the gate is met. The ordering is plausible: the 35B is a
+mixture-of-experts model with ~3B active parameters. But the whole spread
+rests on device 3 — devices 1 and 4 are passed by every model, device 2 is
+failed by every model — and that is too thin to publish a number on.
+
+**Ruling:** `fixture-v1` stays release-gated. The first measurement is
+recorded here; the fixture is not cleared until at least two more devices
+separate the 27B from the other two.
+
+**Next slice — fixture hardening (proposed):** retire devices 1 and 4 into
+the reserve slots; keep 2 (the near miss works — every model fell for it)
+and 3 (the one device that discriminates); add devices shaped like 3, where
+a stated contract has an obvious implementation that compiles and is wrong.
+Wrap `src/domain/tests.rs` and refresh the `Cargo.toml.in` header in the same
+re-hash (both flagged in PR #99). Trio for reruns: qwen3.5-9b, qwen3.8-27b,
+ornith-1.5-35b-a3b — about a minute per model.
+
+**Decisions closed by this record:** decision 3 (the trio is the three above;
+the 120B is out for lack of FIM support, not for being gone); the spread
+threshold is "at least two discriminating devices", not a tier-7 delta.
+Decision 2 (license exposure) is moot: the fixture is compiled in and public.
