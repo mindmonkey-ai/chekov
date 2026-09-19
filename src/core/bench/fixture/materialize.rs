@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use super::embedded::FILES;
+use super::manifest;
 use crate::core::bench::codebase::tree;
 use crate::error::ChekovError;
 
@@ -18,17 +19,21 @@ pub struct Materialized {
     pub hidden: Vec<(String, String)>,
 }
 
-/// Write every embedded file but `hidden/*` under
+/// Write every embedded file but `hidden/*` and `manifest.toml` under
 /// `<scratch_root>/fixture-v1-<hash12>/` and commit it.
 ///
 /// Keyed by the content hash, so a second run of the same fixture reuses the
-/// repository, and a different fixture never shares one.
+/// repository, and a different fixture never shares one. The manifest stays out
+/// of the graded tree because its comments narrate every device.
 pub fn materialize(scratch_root: &Path, hash12: &str) -> Result<Materialized, ChekovError> {
     let repo = scratch_root.join(format!("fixture-v1-{hash12}"));
     let mut hidden = Vec::new();
     for (path, text) in FILES {
         if path.starts_with(HIDDEN_DIR) {
             hidden.push(((*path).to_owned(), (*text).to_owned()));
+            continue;
+        }
+        if *path == manifest::MANIFEST_PATH {
             continue;
         }
         write_file(&repo.join(path), text)?;
@@ -65,13 +70,16 @@ mod tests {
     }
 
     #[test]
-    fn the_tree_has_the_crate_a_head_and_no_hidden_directory() {
+    fn the_tree_has_the_crate_a_head_and_neither_hidden_nor_the_manifest() {
         let root = scratch("tree");
         let m = materialize(&root, "0123456789ab").expect("materialize");
         assert_eq!(m.repo, root.join("fixture-v1-0123456789ab"));
         assert!(m.repo.join("Cargo.toml").exists());
         assert!(m.repo.join("src/api/mod.rs").exists());
-        assert!(m.repo.join("manifest.toml").exists());
+        assert!(
+            !m.repo.join("manifest.toml").exists(),
+            "the manifest's comments narrate every device"
+        );
         assert!(
             !m.repo.join("hidden").exists(),
             "hidden tests are never on disk here"

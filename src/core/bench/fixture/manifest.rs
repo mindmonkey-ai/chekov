@@ -9,8 +9,8 @@ use crate::error::ChekovError;
 
 /// What this chekov knows how to read.
 pub const MANIFEST_VERSION: u32 = 1;
-/// The manifest's path inside the fixture — the one embedded file the
-/// content hash leaves out, so writing the hash in never changes it.
+/// The manifest's path inside the fixture — hashed like every other embedded
+/// file, but with its own `content_hash` line normalised out.
 pub const MANIFEST_PATH: &str = "manifest.toml";
 const HIDDEN_DIR: &str = "hidden/";
 
@@ -51,19 +51,37 @@ pub fn invalid(reason: String) -> ChekovError {
     }
 }
 
-/// SHA-256 over every embedded file but the manifest, as `path\0text\0` in
-/// table order — an edit to any fixture file without a manifest bump is a
-/// refused run, not a silently different corpus.
+/// SHA-256 over every embedded file, as `path\0text\0` in table order — an edit
+/// to any fixture file without a manifest bump is a refused run, not a silently
+/// different corpus.
+///
+/// The manifest is in the hash too, so the grading contract it declares
+/// (`symbol`, `source`, `hidden`, `tier`, the task ids) binds the corpus id
+/// instead of floating free of it.
 #[must_use]
 pub fn content_hash(files: &[(&str, &str)]) -> String {
     let mut bytes = Vec::new();
-    for (path, text) in files.iter().filter(|(p, _)| *p != MANIFEST_PATH) {
+    for (path, text) in files {
         bytes.extend_from_slice(path.as_bytes());
         bytes.push(0);
-        bytes.extend_from_slice(text.as_bytes());
+        bytes.extend_from_slice(hashed_text(path, text).as_bytes());
         bytes.push(0);
     }
     sha256_hex(&bytes)
+}
+
+/// One file's bytes as the hash sees them: verbatim, except the manifest, whose
+/// own `content_hash` line is dropped so writing the computed value back in is
+/// a fixed point rather than a second round of re-hashing.
+fn hashed_text<'a>(path: &str, text: &'a str) -> std::borrow::Cow<'a, str> {
+    if path != MANIFEST_PATH {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("content_hash"))
+        .collect();
+    std::borrow::Cow::Owned(kept.join("\n"))
 }
 
 pub fn parse(text: &str, files: &[(&str, &str)]) -> Result<Manifest, ChekovError> {
@@ -132,18 +150,25 @@ mod tests {
     const SRC: &str = "pub fn a() -> u32 {\n    1\n}\n";
     const HIDDEN: &str = "#[test]\nfn t() {}\n";
 
-    /// A three-file fixture whose manifest declares the hash of the other two.
+    /// A three-file fixture whose manifest declares the hash of all three —
+    /// itself included, which is why the placeholder below hashes the same as
+    /// the value it is replaced by.
     fn files(manifest_body: &str) -> Vec<(String, String)> {
         let content = [("src/a.rs", SRC), ("hidden/t.rs", HIDDEN)];
-        let hash = content_hash(&content);
-        let manifest = format!(
-            "version = 1\nid = \"fixture-v1\"\ncontent_hash = \"{hash}\"\ntask_slots = 10\n{manifest_body}"
-        );
+        let body = |hash: &str| {
+            format!(
+                "version = 1\nid = \"fixture-v1\"\ncontent_hash = \"{hash}\"\ntask_slots = 10\n{manifest_body}"
+            )
+        };
+        let pending = body("pending");
+        let mut all = content.to_vec();
+        all.push(("manifest.toml", pending.as_str()));
+        let hash = content_hash(&all);
         let mut out: Vec<(String, String)> = content
             .iter()
             .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
             .collect();
-        out.push(("manifest.toml".to_owned(), manifest));
+        out.push(("manifest.toml".to_owned(), body(&hash)));
         out
     }
 
@@ -168,19 +193,28 @@ mod tests {
     const ONE_TASK: &str = "[[tasks]]\nid = \"d1\"\ndevice = \"x\"\nsource = \"src/a.rs\"\nhidden = \"hidden/t.rs\"\ntier = 7\nsymbol = \"a\"\n";
 
     #[test]
-    fn a_valid_manifest_parses_and_the_hash_excludes_the_manifest_itself() {
+    fn a_valid_manifest_parses_and_the_hash_binds_it_but_not_its_own_hash_line() {
         let manifest = parse_body(ONE_TASK).expect("parses");
         assert_eq!(manifest.tasks.len(), 1);
         assert_eq!(manifest.tasks[0].symbol, "a");
-        let with = content_hash(&[
-            ("src/a.rs", SRC),
-            ("hidden/t.rs", HIDDEN),
-            ("manifest.toml", "anything"),
-        ]);
-        let without = content_hash(&[("src/a.rs", SRC), ("hidden/t.rs", HIDDEN)]);
+        let hashed = |text: &str| {
+            content_hash(&[
+                ("src/a.rs", SRC),
+                ("hidden/t.rs", HIDDEN),
+                ("manifest.toml", text),
+            ])
+        };
+        let base = format!("content_hash = \"aaa\"\n{ONE_TASK}");
         assert_eq!(
-            with, without,
-            "editing the manifest never changes the content hash"
+            hashed(&base),
+            hashed(&base.replace("\"aaa\"", "\"bbb\"")),
+            "the content_hash line is normalised out, so writing it in is stable"
+        );
+        assert_ne!(
+            hashed(&base),
+            hashed(&base.replace("symbol = \"a\"", "symbol = \"b\"")),
+            "the grading contract is inside the hash: a changed symbol is a \
+             different corpus"
         );
     }
 

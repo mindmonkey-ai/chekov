@@ -47,13 +47,17 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), Box<dyn Er
 }
 
 /// `pub const FILES: &[(&str, &str)] = &[ ("Cargo.toml", include_str!("…")), … ];`
+///
+/// The key strips a trailing `.in`: `fixtures/fixture-v1/Cargo.toml.in` is
+/// named that way so the fixture tree is not a nested cargo package (which
+/// would drop it out of the published `.crate`), and the table presents it
+/// under the name the materialized tree needs on disk.
 fn table(root: &Path, files: &[String]) -> String {
     let mut text = String::from("pub const FILES: &[(&str, &str)] = &[\n");
     for relative in files {
         let absolute = root.join(relative).display().to_string();
-        text.push_str(&format!(
-            "    ({relative:?}, include_str!({absolute:?})),\n"
-        ));
+        let key = relative.strip_suffix(".in").unwrap_or(relative);
+        text.push_str(&format!("    ({key:?}, include_str!({absolute:?})),\n"));
     }
     text.push_str("];\n");
     text

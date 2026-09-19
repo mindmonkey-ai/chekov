@@ -28,8 +28,6 @@ impl Dispatcher {
     /// Must fold the command into the running projection and return the
     /// exact `CreditOutcome` the ledger produced.
     pub fn handle_credit(&mut self, cmd: CreditCommand) -> CreditOutcome {
-        // MASKED — replace this body: fold the command into the running
-        // projection and return the ledger's outcome.
         let outcome = self.ledger.apply_entry(cmd);
         if let CreditOutcome::Applied { balance, .. } = outcome {
             assert_eq!(self.balance(), balance);
@@ -37,10 +35,9 @@ impl Dispatcher {
         outcome
     }
 
-    /// Dispatch a debit command to the ledger. Like `handle_credit`, the body
-    /// folds the command into the running projection.
+    /// Dispatch a debit command through the same path as a credit.
     pub fn handle_debit(&mut self, cmd: CreditCommand) -> CreditOutcome {
-        self.ledger.apply_entry(cmd)
+        self.handle_credit(cmd)
     }
 }
 

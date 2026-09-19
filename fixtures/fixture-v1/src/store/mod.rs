@@ -85,9 +85,6 @@ impl LimitedStore {
 
 impl Audit for LimitedStore {
     fn record(&mut self, entry: LedgerEntry) -> Result<(), StoreError> {
-        // MASKED — TASK 1: return `Err(StoreError::Full)` once the buffer is at
-        // capacity, otherwise push the entry. The obvious `self.buffer.push(entry)`
-        // compiles and silently ignores the capacity — that is the trap.
         if self.buffer.len() >= self.capacity {
             return Err(StoreError::Full);
         }

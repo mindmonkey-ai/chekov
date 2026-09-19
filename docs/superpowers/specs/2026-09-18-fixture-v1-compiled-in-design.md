@@ -264,3 +264,15 @@ Recorded when the implementation plan was written against the real seams
   blocks sat above (not inside) two masked functions, and two doc comments
   named the correct API. The plan's first task scrubs them; the content hash
   is computed after that scrub.
+- **The manifest is inside the content hash.** `content_hash` covers
+  `manifest.toml` as well as the fixture's files, normalised by dropping every
+  line whose trimmed form starts with `content_hash` — so the grading contract
+  (`symbol`, `source`, `hidden`, `tier`, the task ids) binds the corpus id,
+  while writing the computed value back into the manifest stays a fixed point.
+  (§4.2 said the manifest was excluded outright.)
+- **The fixture tree carries `Cargo.toml.in`, not `Cargo.toml`.** A nested
+  `Cargo.toml` makes `fixtures/fixture-v1/` a package cargo skips, so the
+  published `.crate` contained none of it and `build.rs` could not build inside
+  it. `build.rs` strips a trailing `.in` when it builds the table key, and the
+  materializer writes `Cargo.toml` as before. The materializer also keeps
+  `manifest.toml` out of the graded tree: its comments narrate every device.

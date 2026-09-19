@@ -29,7 +29,7 @@
 
 version = 1
 id = "fixture-v1"
-content_hash = "9988ef2551a59909a44256d4ab1a2f29d9091ce9598d4254935481b733bcf38b"
+content_hash = "78fc70e6de1cf9659a8aa24e6f248a58019a39d14c8fc9bd0e2a2969a20730a9"
 
 # Total task slots the release-gate campaign is measured against.
 # Ten are held in reserve (unreleased) so v1 can be hardened without renumbering
@@ -73,10 +73,12 @@ symbol = "from_str"
 
 [[tasks]]
 id = "device-4-lifetime-knot"
-device = "generic + lifetime knot"
+device = "move-capture closure (compile gate)"
 source = "src/store/replay.rs"
 hidden = "hidden/lifetime_knot.rs"
 tier = 6
 symbol = "replay_filtered"
-# One signature type-checks exactly one way; a near-miss borrow fails to
-# compile, so this is graded by the compile gate (tier 6), not the test gate.
+# The signature is given; only the body is masked. The body's `move` capture of
+# `filter` is what type-checks against the declared `'a`: a borrowing closure
+# fails to compile, so this is graded by the compile gate (tier 6), not the
+# test gate.

@@ -1867,3 +1867,19 @@ slice.
 `docs/superpowers/specs/2026-09-18-fixture-v1-compiled-in-design.md`. The
 fixture is compiled in; the release gate (three models, published spread) is
 the remaining step, and decisions 2 and 3 above are still open.
+
+2026-09-18, final review: two of the four devices are weaker than
+capability-spec §9 describes, and the release-gate campaign should read a flat
+spread on those two as a fact about the fixture rather than about the models.
+Device 1 needs no cross-file knowledge: `LimitedStore::record`'s masked body
+resolves from the `capacity` field and the `StoreError::Full` variant already
+named in the same file's doc comments, so it grades a capacity check, not
+cross-file integration. Device 4 grades a `move` capture, not a signature: the
+signature is given and only the body is masked, so the compile gate turns on
+whether the predicate closure captures `filter` by move — a real trap, but a
+narrower one than "generic + lifetime knot" implies (both the manifest label
+and `fixtures/fixture-v1/README.md` now say `move`-capture closure). Devices 2
+and 3 are unchanged and remain the discriminators. If a campaign returns a flat
+spread on 1 and 4 while 2 and 3 separate the models, harden 1 and 4 out of the
+ten reserve slots rather than concluding the candidates are equivalent.
+Decisions 2 and 3 above remain open.

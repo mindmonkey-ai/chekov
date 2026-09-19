@@ -1,13 +1,12 @@
-// Held-out assertion — device 4 (generic + lifetime knot). NEVER materialized
-// into prompt context; injected by the grader.
+// Held-out assertion — device 4 (move-capture closure, compile gate). NEVER
+// materialized into prompt context; injected by the grader.
 //
-// `replay_filtered` is the single masked body in `store/replay.rs`. The
-// signature type-checks exactly one way: the returned iterator must borrow
-// `entries` for `'a`, and the filter closure must capture `filter` for that
-// SAME `'a`. A near-miss that lets the closure capture `filter` for a shorter
-// lifetime than the returned iterator fails to compile (the closure outlives
-// the value it borrows) — so this task is graded by the compile gate (tier 6),
-// not the test gate.
+// `replay_filtered` is the single masked body in `store/replay.rs`; its
+// signature is given, so what is graded is the body. The predicate closure has
+// to `move`-capture `filter` for the declared `'a`: a closure that borrows
+// `filter` from the function frame instead does not live as long as the
+// returned iterator and fails to compile — so this task is graded by the
+// compile gate (tier 6), not the test gate.
 
 use fixture_v1::domain::money::{CreditCommand, from_str};
 use fixture_v1::domain::{CreditOutcome, LedgerEntry};

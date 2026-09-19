@@ -8,7 +8,7 @@ pub struct Cents(pub i128);
 
 /// Parse a decimal currency string into exact `i128` cents.
 ///
-/// This is the only constructor that must be used. `2499.95` is `249995`.
+/// This is the only constructor that must be used. `12.34` is `1234`.
 /// Exactly two fractional digits are allowed: a string with a third (`12.345`)
 /// is rejected, not truncated, so the parse is total over the accepted format.
 pub fn from_str(s: &str) -> Result<Cents, &'static str> {

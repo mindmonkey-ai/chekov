@@ -38,6 +38,11 @@ mod tests {
             assert!(!path.contains('\\'), "{path} must use forward slashes");
             assert_ne!(*path, "README.md");
             assert_ne!(*path, ".gitignore");
+            assert!(
+                path.strip_suffix(".in").is_none(),
+                "{path} keeps its `.in` suffix — build.rs must strip it so the \
+                 materialized tree gets the real filename"
+            );
         }
         let paths: Vec<&str> = FILES.iter().map(|(p, _)| *p).collect();
         let mut sorted = paths.clone();
