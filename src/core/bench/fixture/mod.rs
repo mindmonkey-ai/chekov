@@ -27,7 +27,50 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::core::bench::codebase::HiddenTest;
+use crate::core::bench::codebase::named::{NamedTask, NamedTasks};
 use crate::error::ChekovError;
+
+/// The manifest's tasks as codebase-mode named tasks, each with its held-out
+/// test's text — refused when a named hidden file was not materialized.
+pub fn named_tasks(
+    manifest: &manifest::Manifest,
+    hidden_files: &[(String, String)],
+) -> Result<NamedTasks, ChekovError> {
+    let mut hidden = Vec::with_capacity(manifest.tasks.len());
+    for task in &manifest.tasks {
+        let text = hidden_files
+            .iter()
+            .find(|(p, _)| *p == task.hidden)
+            .map(|(_, t)| t.clone())
+            .ok_or_else(|| {
+                manifest::invalid(format!(
+                    "task {}: hidden {} was not materialized",
+                    task.id, task.hidden
+                ))
+            })?;
+        hidden.push(HiddenTest {
+            task_id: task.id.clone(),
+            file: task.hidden.clone(),
+            text,
+        });
+    }
+    let tasks = manifest
+        .tasks
+        .iter()
+        .map(|t| NamedTask {
+            id: t.id.clone(),
+            file: t.source.clone(),
+            symbol: t.symbol.clone(),
+        })
+        .collect();
+    let corpus = format!("{ID}:{}", &manifest.content_hash[..12]);
+    Ok(NamedTasks {
+        tasks,
+        hidden,
+        corpus,
+    })
+}
 
 /// What this chekov knows how to read.
 const SUPPORTED_VERSION: u32 = 1;
@@ -144,5 +187,27 @@ expect_contains = ["hello"]
                 "replay_filtered"
             ]
         );
+    }
+
+    #[test]
+    fn named_tasks_pair_every_manifest_task_with_its_hidden_text() {
+        let manifest = super::builtin().expect("manifest");
+        let hidden: Vec<(String, String)> = super::embedded::FILES
+            .iter()
+            .filter(|(p, _)| p.starts_with("hidden/"))
+            .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
+            .collect();
+        let named = super::named_tasks(&manifest, &hidden).expect("named");
+        assert_eq!(named.tasks.len(), 4);
+        assert_eq!(named.hidden.len(), 4);
+        assert!(named.hidden.iter().all(|h| h.text.contains("#[test]")));
+        assert!(
+            named.corpus.starts_with("fixture-v1:")
+                && named.corpus.len() == "fixture-v1:".len() + 12
+        );
+        let err = super::named_tasks(&manifest, &[])
+            .expect_err("nothing materialized")
+            .to_string();
+        assert!(err.contains("was not materialized"), "{err}");
     }
 }

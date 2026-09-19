@@ -6,6 +6,7 @@ pub mod exec;
 pub mod filter;
 pub mod ladder;
 pub mod masker;
+pub mod named;
 pub mod run;
 pub mod sample;
 pub mod tree;
@@ -80,6 +81,16 @@ pub struct ExtraFile {
     pub path: String,
     pub bytes: u64,
     pub truncated: bool,
+}
+
+/// A held-out test the grader writes into the crate for tier 7 and removes
+/// after — never on disk while a prompt is assembled, never in a prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenTest {
+    pub task_id: String,
+    /// The embedded path (`hidden/near_miss_api.rs`); its stem names the test.
+    pub file: String,
+    pub text: String,
 }
 
 /// One assembled task: what the model sees, what was hidden, and the answer.
@@ -160,6 +171,12 @@ pub struct Prepared {
     /// target directory and the toolchain they run in. `Exec::Off` is the
     /// slice-A/B1 shape: the worktree was removed before this value existed.
     pub exec: exec::Exec,
+    /// The compiled-in fixture's held-out tests, keyed by task id — empty on
+    /// a user's repository.
+    pub hidden: Vec<HiddenTest>,
+    /// The corpus id the head records when the tasks came from a manifest;
+    /// `None` when they were sampled, and the head derives it from HEAD.
+    pub corpus: Option<String>,
 }
 
 /// What one file's `#[cfg(test)]` cut cost, and where it fell.
@@ -314,17 +331,21 @@ pub struct PrepareInputs<'a> {
     pub allow_exec: bool,
 }
 
-/// Gate, worktree, walk, mask, index, sample, assemble, symbol set — then
-/// the worktree is removed, unless `--allow-exec` keeps it for the exec
-/// tiers.
-///
-/// Everything the run needs is in memory, and the user's checkout was never
-/// read directly.
-///
-/// The scratch tree is `<scratch_root>/codebase-tree-<head12>`: keyed by the
-/// HEAD it checks out, so two runs of different commits never share one, and
-/// derived here rather than by the caller, which does not know the HEAD yet.
-pub fn prepare(repo: &Path, inputs: &PrepareInputs) -> Result<Prepared, ChekovError> {
+/// What the walk produced, before any task was chosen.
+struct Walked {
+    head: String,
+    worktree: tree::Worktree,
+    scanned: usize,
+    oversized: usize,
+    elided: Elisions,
+    candidates: Candidates,
+    symbols: ladder::Symbols,
+}
+
+/// Gate, worktree, walk, mask, index, symbol set — everything both entry
+/// points share. The scratch tree is `<scratch_root>/codebase-tree-<head12>`,
+/// keyed by the HEAD it checks out.
+fn walk(repo: &Path, inputs: &PrepareInputs) -> Result<Walked, ChekovError> {
     tree::assert_clean(repo)?;
     let head = tree::head_sha(repo)?;
     let scratch_tree = inputs
@@ -334,32 +355,80 @@ pub fn prepare(repo: &Path, inputs: &PrepareInputs) -> Result<Prepared, ChekovEr
     let sources = tree::rust_sources(&worktree.path);
     let elided = elide_tests(sources.files);
     let index = crossfile::Index::build(&elided.files);
-    let mut candidates = all_candidates(&index, &elided);
-    let set = sample::sample(
-        std::mem::take(&mut candidates.per_file),
-        sample::quota(inputs.tasks),
-        sample::seed_from_head(&head),
-    );
+    let candidates = all_candidates(&index, &elided);
     let symbols = ladder::repo_symbols(&elided.files);
-    if set.picked.is_empty() {
-        worktree.remove()?;
-        return Err(ChekovError::CodebaseNoTasks {
-            path: repo.to_path_buf(),
-            reason: format!(
-                "scanned {} files, {} eligible, 0 candidate spans",
-                sources.scanned,
-                elided.files.len()
-            ),
-        });
-    }
-    let exec = exec_state(worktree, inputs, head12(&head))?;
-    Ok(into_prepared(Sampled {
+    Ok(Walked {
         head,
-        set,
+        worktree,
+        scanned: sources.scanned,
+        oversized: sources.oversized,
         elided,
         candidates,
         symbols,
-        oversized: sources.oversized,
+    })
+}
+
+/// Walk, sample, assemble — then the worktree is removed, unless
+/// `--allow-exec` keeps it for the exec tiers. Everything the run needs is
+/// in memory, and the user's checkout was never read directly.
+pub fn prepare(repo: &Path, inputs: &PrepareInputs) -> Result<Prepared, ChekovError> {
+    let mut w = walk(repo, inputs)?;
+    let set = sample::sample(
+        std::mem::take(&mut w.candidates.per_file),
+        sample::quota(inputs.tasks),
+        sample::seed_from_head(&w.head),
+    );
+    if set.picked.is_empty() {
+        let reason = format!(
+            "scanned {} files, {} eligible, 0 candidate spans",
+            w.scanned,
+            w.elided.files.len()
+        );
+        w.worktree.remove()?;
+        return Err(ChekovError::CodebaseNoTasks {
+            path: repo.to_path_buf(),
+            reason,
+        });
+    }
+    finish(w, set, inputs)
+}
+
+/// The same walk, with the tasks named by a manifest instead of sampled —
+/// the compiled-in fixture's entry point. A name that does not resolve
+/// removes the worktree and refuses.
+pub fn prepare_named(
+    repo: &Path,
+    named: &named::NamedTasks,
+    inputs: &PrepareInputs,
+) -> Result<Prepared, ChekovError> {
+    let w = walk(repo, inputs)?;
+    let set = match named::pick(&w.candidates.per_file, &w.elided.files, &named.tasks) {
+        Ok(set) => set,
+        Err(e) => {
+            w.worktree.remove()?;
+            return Err(e);
+        }
+    };
+    let mut prepared = finish(w, set, inputs)?;
+    prepared.hidden.clone_from(&named.hidden);
+    prepared.corpus = Some(named.corpus.clone());
+    Ok(prepared)
+}
+
+fn finish(
+    w: Walked,
+    set: sample::TaskSet,
+    inputs: &PrepareInputs,
+) -> Result<Prepared, ChekovError> {
+    let short = head12(&w.head).to_owned();
+    let exec = exec_state(w.worktree, inputs, &short)?;
+    Ok(into_prepared(Sampled {
+        head: w.head,
+        set,
+        elided: w.elided,
+        candidates: w.candidates,
+        symbols: w.symbols,
+        oversized: w.oversized,
         exec,
     }))
 }
@@ -400,6 +469,8 @@ fn into_prepared(s: Sampled) -> Prepared {
         cfg_test_lines: s.elided.lines(),
         cfg_test_files: s.elided.files_cut(),
         exec: s.exec,
+        hidden: Vec::new(),
+        corpus: None,
     }
 }
 
@@ -569,6 +640,62 @@ mod tests {
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-qm", "fixture"]);
         (repo, root)
+    }
+
+    /// `source("alpha")` defines `pub fn alpha(a: i32) -> i32` with a
+    /// multi-line body — the free function the masker yields as a
+    /// `function_body` candidate.
+    fn named_device(symbol: &str) -> super::named::NamedTasks {
+        super::named::NamedTasks {
+            tasks: vec![super::named::NamedTask {
+                id: "device-x".into(),
+                file: "src/alpha.rs".into(),
+                symbol: symbol.into(),
+            }],
+            hidden: vec![super::HiddenTest {
+                task_id: "device-x".into(),
+                file: "hidden/x.rs".into(),
+                text: "#[test]\nfn x() {}\n".into(),
+            }],
+            corpus: "fixture-v1:0123456789ab".into(),
+        }
+    }
+
+    fn prepare_named_for(
+        repo: &std::path::Path,
+        root: &std::path::Path,
+        symbol: &str,
+    ) -> Result<Prepared, crate::error::ChekovError> {
+        super::prepare_named(
+            repo,
+            &named_device(symbol),
+            &super::PrepareInputs {
+                scratch_root: &root.join("scratch"),
+                tasks: 0,
+                allow_exec: false,
+            },
+        )
+    }
+
+    #[test]
+    fn prepare_named_picks_the_named_bodies_and_carries_the_hidden_tests() {
+        let (repo, root) = repo_fixture("named");
+        let named = named_device("alpha");
+        let prepared = prepare_named_for(&repo, &root, "alpha").expect("prepare_named");
+        assert_eq!(prepared.tasks.len(), 1);
+        assert_eq!(prepared.tasks[0].id, "device-x");
+        assert_eq!(prepared.tasks[0].tier, super::TaskTier::FunctionBody);
+        assert_eq!(prepared.counts.function_body, 1);
+        assert_eq!(prepared.hidden, named.hidden);
+        assert_eq!(prepared.corpus.as_deref(), Some("fixture-v1:0123456789ab"));
+        for task in &prepared.tasks {
+            assert!(
+                !task.prefix.contains("fn x()") && !task.suffix.contains("fn x()"),
+                "hidden text in a prompt"
+            );
+        }
+        let absent = prepare_named_for(&repo, &root, "nope");
+        assert!(absent.is_err(), "an unresolved name refuses");
     }
 
     /// A committed two-file repo and the `Prepared` sampled from it. The repo

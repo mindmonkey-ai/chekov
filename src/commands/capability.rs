@@ -3636,6 +3636,8 @@ mod tests {
                 cross_file_first: cross,
             },
             exec: crate::core::bench::codebase::exec::Exec::Off,
+            hidden: vec![],
+            corpus: None,
         }
     }
 

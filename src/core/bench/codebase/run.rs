@@ -608,6 +608,8 @@ mod tests {
                 cross_file_first: 0,
             },
             exec: crate::core::bench::codebase::exec::Exec::Off,
+            hidden: vec![],
+            corpus: None,
         }
     }
 
@@ -665,6 +667,8 @@ mod tests {
                 cross_file_first: 1,
             },
             exec: crate::core::bench::codebase::exec::Exec::Off,
+            hidden: vec![],
+            corpus: None,
         }
     }
 
