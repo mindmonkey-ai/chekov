@@ -22,10 +22,10 @@ mod tests {
             "Cargo.lock",
             "src/lib.rs",
             "src/store/mod.rs",
-            "hidden/store_limited_full.rs",
             "hidden/near_miss_api.rs",
             "hidden/invariant_exact.rs",
-            "hidden/lifetime_knot.rs",
+            "hidden/split_conserves.rs",
+            "hidden/debit_boundary.rs",
         ] {
             assert!(has(path), "{path} missing from FILES");
         }
