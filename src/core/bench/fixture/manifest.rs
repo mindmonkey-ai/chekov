@@ -233,6 +233,22 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_source_and_an_absent_hidden_file_are_refused() {
+        let missing_source = ONE_TASK.replace("src/a.rs", "src/missing.rs");
+        assert!(
+            parse_body(&missing_source)
+                .expect_err("source not embedded")
+                .contains("source src/missing.rs is not in the fixture")
+        );
+        let absent_hidden = ONE_TASK.replace("hidden/t.rs", "hidden/absent.rs");
+        assert!(
+            parse_body(&absent_hidden)
+                .expect_err("hidden not embedded")
+                .contains("must be an embedded file under hidden/")
+        );
+    }
+
+    #[test]
     fn a_newer_version_is_refused_naming_what_this_chekov_reads() {
         let files = files(ONE_TASK);
         let refs = borrowed(&files);
