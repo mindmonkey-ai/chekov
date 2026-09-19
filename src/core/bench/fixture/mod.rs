@@ -5,6 +5,8 @@
 //! capability with the spread published — so until that campaign happens,
 //! `--fixture <path>` is the only source of graded probes.
 
+pub mod embedded;
+
 use std::path::Path;
 
 use serde::Deserialize;
