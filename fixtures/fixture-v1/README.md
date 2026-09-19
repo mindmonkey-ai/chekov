@@ -102,11 +102,13 @@ Per `IDEAS.md` and `capability-spec.md` §9, this compiled-in slice remains
 **release-gated**: it ships, but no published capability number rests on it
 until three models of clearly different capability produce a real spread.
 
-- **Angle A (release gate) remains unmet.** Two three-model campaigns on older
-  corpus ids failed acceptance: the original devices saturated, and the first
-  hardening attempt measured FIM suffix runaway rather than capability. Corpus
-  `fixture-v1:068b719a1d81` replaces those runaway-prone bodies and must be
-  measured independently before any ruling changes.
+- **Angle A (release gate) remains unmet.** Two campaigns on older corpus ids
+  failed acceptance: the original devices saturated, and the first hardening
+  attempt measured FIM suffix runaway rather than capability. The campaign on
+  `fixture-v1:068b719a1d81` was also flat at one pass per model. Device 6
+  saturated; two syntactically complete but longer device-5 answers were cut
+  to the gold body's line budget and failed compilation, so that apparent
+  difference is not a capability signal.
 - **Angle B (runtime detector)** will be applied at run time: when every
   candidate scores above 90% or below 10% on a tier, the tier is reported, not
   ranked.

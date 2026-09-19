@@ -2016,3 +2016,44 @@ passes `cargo check` and fails only its held-out tier-7 test. The assembler
 resolves all four symbols and finds none of the gold or held-out answer
 literals in its own prompt. The release gate remains closed until the same
 three live models measure this corpus.
+
+## fixture-v1 hardening — runaway-resistant rerun still fails acceptance (2026-09-19)
+
+**Campaign:** corpus `fixture-v1:068b719a1d81`, temperature 0, engine
+`dcacec736`, machine `c057455fb3a1`. Runs:
+`eval/20260919T224905Z-qwen3.5-9b`,
+`eval/20260919T224926Z-qwen3.8-27b`, and
+`eval/20260919T225024Z-ornith-1.5-35b-a3b`.
+
+| device | qwen3.5-9b | qwen3.8-27b | ornith-1.5-35b-a3b |
+|---|---|---|---|
+| 2 near-miss API | test-fail | did not compile | test-fail |
+| 3 exact cents | test-fail | did not compile | did not compile |
+| 5 split conserves | test-fail | did not compile | did not compile |
+| 6 debit boundary | pass | pass | pass |
+| absolute tier 7 | 1 of 4 | 1 of 4 | 1 of 4 |
+
+**Reading — acceptance still NOT met.** Device 6 is now a clean crossing, but
+it saturates: all three models emit the correct short comparison. Device 5 no
+longer runs into a neighbouring method, yet it still does not measure the
+intended trap for two models. Its gold body is 11 lines; the 27B and Ornith
+both emitted syntactically complete, self-terminating 15-line alternatives.
+The execution splice grades only the first `gold_lines` lines, cutting each
+before its closing braces and producing an unclosed-delimiter compile failure.
+The 9B's compact body compiled and reached the hidden test, where its
+truncating division
+failed the negative-total case. This is line-budget sensitivity, not a
+capability spread.
+
+The existing devices add no rescue signal in this run: device 2 again elicits
+the near-miss API (the 27B adds a stray brace), while device 3's 27B answer
+runs into new methods and Ornith calls a helper that the trimmed fill does not
+retain. No model passes more than device 6.
+
+**Ruling:** the release gate remains closed. The target was at least two
+devices that genuinely separate the 27B from the other candidates; this run
+has zero. The branch is valid implementation evidence, but the device
+replacement is not a gate-clearing result and should not be represented as
+one. Any next redesign must first rule on body-level execution grading: either
+budget enough lines for semantically valid alternatives or stop trimming a
+self-terminated fill before cargo sees it.

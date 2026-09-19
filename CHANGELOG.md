@@ -328,7 +328,8 @@ All notable changes to chekov are recorded here. The format follows
   bodies whose contract is visible in source and whose obvious wrong body
   compiles but fails a held-out test. `src/domain/tests.rs` is now a
   `#[cfg(test)]` module so it can never surface as a visible answer key. The
-  corpus id is now `fixture-v1:068b719a1d81`.
+  corpus id is now `fixture-v1:068b719a1d81`. Its three-model campaign remained
+  flat at one pass each, so the fixture release gate stays closed.
 - README gains a "Tuning launch flags" runbook section between "Swapping
   models" and "Updating": the real `--dry-run` plan and the 2026-09-05 spec-
   stage report from this desk, what the `server` line means before you
