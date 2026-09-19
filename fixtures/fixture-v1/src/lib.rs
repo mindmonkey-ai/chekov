@@ -3,8 +3,9 @@
 //! choose the correct of two near-identical APIs.
 //!
 //! This is a content slice, not production chekov code. It is graded against
-//! the manifest in `manifest.toml`. It is NOT wired into src/ (see
-//! `AGENTS.md` scope discipline and the capability-spec §9).
+//! the manifest in `manifest.toml`. It is embedded into the chekov binary by
+//! `build.rs` and run by `chekov capability bench --fixture --allow-exec`
+//! (the capability-spec §9).
 
 pub mod domain;
 pub mod projection;

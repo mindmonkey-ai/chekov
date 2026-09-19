@@ -34,7 +34,9 @@ pub fn replay_filtered<'a>(
     entries: &'a [LedgerEntry],
     filter: &'a Filter,
 ) -> impl Iterator<Item = &'a LedgerEntry> + 'a {
-    entries.iter().filter(move |e| filter.matches(e))
+    let keep = move |entry: &&LedgerEntry| filter.matches(entry);
+    let recorded = entries.iter();
+    recorded.filter(keep)
 }
 
 /// Fold the recorded entries through `replay_filtered`, returning the count of

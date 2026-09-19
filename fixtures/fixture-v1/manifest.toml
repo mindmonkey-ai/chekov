@@ -29,7 +29,7 @@
 
 version = 1
 id = "fixture-v1"
-content_hash = "55bd6c531a8886d1c68491865422de36b82f627e7eb7150a2cb8493aa1f7b229"
+content_hash = "9988ef2551a59909a44256d4ab1a2f29d9091ce9598d4254935481b733bcf38b"
 
 # Total task slots the release-gate campaign is measured against.
 # Ten are held in reserve (unreleased) so v1 can be hardened without renumbering

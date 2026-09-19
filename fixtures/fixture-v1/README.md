@@ -3,8 +3,9 @@
 A small event-sourced ledger crate that grades a candidate's ability to
 integrate cross-file context, honour a stated invariant, and choose the correct
 of two near-identical APIs. It is a **content slice**, not production chekov
-code and **not wired into `src/`** (see `AGENTS.md` scope discipline and
-`docs/capability-spec.md` §9).
+code and embedded into the chekov binary by `build.rs` and run by
+`chekov capability bench --fixture --allow-exec` (`docs/capability-spec.md`
+§9).
 
 ## Layout
 

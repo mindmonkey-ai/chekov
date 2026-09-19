@@ -1862,3 +1862,8 @@ exposure) and 3 (which three models replace the preflight trio now that
 nothing in `src/` reads the manifest yet — the assembler that withholds
 `hidden/` from prompts and the grader that injects it are the next bounded
 slice.
+
+2026-09-18, later: the assembler and grader shipped — spec
+`docs/superpowers/specs/2026-09-18-fixture-v1-compiled-in-design.md`. The
+fixture is compiled in; the release gate (three models, published spread) is
+the remaining step, and decisions 2 and 3 above are still open.
