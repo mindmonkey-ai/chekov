@@ -62,6 +62,26 @@ pub fn head_sha(repo: &Path) -> Result<String, ChekovError> {
     git(repo, &["rev-parse", "HEAD"], &step)
 }
 
+/// `git init`, add everything, one commit — for a tree chekov wrote itself
+/// (the compiled-in fixture), so `assert_clean` and `head_sha` hold for it
+/// exactly as for a user's repository.
+pub(crate) fn init_and_commit(repo: &Path, message: &str) -> Result<(), ChekovError> {
+    let who = [
+        "-c",
+        "user.email=chekov@localhost",
+        "-c",
+        "user.name=chekov",
+    ];
+    git(repo, &["init", "-q"], "git init")?;
+    git(repo, &[&who[..], &["add", "-A"]].concat(), "git add")?;
+    git(
+        repo,
+        &[&who[..], &["commit", "-q", "-m", message]].concat(),
+        "git commit",
+    )?;
+    Ok(())
+}
+
 /// A detached checkout of HEAD that the run reads from; removed after.
 pub struct Worktree {
     pub path: PathBuf,

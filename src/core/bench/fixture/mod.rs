@@ -8,6 +8,7 @@
 
 pub mod embedded;
 pub mod manifest;
+pub mod materialize;
 
 /// The compiled-in fixture's id — in every corpus id it produces.
 pub const ID: &str = "fixture-v1";
