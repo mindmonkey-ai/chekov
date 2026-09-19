@@ -1,10 +1,6 @@
-//! The command dispatcher. `handle_credit` is masked (the body the candidate
-//! writes). Both `self.log.append_entry(e)` and `self.log.apply_entry(e)`
-//! compile and return `Ok`; only `apply_entry` advances the running balance
-//! projection. This is the near-miss API — the central discriminator.
-//!
-//! Tiers 1-2 (line-level) deliberately do NOT apply here: this is graded at
-//! the compile/test tiers (6-7) against the held-out assertions in `hidden/`.
+//! The command dispatcher over a ledger. `Ledger` exposes two entry APIs,
+//! `append_entry` and `apply_entry`; the dispatcher's job is to keep the
+//! running balance projection current as commands arrive.
 
 use crate::domain::ledger::{CreditOutcome, Ledger};
 use crate::domain::money::CreditCommand;
@@ -29,15 +25,8 @@ impl Dispatcher {
 
     /// Dispatch a credit command to the ledger.
     ///
-    /// **MASKED** — the body the candidate writes. It must fold the command
-    /// into the running projection. `handle_credit` must return the exact
-    /// `CreditOutcome` the ledger produced, so a hidden assertion can prove
-    /// which entry API was used.
-    ///
-    /// The obvious wrong call (`self.ledger.append_entry(cmd)`) compiles,
-    /// returns `Ok`, and returns `Applied { balance: 0, ... }` — which fails
-    /// the hidden balance assertion. The correct call is
-    /// `self.ledger.apply_entry(cmd)`.
+    /// Must fold the command into the running projection and return the
+    /// exact `CreditOutcome` the ledger produced.
     pub fn handle_credit(&mut self, cmd: CreditCommand) -> CreditOutcome {
         // MASKED — replace this body: fold the command into the running
         // projection and return the ledger's outcome.

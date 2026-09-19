@@ -1,16 +1,7 @@
-//! An audit sink: ledger entries recorded then flushed. This is a trait and
-//! two impls with **deliberately different failure semantics** — the point of
-//! device #1 (cross-file first-use masks): `store/mod.rs` is the first place
-//! `domain::LedgerEntry` and `StoreError` are imported and used, so a model
-//! that read only this file cannot know where those symbols come from.
-//!
-//! `VecStore` records unconditionally and never fails on `record`;
-//! `LimitedStore` rejects once full with `Err(StoreError::Full)`. A candidate
-//! implementing either must honour *its* semantics, which the hidden tests in
-//! `hidden/` pin.
-//!
-//! Tiers 1–2 (line-level) deliberately do NOT apply to these impls; the
-//! failure-semantics difference is graded at the compile/test tiers (6–7).
+//! An audit sink: ledger entries recorded then flushed. A trait and two impls
+//! with different failure semantics: `VecStore` never refuses on `record`;
+//! `LimitedStore` rejects with `Err(StoreError::Full)` once it holds
+//! `capacity` entries. A caller of either relies on that contract.
 
 pub mod replay;
 
@@ -75,13 +66,8 @@ impl Audit for VecStore {
 }
 
 /// A capacity-bounded audit sink: `record` rejects with `Err(StoreError::Full)`
-/// once the buffer reaches capacity — the deliberate opposite of `VecStore`.
-///
-/// **TASK 1 (cross-file first-use mask).** The masked body is the overflow
-/// check: it is the first use of `StoreError::Full` in the crate and the only
-/// place a `LedgerEntry` ever triggers a hard rejection. A model that read
-/// only this file cannot know the capacity semantics; they are fixed by the
-/// hidden test (`hidden/store_limited_full.rs`).
+/// once the buffer holds `capacity` entries — the deliberate opposite of
+/// `VecStore`.
 #[derive(Debug, Clone)]
 pub struct LimitedStore {
     capacity: usize,
