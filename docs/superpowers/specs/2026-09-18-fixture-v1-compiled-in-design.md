@@ -236,3 +236,31 @@ Which three models define the campaign spread now that `gpt-oss-120b` is
 gone, and what spread counts as discriminating (IDEAS.md 2026-09-16, decisions
 2 and 3). License exposure is settled by this design's choice to compile the
 fixture in: it ships in every binary and is already public in the repo.
+
+## 10. Amendments (2026-09-18, at planning)
+
+Recorded when the implementation plan was written against the real seams
+(`docs/superpowers/plans/2026-09-18-fixture-v1-compiled-in.md`):
+
+- **Rows keep suite `codebase`.** The fixture's rows are codebase rows with
+  exec halves, and the report, `compare` and `--resume` key on that suite.
+  The corpus id `fixture-v1:<hash12>` is what distinguishes a fixture run.
+  (§4.4 said suite `fixture`; that name stays with the external probe-set
+  rows `run_fixture` writes.)
+- **No `CodebaseTask` field.** `tests/codebase_exec.rs` is write-protected
+  and builds `CodebaseTask`, `Env` and calls `exec_crossing(env, task, fill)`
+  by literal. The hidden test therefore rides `Prepared.hidden`
+  (`Vec<HiddenTest>` keyed by task id) and reaches tier 7 through a new
+  `exec::Crossing { task, fill, hidden }` bundle and
+  `exec::exec_crossing_with`; `exec_crossing` becomes a wrapper with its
+  signature unchanged. (§4.5 said `CodebaseTask.covering_override`.)
+- **Corpus override on `Prepared`.** `Prepared.corpus: Option<String>` is
+  `Some("fixture-v1:<hash12>")` from `prepare_named` and `None` from
+  `prepare`; `CodebaseHead` carries it and `head_corpus` prefers it. (§4.6.)
+- **Git plumbing in `tree.rs`.** `materialize` calls a new
+  `tree::init_and_commit(repo, message)` rather than spawning git itself,
+  so the module's error contract has one spelling. (§4.3.)
+- **The fixture sources leaked their answers.** Stray `// MASKED — TASK n`
+  blocks sat above (not inside) two masked functions, and two doc comments
+  named the correct API. The plan's first task scrubs them; the content hash
+  is computed after that scrub.
