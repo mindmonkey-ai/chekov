@@ -203,3 +203,10 @@ Gates and the mechanical floor are declared in `pushkin.toml` (Rust-only
 profile: fmt, clippy, test, deny). Path-gating is off-for-now with an explicit
 re-arm path; see that file. The harness's own hooks are already wired into
 `.claude/settings.json` (`pushkin-v1`).
+
+<!-- pushkin:begin pushkin-v1 — GENERATED from pushkin.toml; do not hand-edit -->
+This repository is gated by Pushkin. Writes to gated paths are checked against the project contracts before they land; a denial names the rule and the exact fix — apply it and retry once. If the same write is blocked three times, STOP and report the blocker to the human instead of trying variations. Suppression comments are blocked on gated paths — fix the underlying issue. Waivers are human-only (`pushkin waive <rule>`). Run `pushkin instructions` for the full version.
+
+Gated paths:
+Protected (never edit): 
+<!-- pushkin:end pushkin-v1 -->
