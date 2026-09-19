@@ -9,7 +9,7 @@
 // this pins.
 
 use fixture_v1::domain::ledger::debit_allowed;
-use fixture_v1::domain::money::{from_str, CreditCommand};
+use fixture_v1::domain::money::{CreditCommand, from_str};
 
 #[test]
 fn a_debit_of_exactly_the_balance_is_allowed_but_one_more_cent_is_not() {

@@ -3,12 +3,18 @@
 //! points, `append_entry` and `apply_entry`; each has a distinct contract for
 //! what happens to the balance projection.
 
-use super::money::{apply, Cents, CreditCommand};
+use super::money::{Cents, CreditCommand, apply};
 
 /// Why a command was refused. Unit variants, so this is `Copy`/`Eq`/`PartialEq`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerError {
+    /// A `Debit` was refused because it would overdraw the account. The rule
+    /// is strict: a `Debit` is refused only when its amount is *greater than*
+    /// the current balance. A `Debit` of exactly the balance is allowed and
+    /// settles the account to zero — the boundary belongs to the debit, not to
+    /// the refusal.
     InsufficientFunds,
+    /// A `Credit` or `Debit` of a non-positive amount was refused.
     NegativeAmount,
 }
 
@@ -74,7 +80,10 @@ impl Ledger {
     /// and any non-positive amount.
     pub fn apply_entry(&mut self, cmd: CreditCommand) -> CreditOutcome {
         match cmd {
-            CreditCommand::Debit(c) if c.0 > self.balance || c.0 <= 0 => {
+            CreditCommand::Debit(c) if c.0 <= 0 => {
+                CreditOutcome::Rejected(LedgerError::NegativeAmount)
+            }
+            CreditCommand::Debit(_) if !debit_allowed(self.balance, cmd) => {
                 CreditOutcome::Rejected(LedgerError::InsufficientFunds)
             }
             CreditCommand::Credit(c) if c.0 <= 0 => {
@@ -137,5 +146,18 @@ impl Ledger {
     /// as the borrow lives. Used by `store::replay_filtered`.
     pub fn replay(&self) -> std::slice::Iter<'_, LedgerEntry> {
         self.log.entries.iter()
+    }
+}
+
+/// Whether a `Debit` command may be applied against `balance`.
+///
+/// See `LedgerError::InsufficientFunds` for the rule this enforces: a debit is
+/// allowed exactly when its amount does not exceed the balance, so a debit of
+/// the whole balance is allowed and settles to zero. A `Credit` is always
+/// allowed here.
+pub fn debit_allowed(balance: i128, cmd: CreditCommand) -> bool {
+    match cmd {
+        CreditCommand::Debit(c) => c.0 <= balance,
+        CreditCommand::Credit(_) => true,
     }
 }

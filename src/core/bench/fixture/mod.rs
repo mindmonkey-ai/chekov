@@ -241,7 +241,7 @@ expect_contains = ["hello"]
         ("device-3-invariant-exact", &["249995", "2499.95"]),
         (
             "device-5-split-conserves",
-            &["vec![34, 33, 33]", "vec![-33, -33, -34]"],
+            &["[34, 33, 33]", "[-33, -33, -34]"],
         ),
         ("device-6-debit-boundary", &["100.01", "c.0 <= balance"]),
     ];

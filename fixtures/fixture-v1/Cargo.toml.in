@@ -1,6 +1,7 @@
-# fixture-v1 — a small event-sourced ledger used to grade a candidate's
-# ability to integrate cross-file context, honour a stated invariant, and
-# choose the correct of two near-identical APIs.
+# fixture-v1 — a small event-sourced ledger used to grade a candidate's ability
+# to integrate cross-file context, honour stated invariants, and choose the
+# correct of two near-identical APIs. Graded devices: near-miss API, exact-cents
+# invariant, money-conserving split, overdraft boundary (see manifest.toml).
 #
 # This is a CONTENT SLICE, not production chekov code and not wired into src/.
 # See manifest.toml and README.md.
