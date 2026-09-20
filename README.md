@@ -275,7 +275,8 @@ Ornith-1.5-35B-A3B-MLX on this machine (see IDEAS.md).
 ### The six doctor checks
 
 1. **OpenAI door** — `POST /v1/chat/completions` returns content
-2. **Anthropic door** — `POST /v1/messages` returns content
+2. **Anthropic door** — `POST /v1/messages` returns content. A 64-token reply
+   containing thinking but no text gets one bounded retry at 512 tokens
 3. **Think-tag retention** — response keeps `<think>` (only when the model's
    flags include `--reasoning-format none`; otherwise SKIP with a note)
 4. **NaN canary** — ~1,500-token code generation; fails on ≥30 identical
@@ -385,8 +386,10 @@ chekov doctor             # both doors, think-tags, NaN canary, ctx floor + load
 ```
 
 Pin a specific revision with `org/repo:QUANT@<sha>`; use `--dry-run` to see
-what would be downloaded; `--license-url` points the license snapshot at a
-non-standard location when the repo keeps it elsewhere.
+what would be downloaded. `--license-url` writes an additional
+`LICENSE.base.snapshot` from a base-model or non-standard license location.
+It also works on a verified no-op, so missing license evidence can be repaired
+without downloading the weights again or repointing the registry.
 
 `--dry-run` prints the shard list with each file's byte size and the directory
 they would land in, and registers nothing. A download **resumes a partial
@@ -409,7 +412,8 @@ shapes, and a repo only has to use one of them:
 - a folder per quant named after the model, with the tag in the shard's own
   filename — bartowski's
   `Model-IQ3_M/Model-IQ3_M-00001-of-00005.gguf`;
-- flat files in the repo root — `Model-Q8_0.gguf`.
+- flat files in the repo root — `Model-Q8_0.gguf`, including a bounded tag
+  before a variant suffix such as `gemma-4-31B_q4_0-it.gguf`.
 
 The tag may be dot-separated (`Model.Q4_K_M.gguf`, the mradermacher style) and
 may be lowercase (`qwen2.5-0.5b-instruct-q4_k_m.gguf`, the `Qwen/*-GGUF`

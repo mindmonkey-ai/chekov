@@ -310,6 +310,14 @@ All notable changes to chekov are recorded here. The format follows
   and the report header.
 
 ### Fixed
+- `pull` recognizes bounded quant tokens before filename variant suffixes, so
+  Google's official `gemma-4-31B_q4_0-it.gguf` is offered as `q4_0` without
+  admitting projector, calibration, MTP, or draft artifacts as weights.
+- A verified no-op pull now honors `--license-url` and writes the missing
+  `LICENSE.base.snapshot` without downloading weights or repointing the model.
+- `doctor` retries the Anthropic door once with a bounded 512-token budget when
+  the initial 64-token reply contains thinking but no text. Non-reasoning
+  responses without text still fail immediately.
 - **A dead bench/tune candidate no longer reads as alive for the whole
   readiness budget, and a cooperative teardown no longer burns the full
   grace period on a corpse.** `spawn_daemon_with_env` never reaped its
