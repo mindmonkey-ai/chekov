@@ -76,6 +76,17 @@ fn chat_body(eff: &Effective, prompt: &str, max_tokens: u32) -> String {
     .to_string()
 }
 
+fn has_anthropic_thinking(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|response| response.get("content")?.as_array().cloned())
+        .is_some_and(|content| {
+            content
+                .iter()
+                .any(|block| block.get("type").and_then(|value| value.as_str()) == Some("thinking"))
+        })
+}
+
 fn door_request(cfg: &Config, path: &str, body: String) -> crate::core::hub::JsonRequest {
     crate::core::hub::JsonRequest {
         url: format!("{}{path}", cfg.base_url()),
@@ -109,17 +120,30 @@ fn check_openai(
 }
 
 fn check_anthropic(http: &dyn HttpClient, cfg: &Config, eff: &Effective) -> CheckStatus {
-    let req = door_request(
+    let first = door_request(
         cfg,
         "/v1/messages",
         chat_body(eff, "Reply with a short greeting.", 64),
     );
-    match http.post_json(&req) {
+    let body = match http.post_json(&first) {
+        Ok(body) => body,
+        Err(e) => return CheckStatus::Fail(e.to_string()),
+    };
+    if crate::core::checks::anthropic_content(&body).is_some() {
+        return CheckStatus::Pass;
+    }
+    if !has_anthropic_thinking(&body) {
+        return CheckStatus::Fail("no text block in response content".into());
+    }
+    let retry = door_request(
+        cfg,
+        "/v1/messages",
+        chat_body(eff, "Reply with a short greeting.", 512),
+    );
+    match http.post_json(&retry) {
         Err(e) => CheckStatus::Fail(e.to_string()),
-        Ok(body) => crate::core::checks::anthropic_content(&body).map_or_else(
-            || CheckStatus::Fail("no text block in response content".into()),
-            |_| CheckStatus::Pass,
-        ),
+        Ok(body) if crate::core::checks::anthropic_content(&body).is_some() => CheckStatus::Pass,
+        Ok(_) => CheckStatus::Fail("no text block after reasoning-aware retry".into()),
     }
 }
 
@@ -326,9 +350,9 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_door_without_text_still_fails() {
+    fn anthropic_door_without_text_or_thinking_still_fails() {
         let (cfg, eff) = fixture(false, None);
-        let http = SeqHttp::new(&[r#"{"content":[{"type":"thinking","thinking":"plan"}]}"#]);
+        let http = SeqHttp::new(&[r#"{"content":[]}"#]);
         assert_eq!(
             super::check_anthropic(&http, &cfg, &eff),
             CheckStatus::Fail("no text block in response content".into())
