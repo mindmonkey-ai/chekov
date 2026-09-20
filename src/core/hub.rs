@@ -475,14 +475,26 @@ fn derived_quant(path: &str) -> Option<String> {
     }
     let stem = stem.rsplit('/').next().unwrap_or(stem);
     let stem = strip_shard_suffix(stem);
-    // `-` and `.` both separate a tag from the model name: `Model-Q8_0` and
-    // `Model.Q4_K_M` (the mradermacher layout). A version dot (`Qwen2.5-…`)
-    // yields a candidate starting with a digit, which is not tag-like.
-    stem.char_indices()
-        .filter(|&(_, c)| c == '-' || c == '.')
-        .map(|(i, _)| &stem[i + 1..])
-        .find(|cand| quant_like(cand))
+    quant_boundaries(stem)
+        .find_map(|start| bounded_quant(&stem[start..]))
         .map(ToOwned::to_owned)
+}
+
+fn quant_boundaries(stem: &str) -> impl Iterator<Item = usize> + '_ {
+    std::iter::once(0).chain(
+        stem.char_indices()
+            .filter(|&(_, c)| matches!(c, '-' | '.' | '_'))
+            .map(|(i, c)| i + c.len_utf8()),
+    )
+}
+
+fn bounded_quant(candidate: &str) -> Option<&str> {
+    let search_from = usize::from(candidate.to_ascii_uppercase().starts_with("UD-")) * 3;
+    let end = candidate[search_from..]
+        .find(['-', '.'])
+        .map_or(candidate.len(), |i| search_from + i);
+    let token = &candidate[..end];
+    quant_like(token).then_some(token)
 }
 
 /// True for a file that is actually model weights.
