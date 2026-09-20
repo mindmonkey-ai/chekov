@@ -237,13 +237,24 @@ mod tests {
     /// Pops one canned response per POST, in order (§8.2 boundary fake).
     struct SeqHttp {
         responses: RefCell<VecDeque<String>>,
+        requests: RefCell<Vec<String>>,
     }
 
     impl SeqHttp {
         fn new(responses: &[&str]) -> Self {
             Self {
                 responses: RefCell::new(responses.iter().map(|s| (*s).to_owned()).collect()),
+                requests: RefCell::new(Vec::new()),
             }
+        }
+
+        fn requested_max_tokens(&self) -> Vec<u64> {
+            self.requests
+                .borrow()
+                .iter()
+                .map(|body| serde_json::from_str::<serde_json::Value>(body).expect("request JSON"))
+                .map(|body| body["max_tokens"].as_u64().expect("max_tokens"))
+                .collect()
         }
     }
 
@@ -252,7 +263,8 @@ mod tests {
             unreachable!("doctor never GETs")
         }
 
-        fn post_json(&self, _req: &JsonRequest) -> Result<String, ChekovError> {
+        fn post_json(&self, req: &JsonRequest) -> Result<String, ChekovError> {
+            self.requests.borrow_mut().push(req.body.clone());
             self.responses
                 .borrow_mut()
                 .pop_front()
@@ -301,6 +313,16 @@ mod tests {
         .to_string();
         let http = SeqHttp::new(&[&body]);
         assert_eq!(super::check_anthropic(&http, &cfg, &eff), CheckStatus::Pass);
+    }
+
+    #[test]
+    fn anthropic_door_retries_a_reasoning_only_short_reply_once() {
+        let (cfg, eff) = fixture(false, None);
+        let thinking_only = r#"{"content":[{"type":"thinking","thinking":"plan"}]}"#;
+        let answer = anthropic("hello");
+        let http = SeqHttp::new(&[thinking_only, &answer]);
+        assert_eq!(super::check_anthropic(&http, &cfg, &eff), CheckStatus::Pass);
+        assert_eq!(http.requested_max_tokens(), [64, 512]);
     }
 
     #[test]
