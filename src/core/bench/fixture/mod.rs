@@ -377,7 +377,7 @@ expect_contains = ["hello"]
                 .gold
                 .replace("base + i128::from(i < remainder)", "base"),
             "device-6-debit-boundary" => task.gold.replace("c.0 <= balance", "c.0 < balance"),
-            "device-7-format-exact" => "format!(\"{:.2}\", value.0 as f64 / 100.0)".to_owned(),
+            "device-7-format-exact" => "value.0.to_string()".to_owned(),
             "device-8-checked-arithmetic" => "Some(apply(cmd, balance))".to_owned(),
             _ => panic!("unknown hardened device {id}"),
         };

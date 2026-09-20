@@ -86,7 +86,7 @@ mod tests {
         );
         tree::assert_clean(&m.repo).expect("committed, nothing untracked");
         tree::head_sha(&m.repo).expect("a HEAD");
-        assert_eq!(m.hidden.len(), 4);
+        assert_eq!(m.hidden.len(), 6);
         assert!(m.hidden.iter().all(|(p, _)| p.starts_with("hidden/")));
     }
 
