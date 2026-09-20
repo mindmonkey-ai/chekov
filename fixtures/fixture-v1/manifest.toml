@@ -29,7 +29,7 @@
 
 version = 1
 id = "fixture-v1"
-content_hash = "068b719a1d81a68a435e4c1ef854d3ba30437a5554977df958cdfe29aefb63b5"
+content_hash = "529eecad2d3b94f60549271f5f8cca9028c8c35e25d3d34e7572ee852f05bc78"
 
 # Total task slots the release-gate campaign is measured against.
 # Ten are held in reserve (unreleased) so v1 can be hardened without renumbering
@@ -80,3 +80,23 @@ symbol = "debit_allowed"
 # Contract stated on LedgerError::InsufficientFunds: a Debit is refused only
 # when GREATER THAN the balance; a Debit of exactly the balance is allowed. The
 # tempting `< balance` guard compiles but refuses the exact-balance debit.
+
+[[tasks]]
+id = "device-7-format-exact"
+device = "exact cents formatting (no float precision or signed-abs overflow)"
+source = "src/domain/money.rs"
+hidden = "hidden/format_exact.rs"
+tier = 7
+symbol = "format_cents"
+# Currency renders with exactly two fractional digits for every i128 value.
+# Float conversion loses large values; signed abs overflows on i128::MIN.
+
+[[tasks]]
+id = "device-8-checked-arithmetic"
+device = "checked money arithmetic (overflow returns None)"
+source = "src/domain/money.rs"
+hidden = "hidden/checked_arithmetic.rs"
+tier = 7
+symbol = "checked_apply"
+# Credit and debit retain apply's direction but return None rather than wrapping
+# or panicking when the underlying i128 operation cannot be represented.
