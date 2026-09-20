@@ -1413,6 +1413,14 @@ mod tests {
     }
 
     #[test]
+    fn official_gemma_quant_before_variant_suffix_is_recognized() {
+        assert_eq!(
+            super::derived_quant("gemma-4-31B_q4_0-it.gguf").as_deref(),
+            Some("q4_0")
+        );
+    }
+
+    #[test]
     fn calibration_and_draft_artifacts_are_not_weights() {
         // Every one of these lives beside real quants in popular repos and
         // would otherwise be summed into a quant's size, or offered as one.
