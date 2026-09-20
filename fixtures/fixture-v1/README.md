@@ -31,7 +31,7 @@ it is not buildable in place: there is no `Cargo.toml` here to build against.
 Run it through `chekov capability bench --fixture --allow-exec`, or materialize
 it (see `fixture::materialize`) and `cargo test` in the materialized tree.
 
-## The four anti-saturation devices
+## The six anti-saturation devices
 
 These are what make the probe discriminate rather than saturate. Each device has
 a masked body the candidate writes and a held-out assertion in `hidden/` that the
@@ -43,6 +43,8 @@ grader injects:
 | 3 | Invariant trap — money is `i128` cents, never `f64` | `src/domain/money.rs` `from_str` | `hidden/invariant_exact.rs` | 7 |
 | 5 | Integer-remainder split conserves money | `src/domain/money.rs` `split_evenly` | `hidden/split_conserves.rs` | 7 |
 | 6 | Exact overdraft boundary | `src/domain/ledger.rs` `debit_allowed` | `hidden/debit_boundary.rs` | 7 |
+| 7 | Exact cents formatting across all `i128` values | `src/domain/money.rs` `format_cents` | `hidden/format_exact.rs` | 7 |
+| 8 | Checked credit/debit arithmetic | `src/domain/money.rs` `checked_apply` | `hidden/checked_arithmetic.rs` | 7 |
 
 **Device 2** — `apply_entry` and `append_entry` both compile and both return
 `Ok`; only `apply_entry` advances the projection. Choosing the wrong one fails
@@ -65,13 +67,22 @@ tempting `< balance` predicate compiles but refuses a debit equal to the
 balance. `debit_allowed` is a short exhaustive match at end of file, with no
 similar-signature method for an infill model to continue into.
 
+**Device 7** — cents render with exactly two fractional digits across the full
+`i128` range. Float formatting loses precision at large values, while signed
+absolute value overflows at `i128::MIN`; both shortcuts compile and fail the
+held-out exact-format cases.
+
+**Device 8** — credit and debit retain their arithmetic direction but report
+`None` when the result cannot fit in `i128`. Ordinary unchecked arithmetic
+compiles and passes common values, then fails the held-out overflow boundaries.
+
 ## Scoring tiers (capability-spec §9)
 
 This slice uses tier 7, after every fill passes tier 6:
 
 - **Tier 6 — compile gate:** `cargo check` (JSON diagnostics). A body the
   candidate writes must still compile before a held-out test can grade it.
-- **Tier 7 — test gate:** run only the specific covering test. All four devices
+- **Tier 7 — test gate:** run only the specific covering test. All six devices
   are graded here.
 
 Tiers 1–2 (whitespace exact match, edit similarity) are line-level and would
@@ -103,11 +114,11 @@ answered by pattern-matching a visible assertion; and the leakage filter from
 count printed, so the fixture's honesty is auditable by the same mechanism as a
 user repo's.
 
-## Release-gate status — NOT cleared
+## Release-gate status — CLEARED
 
-Per `IDEAS.md` and `capability-spec.md` §9, this compiled-in slice remains
-**release-gated**: it ships, but no published capability number rests on it
-until three models of clearly different capability produce a real spread.
+Per `IDEAS.md` and `capability-spec.md` §9, this compiled-in slice required three
+models of clearly different capability and at least two devices separating the
+27B candidate from both peers. The six-device campaign cleared that gate.
 
 - **Angle A (release gate) remains unmet.** Two campaigns on older corpus ids
   failed acceptance: the original devices saturated, and the first hardening
@@ -126,6 +137,14 @@ until three models of clearly different capability produce a real spread.
   are retained, compile, and fail only the hidden negative-total case; device 6
   passes all three models. The gate therefore remains closed for lack of a
   genuine separator, not because of a grading artifact.
+- **The six-device campaign clears Angle A.** Corpus
+  `fixture-v1:77eb000e280f`, grading identity `f93fc06b2db4`, scored 2/6 for
+  qwen3.5-9b, 4/6 for qwen3.8-27b, and 1/6 for ornith-1.5-35b-a3b. Device 3
+  (exact parsing) and device 7 (exact formatting) were both 27B-only passes,
+  meeting the binding two-separator threshold. Device 8 additionally separated
+  Ornith. Runs: `20260920T000547Z-qwen3.5-9b`,
+  `20260920T000602Z-qwen3.8-27b`, and
+  `20260920T000736Z-ornith-1.5-35b-a3b`.
 - **Angle B (runtime detector)** will be applied at run time: when every
   candidate scores above 90% or below 10% on a tier, the tier is reported, not
   ranked.
@@ -140,12 +159,12 @@ until three models of clearly different capability produce a real spread.
 ## Verification
 
 - In the materialized tree: clippy is warning-free and 21 unit tests pass.
-- All four held-out assertions compile against the real public API and pass
+- All six held-out assertions compile against the real public API and pass
   against the correct implementation.
-- Devices 5 and 6 are exercised end to end by the real-cargo gated test: each
+- Devices 5–8 are exercised end to end by the real-cargo gated test: each
   plausible wrong body compiles, then fails only its hidden assertion; each
   gold body passes.
-- Prompt assembly resolves all four devices in order and withholds each gold
+- Prompt assembly resolves all six devices in order and withholds each gold
   body and every checked held-out answer literal.
 
 ## Scope

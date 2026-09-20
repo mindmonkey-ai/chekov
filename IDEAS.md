@@ -2115,3 +2115,39 @@ passes for any candidate, so there are still zero genuine separators. The new
 grader removes reference-length artifacts but does not rescue this fixture's
 capability spread. The release gate stays closed; any further progress requires
 new device design rather than another grading-policy change.
+
+## fixture-v1 six-device campaign clears the release gate (2026-09-20)
+
+**Campaign:** corpus `fixture-v1:77eb000e280f`, unchanged grading identity
+`f93fc06b2db4`, temperature 0, engine `dcacec736`, machine `c057455fb3a1`.
+Runs: `eval/20260920T000547Z-qwen3.5-9b`,
+`eval/20260920T000602Z-qwen3.8-27b`, and
+`eval/20260920T000736Z-ornith-1.5-35b-a3b`.
+
+The four measured controls were retained. Two reserve-slot devices were added
+from observed model behavior: device 7 formats cents exactly across all `i128`
+values, and device 8 applies credit/debit arithmetic with checked overflow.
+Both passed the leakage gate and real-Cargo preflight: each plausible wrong body
+compiled and failed only its held-out assertion; each gold body passed.
+
+| device | qwen3.5-9b | qwen3.8-27b | ornith-1.5-35b-a3b |
+|---|---|---|---|
+| 2 near-miss API | test-fail | did not compile | test-fail |
+| 3 exact cents parse | test-fail | pass | did not compile |
+| 5 split conserves | test-fail | test-fail | did not compile |
+| 6 debit boundary | pass | pass | pass |
+| 7 exact cents format | test-fail | pass | did not compile |
+| 8 checked arithmetic | pass | pass | did not compile |
+| absolute tier 7 | 2 of 6 | 4 of 6 | 1 of 6 |
+
+Device 3 and device 7 are genuine 27B-only passes: both other candidates fail
+at compile or held-out semantics. Device 8 supplies an additional separation
+from Ornith, while device 6 remains the saturated control and devices 2/5
+remain the hard floor. Every row used the fixed 1440-token function-body cap,
+canonical lexical extraction, and persisted raw/evaluated fills.
+
+**Ruling:** the release gate is cleared. The binding threshold set by the first
+measurement was at least two devices separating the 27B from both peers; this
+campaign has exactly two, under the unchanged grader and a versioned new corpus.
+The result supports publishing fixture-v1 capability measurements without
+rewriting or discounting the earlier flat campaigns.
