@@ -214,6 +214,23 @@ pub(crate) fn matching_close(text: &str, open: usize) -> Option<usize> {
     None
 }
 
+/// First code `}` with no unmatched `{` before it. This is the lexical edge
+/// of a function-body fill: the brace belongs to the suffix the model was
+/// shown, so neither it nor anything after it is part of the evaluated body.
+pub(crate) fn first_unmatched_closing_brace(text: &str) -> Option<usize> {
+    let mut depth = 0_u64;
+    let mut scanner = Scanner::new(text);
+    while let Some((at, c)) = scanner.next_code_char() {
+        match c {
+            '{' => depth += 1,
+            '}' if depth == 0 => return Some(at),
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Statement spans inside a body: each line-aligned run that ends at a `;`
 /// or a balanced `}` at depth 0 relative to the body, 1–8 lines, balanced.
 fn statement_spans(text: &str, body: &Range<usize>) -> Vec<Candidate> {
@@ -406,7 +423,7 @@ fn literal_len(rest: &str) -> Option<usize> {
         return Some(rest.find('\n').map_or(rest.len(), |i| i));
     }
     if rest.starts_with("/*") {
-        return Some(rest.find("*/").map_or(rest.len(), |i| i + 2));
+        return Some(block_comment_len(rest));
     }
     if let Some(raw) = rest.strip_prefix('r') {
         let hashes = raw.chars().take_while(|c| *c == '#').count();
@@ -425,6 +442,32 @@ fn literal_len(rest: &str) -> Option<usize> {
         return Some(quoted_len(rest, '\''));
     }
     None
+}
+
+/// Rust block comments nest. Stop only when the outermost comment closes;
+/// treating an inner `*/` as the end would expose braces in the outer prose
+/// to the code scanner.
+fn block_comment_len(rest: &str) -> usize {
+    let bytes = rest.as_bytes();
+    let mut depth = 1_u64;
+    let mut pos = 2;
+    while pos + 1 < bytes.len() {
+        match (bytes[pos], bytes[pos + 1]) {
+            (b'/', b'*') => {
+                depth += 1;
+                pos += 2;
+            }
+            (b'*', b'/') => {
+                depth -= 1;
+                pos += 2;
+                if depth == 0 {
+                    return pos;
+                }
+            }
+            _ => pos += 1,
+        }
+    }
+    rest.len()
 }
 
 /// `'a'`, `'\n'`, `'\u{1F600}'` — but not a lifetime `'a `.

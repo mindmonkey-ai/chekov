@@ -179,15 +179,17 @@ expect_contains = ["hello"]
             )
         });
         assert_eq!(manifest.id, super::ID);
-        assert_eq!(manifest.tasks.len(), 4);
+        assert_eq!(manifest.tasks.len(), 6);
         let symbols: Vec<&str> = manifest.tasks.iter().map(|t| t.symbol.as_str()).collect();
         assert_eq!(
             symbols,
             [
-                "LimitedStore::record",
                 "handle_credit",
                 "from_str",
-                "replay_filtered"
+                "split_evenly",
+                "debit_allowed",
+                "format_cents",
+                "checked_apply"
             ]
         );
     }
@@ -201,8 +203,8 @@ expect_contains = ["hello"]
             .map(|(p, t)| ((*p).to_owned(), (*t).to_owned()))
             .collect();
         let named = super::named_tasks(&manifest, &hidden).expect("named");
-        assert_eq!(named.tasks.len(), 4);
-        assert_eq!(named.hidden.len(), 4);
+        assert_eq!(named.tasks.len(), 6);
+        assert_eq!(named.hidden.len(), 6);
         assert!(named.hidden.iter().all(|h| h.text.contains("#[test]")));
         assert!(
             named.corpus.starts_with("fixture-v1:")
@@ -236,16 +238,27 @@ expect_contains = ["hello"]
     }
 
     /// Each device's id, and the strings that would hand its answer over:
-    /// device 1's capacity comparison, device 2's two entry calls, device 3's
-    /// exact cents both ways, device 4's move capture.
-    const DEVICE_LEAKS: [(&str, &[&str]); 4] = [
-        ("device-1-store-limited-full", &[">= self.capacity"]),
+    /// device 2's two entry calls, device 3's exact cents both ways, and each
+    /// later device's held-out edge or implementation shortcut.
+    const DEVICE_LEAKS: [(&str, &[&str]); 6] = [
         (
             "device-2-near-miss-api",
             &[".apply_entry(", ".append_entry("],
         ),
         ("device-3-invariant-exact", &["249995", "2499.95"]),
-        ("device-4-lifetime-knot", &["move |"]),
+        (
+            "device-5-split-conserves",
+            &["[34, 33, 33]", "[-33, -33, -34]"],
+        ),
+        ("device-6-debit-boundary", &["100.01", "c.0 <= balance"]),
+        (
+            "device-7-format-exact",
+            &["1701411834604692317316873037158841057.28", "unsigned_abs()"],
+        ),
+        (
+            "device-8-checked-arithmetic",
+            &[".checked_add(", ".checked_sub("],
+        ),
     ];
 
     /// One task's prompt — prefix, suffix, and the extra file when it has one —
@@ -271,7 +284,7 @@ expect_contains = ["hello"]
     /// this one is ungated — it is the check that a content edit reopening a
     /// leak cannot pass CI.
     #[test]
-    fn the_four_devices_resolve_in_order_and_no_prompt_carries_its_answer() {
+    fn the_six_devices_resolve_in_order_and_no_prompt_carries_its_answer() {
         let scratch = std::env::temp_dir().join("chekov-test-fixture-resolve");
         let _ = std::fs::remove_dir_all(&scratch);
         let prepared = real_prepared(&scratch, false);
@@ -349,6 +362,63 @@ expect_contains = ["hello"]
             },
         );
         assert_test_score(&row, 1.0);
+        prepared.exec.finish().expect("cleanup");
+    }
+
+    fn assert_hardened_device(prepared: &codebase::Prepared, id: &str) {
+        let task = prepared
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .expect("hardened device");
+        let hidden = prepared.hidden.iter().find(|test| test.task_id == task.id);
+        let wrong = match id {
+            "device-5-split-conserves" => task
+                .gold
+                .replace("base + i128::from(i < remainder)", "base"),
+            "device-6-debit-boundary" => task.gold.replace("c.0 <= balance", "c.0 < balance"),
+            "device-7-format-exact" => "value.0.to_string()".to_owned(),
+            "device-8-checked-arithmetic" => "Some(apply(cmd, balance))".to_owned(),
+            _ => panic!("unknown hardened device {id}"),
+        };
+        assert_ne!(wrong, task.gold, "the wrong body must differ from gold");
+        let env = prepared.exec.env().expect("a toolchain");
+        let wrong_row = crossing_row(
+            env,
+            &exec::Crossing {
+                task,
+                fill: &wrong,
+                hidden,
+            },
+        );
+        assert_compiled(&wrong_row);
+        assert_test_score(&wrong_row, 0.0);
+        let gold_row = crossing_row(
+            env,
+            &exec::Crossing {
+                task,
+                fill: &task.gold,
+                hidden,
+            },
+        );
+        assert_test_score(&gold_row, 1.0);
+    }
+
+    /// Devices 5–8: each obvious wrong body compiles but fails its held-out
+    /// assertion, while the gold body passes. Gated on a real `cargo`.
+    #[test]
+    fn hardened_devices_compile_wrong_and_discriminate_at_the_test_gate() {
+        if std::env::var("CHEKOV_TEST_EXEC").as_deref() != Ok("1") {
+            eprintln!("skipping: set CHEKOV_TEST_EXEC=1 to run the fixture against a real cargo");
+            return;
+        }
+        let scratch = std::env::temp_dir().join("chekov-test-fixture-hardened");
+        let _ = std::fs::remove_dir_all(&scratch);
+        let prepared = real_prepared(&scratch, true);
+        assert_hardened_device(&prepared, "device-5-split-conserves");
+        assert_hardened_device(&prepared, "device-6-debit-boundary");
+        assert_hardened_device(&prepared, "device-7-format-exact");
+        assert_hardened_device(&prepared, "device-8-checked-arithmetic");
         prepared.exec.finish().expect("cleanup");
     }
 }

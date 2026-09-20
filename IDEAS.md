@@ -1937,3 +1937,217 @@ ornith-1.5-35b-a3b — about a minute per model.
 the 120B is out for lack of FIM support, not for being gone); the spread
 threshold is "at least two discriminating devices", not a tier-7 delta.
 Decision 2 (license exposure) is moot: the fixture is compiled in and public.
+
+## fixture-v1 hardening — first attempt failed acceptance (2026-09-19)
+
+**What was done.** On `feat/fixture-v1-harden`: retired device-1 (capacity)
+and device-4 (lifetime knot) into the reserve slots, kept device-2 (near-miss
+API) and device-3 (exact cents), and added two new device-3-shaped traps —
+device-5 (`Window::push`: newest-first + drop-oldest, contract in the module
+doc) and device-6 (`Ledger::apply_entry`: a `Debit` of exactly the balance
+must settle, not reject; contract on `LedgerError::InsufficientFunds`). Also
+wrapped `src/domain/tests.rs` in a `#[cfg(test)]` module so it can never
+surface as a visible answer key, and refreshed the `Cargo.toml.in` header.
+New corpus id `fixture-v1:16f311a1699a` (was `78fc70e6de1c`). Both new devices
+were pre-verified against real cargo in a scratch crate: gold passes, the
+obvious wrong body compiles and fails the held-out test.
+
+**Rerun (same stamp, temp 0, engine `dcacec736`, machine `c057455fb3a1`):**
+`eval/20260919T213142Z-qwen3.5-9b`, `eval/20260919T213203Z-qwen3.8-27b`,
+`eval/20260919T213323Z-ornith-1.5-35b-a3b`.
+
+| device | qwen3.5-9b | qwen3.8-27b | ornith-1.5-35b-a3b |
+|---|---|---|---|
+| 2 near-miss API | test-fail | did not compile | test-fail |
+| 3 exact cents | did not compile | pass | test-fail |
+| 5 window slide | pass | did not compile | pass |
+| 6 overdraft | did not compile | did not compile | did not compile |
+| tier 7 | 1 of 4 | 1 of 4 | 1 of 4 |
+
+**Reading — acceptance NOT met, and worse than the first measurement.**
+Tier 7 is a flat 1/1/1. The 27B passes only device-3, exactly one device —
+the target was two. Two failures made the new devices worthless as measured:
+
+- *Device-6 is a compile sink.* All three models fail it on the **compile
+  gate**, never reaching the boundary trap. `apply_entry`'s 15-line gold is
+  followed by the near-identical `append_entry`; under `/infill` every model
+  runs past the masked span and regenerates trailing methods, orphaning the
+  suffix's closing brace (predictions 3585 / 3904 chars against 880 gold). It
+  measures nothing.
+- *Device-5 "discriminated" for the wrong reason.* qwen3.5 and ornith pass it
+  cleanly; the 27B's only miss is the **same runaway** (958 chars, emitted new
+  `pub fn`s), not the newest-first trap. Weakest+strongest pass, mid fails on
+  a formatting artifact — noise, not signal.
+
+**Root cause: FIM boundary runaway, not the traps.** The scratch verification
+hand-wrote the bodies, so it proved the *traps* are sound but could not see
+that a live model overruns the mask when a **similar-signature neighbour sits
+in the suffix** (device-2's `handle_debit`, device-6's `append_entry`, the
+window's sibling accessors). Device-3 survives because its neighbour
+(`from_whole_dollars`) is dissimilar and its body ends cleanly. The first
+measurement already showed this on device-2 (27B "did not compile"); the two
+new devices inherited it.
+
+**Ruling:** `fixture-v1` stays release-gated — the gate is NOT cleared. The
+device change is a regression as-built and is not merged on its own.
+
+**Next — runaway-resistant redesign (in progress):** reshape the new devices
+so the masked body is short and self-contained and its file's *following*
+lines are not a body a model will keep writing (dissimilar or no neighbour, or
+end-of-impl). Re-verify against real cargo AND against the live trio before
+proposing any gate ruling. The `tests.rs` answer-key wrapping and the
+`Cargo.toml.in` refresh stand on their own regardless of the device outcome.
+
+## fixture-v1 hardening — runaway-resistant redesign ready (2026-09-19)
+
+The failed window/apply-entry pair above was not kept. Device 5 is now
+`money::split_evenly`, a short integer-remainder body followed only by an
+elided `#[cfg(test)]` module; device 6 is `ledger::debit_allowed`, a four-line
+exhaustive match at end of file. Neither has a similar-signature method in its
+suffix, so the boundary shape that caused the first rerun's runaway is gone.
+The held-out split assertion covers positive, negative, exact, and zero-part
+cases without exposing its values in prompt context; the debit assertion pins
+equal, below, above, and credit cases. New corpus id:
+`fixture-v1:068b719a1d81`.
+
+Preflight against real cargo is green: all fixture unit tests and all four
+held-out tests pass on the gold bodies; each new obvious wrong body still
+passes `cargo check` and fails only its held-out tier-7 test. The assembler
+resolves all four symbols and finds none of the gold or held-out answer
+literals in its own prompt. The release gate remains closed until the same
+three live models measure this corpus.
+
+## fixture-v1 hardening — runaway-resistant rerun still fails acceptance (2026-09-19)
+
+**Campaign:** corpus `fixture-v1:068b719a1d81`, temperature 0, engine
+`dcacec736`, machine `c057455fb3a1`. Runs:
+`eval/20260919T224905Z-qwen3.5-9b`,
+`eval/20260919T224926Z-qwen3.8-27b`, and
+`eval/20260919T225024Z-ornith-1.5-35b-a3b`.
+
+| device | qwen3.5-9b | qwen3.8-27b | ornith-1.5-35b-a3b |
+|---|---|---|---|
+| 2 near-miss API | test-fail | did not compile | test-fail |
+| 3 exact cents | test-fail | did not compile | did not compile |
+| 5 split conserves | test-fail | did not compile | did not compile |
+| 6 debit boundary | pass | pass | pass |
+| absolute tier 7 | 1 of 4 | 1 of 4 | 1 of 4 |
+
+**Reading — acceptance still NOT met.** Device 6 is now a clean crossing, but
+it saturates: all three models emit the correct short comparison. Device 5 no
+longer runs into a neighbouring method, yet it still does not measure the
+intended trap for two models. Its gold body is 11 lines; the 27B and Ornith
+both emitted syntactically complete, self-terminating 15-line alternatives.
+The execution splice grades only the first `gold_lines` lines, cutting each
+before its closing braces and producing an unclosed-delimiter compile failure.
+The 9B's compact body compiled and reached the hidden test, where its
+truncating division
+failed the negative-total case. This is line-budget sensitivity, not a
+capability spread.
+
+The existing devices add no rescue signal in this run: device 2 again elicits
+the near-miss API (the 27B adds a stray brace), while device 3's 27B answer
+runs into new methods and Ornith calls a helper that the trimmed fill does not
+retain. No model passes more than device 6.
+
+**Ruling:** the release gate remains closed. The target was at least two
+devices that genuinely separate the 27B from the other candidates; this run
+has zero. The branch is valid implementation evidence, but the device
+replacement is not a gate-clearing result and should not be represented as
+one. Any next redesign must first rule on body-level execution grading: either
+budget enough lines for semantically valid alternatives or stop trimming a
+self-terminated fill before cargo sees it.
+
+## Function-body grading ruling and counterfactual replay (2026-09-19)
+
+**Ruling implemented.** `function_body` predictions are now evaluated by a
+gold-independent lexical boundary. The raw reply remains auditable; a canonical
+fill stops before the first unmatched `}` outside Rust literals and nested
+comments, or retains the complete reply when it never crosses that boundary.
+Semantic tiers, symbol scoring, the judge, compilation, and tests all consume
+that same fill. Line-level tasks retain their existing gold-line policy.
+
+Function bodies receive a fixed 1440-token cap: the candidate class admits at
+most 40 body lines, and the established allowance is 36 tokens per line. This
+is fixed before sampling and does not reveal reference length. The grader
+version and cap ride in `prompt_set_hash`; old and new campaigns therefore
+refuse comparison and resume. New rows persist the evaluated fill and extraction
+outcome beside the raw reply. Historical rows keep their original read contract;
+the replay below is explicitly counterfactual, not a rewritten campaign.
+
+**Replay:** all 12 rows from the `20260919T224905Z`, `20260919T224926Z`, and
+`20260919T225024Z` runs were passed through the production extractor and the
+real Cargo compile/test gates. The two disputed device-5 fills (27B and Ornith)
+now compile, confirming that their old compile failures were grader-induced;
+both fail the held-out negative-total ordering case. Device 3's runaway output
+is cut at the function boundary, while genuinely malformed bodies remain
+compile failures. The corrected result is still 1/4 for every model, now with
+an honest taxonomy: device 6 passes all three and every other device fails on
+its model output rather than reference-line truncation. The release gate stays
+closed pending a fresh, identity-versioned campaign.
+
+## Function-body grading — post-ruling campaign remains flat (2026-09-19)
+
+**Campaign:** corpus `fixture-v1:068b719a1d81`, grading identity
+`f93fc06b2db4`, temperature 0, engine `dcacec736`, machine `c057455fb3a1`.
+Runs: `eval/20260919T235139Z-qwen3.5-9b`,
+`eval/20260919T235200Z-qwen3.8-27b`, and
+`eval/20260919T235259Z-ornith-1.5-35b-a3b`.
+
+| device | qwen3.5-9b | qwen3.8-27b | ornith-1.5-35b-a3b |
+|---|---|---|---|
+| 2 near-miss API | test-fail | did not compile | test-fail |
+| 3 exact cents | test-fail | test-fail | did not compile |
+| 5 split conserves | test-fail | test-fail | test-fail |
+| 6 debit boundary | pass | pass | pass |
+| absolute tier 7 | 1 of 4 | 1 of 4 | 1 of 4 |
+
+Every row used the fixed 1440-token body cap and persisted its raw reply,
+evaluated fill, and extraction outcome. Device 5 is now classified honestly:
+the 27B and Ornith 15-line alternatives remain unchanged, compile, and fail the
+held-out negative-total ordering assertion. The 27B device-3 runaway is cut
+from 1900 to 1033 bytes at its function boundary and reaches the hidden test;
+Ornith's body calls a helper emitted beyond that boundary, so its retained body
+correctly fails compilation with the helper absent.
+
+**Ruling:** acceptance remains unmet. Device 6 saturates and no other device
+passes for any candidate, so there are still zero genuine separators. The new
+grader removes reference-length artifacts but does not rescue this fixture's
+capability spread. The release gate stays closed; any further progress requires
+new device design rather than another grading-policy change.
+
+## fixture-v1 six-device campaign clears the release gate (2026-09-20)
+
+**Campaign:** corpus `fixture-v1:77eb000e280f`, unchanged grading identity
+`f93fc06b2db4`, temperature 0, engine `dcacec736`, machine `c057455fb3a1`.
+Runs: `eval/20260920T000547Z-qwen3.5-9b`,
+`eval/20260920T000602Z-qwen3.8-27b`, and
+`eval/20260920T000736Z-ornith-1.5-35b-a3b`.
+
+The four measured controls were retained. Two reserve-slot devices were added
+from observed model behavior: device 7 formats cents exactly across all `i128`
+values, and device 8 applies credit/debit arithmetic with checked overflow.
+Both passed the leakage gate and real-Cargo preflight: each plausible wrong body
+compiled and failed only its held-out assertion; each gold body passed.
+
+| device | qwen3.5-9b | qwen3.8-27b | ornith-1.5-35b-a3b |
+|---|---|---|---|
+| 2 near-miss API | test-fail | did not compile | test-fail |
+| 3 exact cents parse | test-fail | pass | did not compile |
+| 5 split conserves | test-fail | test-fail | did not compile |
+| 6 debit boundary | pass | pass | pass |
+| 7 exact cents format | test-fail | pass | did not compile |
+| 8 checked arithmetic | pass | pass | did not compile |
+| absolute tier 7 | 2 of 6 | 4 of 6 | 1 of 6 |
+
+Device 3 and device 7 are genuine 27B-only passes: both other candidates fail
+at compile or held-out semantics. Device 8 supplies an additional separation
+from Ornith, while device 6 remains the saturated control and devices 2/5
+remain the hard floor. Every row used the fixed 1440-token function-body cap,
+canonical lexical extraction, and persisted raw/evaluated fills.
+
+**Ruling:** the release gate is cleared. The binding threshold set by the first
+measurement was at least two devices separating the 27B from both peers; this
+campaign has exactly two, under the unchanged grader and a versioned new corpus.
+The result supports publishing fixture-v1 capability measurements without
+rewriting or discounting the earlier flat campaigns.

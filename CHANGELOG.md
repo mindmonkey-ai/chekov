@@ -7,15 +7,29 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Codebase `function_body` grading is now gold-independent. The raw model reply
+  is preserved, while one canonical evaluated fill stops before the first
+  unmatched closing brace outside Rust literals and nested comments; if none is
+  found, the complete reply is retained. Tiers 1–7, symbol scoring, judging,
+  compilation, and tests all consume those same bytes. Rows persist the
+  evaluated fill and extraction outcome beside the raw reply. Function bodies
+  receive a fixed 1440-token cap (40 eligible lines × 36), while line tasks keep
+  their existing gold-line policy. The grader version and cap join
+  `prompt_set_hash`, preventing resume or comparison across the ruling; legacy
+  rows retain their historical read contract. The six-device fixture-v1
+  campaign ran under identity `f93fc06b2db4` and scored 2/6, 4/6, and 1/6;
+  exact parsing and exact formatting were both 27B-only passes, clearing the
+  binding two-separator release gate.
 - `chekov capability bench --fixture --allow-exec` runs the compiled-in
   fixture-v1 (embedded by `build.rs` from `fixtures/fixture-v1/`) through
-  codebase mode: four bodies named by `manifest.toml` (`symbol`, with
+  codebase mode: six bodies named by `manifest.toml` (`symbol`, with
   `Owner::name` where a name repeats), the leakage filter and exclusion
   counts unchanged, and tier 7 grading against held-out tests that are
   written into the scratch checkout for one `cargo test` and removed after.
   The manifest's `content_hash` is verified against the embedded bytes at
   every run; the corpus id is `fixture-v1:<hash>`. `--fixture <PATH>` keeps
-  its external probe-set meaning. Release-gated per capability-spec §9.
+  its external probe-set meaning. Its capability-spec §9 release gate is
+  cleared by the published three-model spread.
 - Rulings 2026-09-15 (approved), from the tool-use lane measurement receipt:
   the forced-grammar arm of `grammar_gap` gets the tool cap (1024 tokens,
   from 256 — a model that thinks under the grammar stopped on `max_tokens`
@@ -321,6 +335,15 @@ All notable changes to chekov are recorded here. The format follows
   in the reason.
 
 ### Changed
+- fixture-v1 device set hardened for the release-gate measurement: retired
+  device-1 (capacity check) and device-4 (lifetime knot) into the reserve
+  slots and added device-5 (integer-remainder money conservation) and device-6
+  (overdraft exact boundary) — two short, end-of-file/device-neighbour-free
+  bodies whose contract is visible in source and whose obvious wrong body
+  compiles but fails a held-out test. `src/domain/tests.rs` is now a
+  `#[cfg(test)]` module so it can never surface as a visible answer key. The
+  corpus id is now `fixture-v1:068b719a1d81`. Its three-model campaign remained
+  flat at one pass each, so the fixture release gate stays closed.
 - README gains a "Tuning launch flags" runbook section between "Swapping
   models" and "Updating": the real `--dry-run` plan and the 2026-09-05 spec-
   stage report from this desk, what the `server` line means before you

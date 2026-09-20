@@ -131,7 +131,13 @@ pub fn eligibility(row: &CodebaseRow) -> Option<Eligibility<'_>> {
     {
         return Some(Eligibility::Skipped("did not compile"));
     }
-    let prediction = trimmed_to_gold(&row.gold, &row.prediction);
+    let legacy;
+    let prediction = if let Some(fill) = row.evaluated_prediction.as_deref() {
+        fill
+    } else {
+        legacy = trimmed_to_gold(&row.gold, &row.prediction);
+        &legacy
+    };
     if row.gold.trim() == prediction.trim() {
         return Some(Eligibility::Identical);
     }
@@ -140,7 +146,7 @@ pub fn eligibility(row: &CodebaseRow) -> Option<Eligibility<'_>> {
         before: last_lines(&row.prefix, CONTEXT_BEFORE_LINES),
         after: first_lines(&row.suffix, CONTEXT_AFTER_LINES),
         gold: cap(&row.gold),
-        prediction: cap(&prediction),
+        prediction: cap(prediction),
     }))
 }
 
@@ -297,6 +303,8 @@ mod tests {
             label: "<mask>".into(),
             gold: gold.into(),
             prediction: prediction.into(),
+            evaluated_prediction: None,
+            extraction: None,
             prefix: numbered_lines("before", 60),
             suffix: numbered_lines("after", 30),
             excluded: crate::core::bench::codebase::Excluded::default(),
@@ -371,6 +379,22 @@ mod tests {
             ),
             "no exec means no compile verdict to defer to"
         );
+    }
+
+    #[test]
+    fn the_judge_reads_the_persisted_evaluated_fill_not_the_raw_runaway() {
+        let mut stored = row(
+            TaskTier::FunctionBody,
+            "x = 1;",
+            "x = 1;\n}\nfn leaked() {}",
+        );
+        stored.evaluated_prediction = Some("x = 1;\n".into());
+        stored.extraction = Some(crate::core::bench::store::ExtractionRow {
+            outcome: crate::core::bench::codebase::ladder::ExtractionOutcome::FunctionBoundary,
+            cut_at: Some("x = 1;\n".len()),
+        });
+
+        assert!(matches!(eligibility(&stored), Some(Eligibility::Identical)));
     }
 
     #[test]

@@ -2674,8 +2674,13 @@ fn head_corpus(
 /// never carry the same hash (spec §6). A foreign run with no codebase suite
 /// sends no FIM prompt at all, and keeps today's value.
 fn wrapped_prompt_hash(inputs: &HeadInputs, base: String) -> String {
-    if inputs.runtime.is_some() && inputs.codebase.is_some() {
-        return crate::core::bench::runner::chat_fim_hash(&base);
+    if inputs.codebase.is_some() {
+        let fim = inputs
+            .runtime
+            .map_or(crate::core::bench::runner::FimTransport::Infill, |_| {
+                crate::core::bench::runner::FimTransport::Chat
+            });
+        return crate::core::bench::runner::codebase_hash(&base, fim);
     }
     base
 }
@@ -3752,11 +3757,27 @@ mod tests {
         );
     }
 
-    /// A codebase suite that rides the chat arm carries a DIFFERENT
-    /// prompt-set hash: the template is part of the prompt set, so a template
-    /// edit is a named stamp change and the two transports never match.
+    fn assert_codebase_hashes(base: &str, local: &str, chat: &str) {
+        use crate::core::bench::runner::{FimTransport, codebase_hash};
+        assert_eq!(
+            local,
+            codebase_hash(base, FimTransport::Infill),
+            "the local arm pins the grader and fixed body cap"
+        );
+        assert_ne!(local, base, "legacy runs have a different identity");
+        assert_eq!(
+            chat,
+            codebase_hash(base, FimTransport::Chat),
+            "the chat arm also pins its prompt template"
+        );
+        assert_ne!(chat, local, "the two FIM transports are distinct");
+    }
+
+    /// Every codebase run hashes the grading and budget policy; the chat arm
+    /// additionally hashes its template, so neither transport can impersonate
+    /// the other or a pre-ruling run.
     #[test]
-    fn a_foreign_codebase_hash_wraps_the_base() {
+    fn a_codebase_hash_pins_the_instrument_and_the_fim_transport() {
         use crate::core::bench::lifecycle::Suite;
         let plan = plan_fixture();
         let bench_cfg = crate::core::config::BenchSection::default();
@@ -3775,7 +3796,15 @@ mod tests {
             judge: None,
             runtime: None,
         };
-        let (base, corpus) = super::head_corpus(&local, &bench_cfg).expect("local hash");
+        let base = crate::core::bench::probes::suite_prompt_hash(
+            Suite::Throughput,
+            &plan,
+            crate::core::bench::probes::HashPins {
+                seed: bench_cfg.seed,
+                max_turns: bench_cfg.tool_loop_max_turns,
+            },
+        );
+        let (local_hash, corpus) = super::head_corpus(&local, &bench_cfg).expect("local hash");
         let spec = foreign_spec();
         let foreign = super::HeadInputs {
             runtime: Some(&spec),
@@ -3783,10 +3812,10 @@ mod tests {
         };
         let (wrapped, foreign_corpus) =
             super::head_corpus(&foreign, &bench_cfg).expect("chat hash");
+        assert_codebase_hashes(&base, &local_hash, &wrapped);
         assert_eq!(
-            wrapped,
-            crate::core::bench::runner::chat_fim_hash(&base),
-            "the chat arm's hash wraps today's value"
+            crate::core::bench::codebase::FUNCTION_BODY_MAX_TOKENS,
+            1_440
         );
         assert_eq!(foreign_corpus, corpus, "the corpus is the same task set");
     }
@@ -4110,6 +4139,8 @@ mod tests {
             label: "<mask>".into(),
             gold: "let a = 1;".into(),
             prediction: "let b = 2;".into(),
+            evaluated_prediction: None,
+            extraction: None,
             prefix: "fn f() {\n".into(),
             suffix: "\n}\n".into(),
             excluded: crate::core::bench::codebase::Excluded::default(),

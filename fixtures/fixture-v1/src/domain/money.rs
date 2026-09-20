@@ -1,6 +1,11 @@
 //! Money primitives. `Cents` is the one value with an invariant, so it is a
 //! newtype over `i128` (spec: newtypes for values with invariants; never
 //! construct it from an `f64`).
+//!
+//! Splitting money conserves it: `split_evenly` divides a total into `n` shares
+//! that **sum back to the exact total**, so the indivisible remainder cents are
+//! handed out one each to the earliest shares rather than dropped. The same
+//! conservation rule applies to positive and negative totals.
 
 /// A whole-number currency amount. `i128` cents: never an `f64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -53,6 +58,47 @@ pub fn apply(cmd: CreditCommand, balance: Cents) -> Cents {
     }
 }
 
+/// Render cents as signed decimal currency with exactly two fractional digits.
+/// The conversion is exact for every `i128`, including its minimum value.
+pub fn format_cents(value: Cents) -> String {
+    let negative = value.0 < 0;
+    let magnitude = value.0.unsigned_abs();
+    let dollars = magnitude / 100;
+    let cents = magnitude % 100;
+    format!(
+        "{}{}.{cents:02}",
+        if negative { "-" } else { "" },
+        dollars
+    )
+}
+
+/// Apply a command without wrapping or panicking when `i128` arithmetic cannot
+/// represent the result. The command direction matches [`apply`].
+pub fn checked_apply(cmd: CreditCommand, balance: Cents) -> Option<Cents> {
+    match cmd {
+        CreditCommand::Credit(c) => balance.0.checked_add(c.0).map(Cents),
+        CreditCommand::Debit(c) => balance.0.checked_sub(c.0).map(Cents),
+    }
+}
+
+/// Split `total` cents into `parts` shares that sum back to exactly `total`.
+///
+/// See the module invariant: money is conserved. The remainder cents that do
+/// not divide evenly are distributed one per share to the earliest shares,
+/// so the returned shares always sum to `total` — never dropped by integer
+/// division. `parts` of zero yields no shares.
+pub fn split_evenly(total: i128, parts: usize) -> Vec<i128> {
+    if parts == 0 {
+        return Vec::new();
+    }
+    let divisor = parts as i128;
+    let base = total.div_euclid(divisor);
+    let remainder = total.rem_euclid(divisor) as usize;
+    (0..parts)
+        .map(|i| base + i128::from(i < remainder))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,7 +116,10 @@ mod tests {
 
     #[test]
     fn from_str_rejects_nonsense() {
-        assert!(from_str("12.345").is_err(), "three fractional places reject");
+        assert!(
+            from_str("12.345").is_err(),
+            "three fractional places reject"
+        );
         assert!(from_str("abc").is_err(), "non-numeric rejects");
     }
 
