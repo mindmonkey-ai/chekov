@@ -188,6 +188,23 @@ fn is_noop(ctx: &Ctx, model: &NewModel, existing_rev: Option<&str>) -> bool {
             .exists()
 }
 
+fn finish_noop(
+    ctx: &Ctx,
+    model: &NewModel,
+    license_url: Option<&str>,
+) -> Result<ExitCode, ChekovError> {
+    if let Some(url) = license_url {
+        let dir = ctx.config.root.join(model.registry_path());
+        snapshot_base_license(ctx, url, &dir)?;
+    }
+    println!(
+        "'{}' is already at {} — verified no-op",
+        model.name,
+        model.dir_name()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 /// Register a fresh model, or — when the name already exists at an older
 /// revision — leave the registry untouched (§4.2.5: repointing is `update`'s
 /// gated job).
@@ -243,12 +260,7 @@ impl Command for PullCmd {
         let reg = ctx.registry()?;
         let existing_rev = reg.models.get(&model.name).map(|e| e.revision.clone());
         if is_noop(ctx, &model, existing_rev.as_deref()) {
-            println!(
-                "'{}' is already at {} — verified no-op",
-                model.name,
-                model.dir_name()
-            );
-            return Ok(ExitCode::SUCCESS);
+            return finish_noop(ctx, &model, self.license_url.as_deref());
         }
         let dir = materialize(ctx, &model, &plan)?;
         if let Some(url) = &self.license_url {
