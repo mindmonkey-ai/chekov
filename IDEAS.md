@@ -2151,3 +2151,31 @@ measurement was at least two devices separating the 27B from both peers; this
 campaign has exactly two, under the unchanged grader and a versioned new corpus.
 The result supports publishing fixture-v1 capability measurements without
 rewriting or discounting the earlier flat campaigns.
+
+## Official Google versus Unsloth Gemma 4 quant comparison (2026-09-21)
+
+**Campaign:** two strict-comparable 215-row `--suite all` runs on Apple M3
+Ultra, engine `49dca9b40`, machine `c057455fb3a1`, context 98304, seed 42,
+temperature 0, prompt-set hash `e78bf477c92a`, and corpus
+`throughput-v1+agentic-v0:d52a0d19be70`. Run
+`20260921T014950Z-gemma-4-31b-it-qat-google` measured Google's official `q4_0`
+file at revision `59dde24573e7e61570dba08b18a2e1fe246955ed`; run
+`20260921T022734Z-gemma-4-31b-it-qat` measured Unsloth's `UD-Q4_K_XL` file at
+revision `43cc1aeb31adf47ec06a854507ce552cd9862e6f`.
+
+| Stack | Tools | Forced grammar | Instructions | Loops |
+|---|---:|---:|---:|---:|
+| Google Q4_0 | 38/39 | 30/30 | 39/40 | 10/12 |
+| Unsloth UD-Q4_K_XL | 38/39 | 30/30 | 40/40 | 10/12 |
+
+Buffered and streamed verdicts agree with these totals. The only separating
+case is `if-013`: Google's quant fails the required `retry` substring on both
+transports, while Unsloth passes. The throughput comparison reports no
+significant difference at every measured depth: Google versus Unsloth is 28.5
+versus 28.8 tok/s at 1024, 27.8 versus 28.1 at 4096, and 25.3 versus 25.7 at
+16384. Neither stack measured the codebase suite in this campaign.
+
+**Decision:** do not promote Google's official Q4_0. Keep Unsloth
+`UD-Q4_K_XL` as the preferred Gemma 4 quality stack: it retains the one-case
+instruction advantage without a significant throughput loss. Both artifacts
+remain registered; this measurement changes no default or model configuration.
