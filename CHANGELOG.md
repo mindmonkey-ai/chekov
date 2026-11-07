@@ -7,6 +7,12 @@ All notable changes to chekov are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Published the strict 215-row official-Google versus Unsloth Gemma 4 quant
+  comparison. Both stacks score 38/39 tools, 30/30 forced grammar, and 10/12
+  loops; Unsloth scores 40/40 instructions against Google's 39/40, while all
+  three throughput depths show no significant difference. The recorded
+  decision keeps Unsloth `UD-Q4_K_XL` as the preferred Gemma quality stack and
+  does not promote Google's official Q4_0 or change any default.
 - Codebase `function_body` grading is now gold-independent. The raw model reply
   is preserved, while one canonical evaluated fill stops before the first
   unmatched closing brace outside Rust literals and nested comments; if none is
